@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://csswitch.local/schema/release-candidate.v1.schema.json",
+  "title": "CSSwitch future release candidate v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "version", "candidate_head_sha", "previous_release", "gate_ids", "evidence_manifest", "test_result_schema"],
+  "properties": {
+    "schema": {"const": "release-candidate.v1"},
+    "version": {"type": "string", "pattern": "^v[0-9]{1,4}\\.[0-9]{1,4}\\.[0-9]{1,4}$", "maxLength": 32},
+    "candidate_head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$", "maxLength": 40},
+    "previous_release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tag", "tag_object_sha", "peeled_sha"],
+      "properties": {
+        "tag": {"type": "string", "pattern": "^v[0-9]{1,4}\\.[0-9]{1,4}\\.[0-9]{1,4}$", "maxLength": 32},
+        "tag_object_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$", "maxLength": 40},
+        "peeled_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$", "maxLength": 40}
+      }
+    },
+    "gate_ids": {"type": "array", "minItems": 1, "maxItems": 16, "uniqueItems": true, "items": {"type": "string", "pattern": "^GATE-[A-Z0-9][A-Z0-9-]{0,31}$", "maxLength": 37}},
+    "evidence_manifest": {"type": "string", "const": "evidence-manifest.v1"},
+    "test_result_schema": {"type": "string", "const": "test-result.v1"}
+  }
+}

@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://csswitch.local/schema/test-result.v1.schema.json",
+  "title": "CSSwitch future test result v1",
+  "oneOf": [
+    {"$ref": "#/$defs/PassResultV1"},
+    {"$ref": "#/$defs/FailureResultV1"},
+    {"$ref": "#/$defs/FlakyResultV1"},
+    {"$ref": "#/$defs/QuarantinedResultV1"},
+    {"$ref": "#/$defs/ReadinessTimeoutResultV1"},
+    {"$ref": "#/$defs/BlockedResultV1"}
+  ],
+  "$defs": {
+    "CommonResultV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "entrypoint_id", "outcome", "classification", "gate_decision", "exit_code", "attempts", "evidence_layer", "source_sha", "release_tag"],
+      "properties": {
+        "schema": {"const": "test-result.v1"},
+        "entrypoint_id": {"type": "string", "pattern": "^ENTRY-[A-Z0-9][A-Z0-9-]{0,31}$", "maxLength": 38},
+        "outcome": {"type": "string", "enum": ["PASS", "FAIL", "IGNORED", "SKIPPED", "TIMEOUT", "INFRA_ERROR", "ENV-BLOCKED", "NEEDS-REAL-MACHINE", "NOT-RUN"]},
+        "classification": {"type": "string", "enum": ["NONE", "READINESS_TIMEOUT", "FLAKY", "QUARANTINED"]},
+        "gate_decision": {"type": "string", "enum": ["PASS", "BLOCKED", "FAIL"]},
+        "exit_code": {"type": "integer", "minimum": 0, "maximum": 255, "description": "The real recorded process/parent OS exit code captured by a future run-evidence executor."},
+        "attempts": {"type": "integer", "minimum": 1, "maximum": 8},
+        "evidence_layer": {"type": "string", "enum": ["source-test", "isolated-test-app", "final-dmg", "installed-final", "live", "signing", "public"]},
+        "source_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$", "maxLength": 40},
+        "release_tag": {"type": "string", "pattern": "^v[0-9]{1,4}\\.[0-9]{1,4}\\.[0-9]{1,4}$", "maxLength": 32}
+      }
+    },
+    "PassResultV1": {
+      "allOf": [
+        {"$ref": "#/$defs/CommonResultV1"},
+        {"properties": {"outcome": {"const": "PASS"}, "classification": {"const": "NONE"}, "gate_decision": {"const": "PASS"}, "exit_code": {"const": 0}}}
+      ]
+    },
+    "FailureResultV1": {
+      "allOf": [
+        {"$ref": "#/$defs/CommonResultV1"},
+        {"properties": {"outcome": {"enum": ["FAIL", "INFRA_ERROR"]}, "classification": {"const": "NONE"}, "gate_decision": {"enum": ["BLOCKED", "FAIL"]}, "exit_code": {"minimum": 1}}}
+      ]
+    },
+    "FlakyResultV1": {
+      "allOf": [
+        {"$ref": "#/$defs/CommonResultV1"},
+        {"properties": {"outcome": {"enum": ["FAIL", "IGNORED", "SKIPPED", "TIMEOUT", "INFRA_ERROR", "ENV-BLOCKED", "NEEDS-REAL-MACHINE", "NOT-RUN"]}, "classification": {"const": "FLAKY"}, "gate_decision": {"const": "BLOCKED"}, "exit_code": {"minimum": 1}}}
+      ]
+    },
+    "QuarantinedResultV1": {
+      "allOf": [
+        {"$ref": "#/$defs/CommonResultV1"},
+        {"properties": {"outcome": {"enum": ["FAIL", "IGNORED", "SKIPPED", "TIMEOUT", "INFRA_ERROR", "ENV-BLOCKED", "NEEDS-REAL-MACHINE", "NOT-RUN"]}, "classification": {"const": "QUARANTINED"}, "gate_decision": {"const": "BLOCKED"}, "exit_code": {"minimum": 1}}}
+      ]
+    },
+    "ReadinessTimeoutResultV1": {
+      "allOf": [
+        {"$ref": "#/$defs/CommonResultV1"},
+        {"properties": {"outcome": {"const": "TIMEOUT"}, "classification": {"const": "READINESS_TIMEOUT"}, "gate_decision": {"const": "BLOCKED"}, "exit_code": {"minimum": 1}}}
+      ]
+    },
+    "BlockedResultV1": {
+      "allOf": [
+        {"$ref": "#/$defs/CommonResultV1"},
+        {"properties": {"outcome": {"enum": ["IGNORED", "SKIPPED", "ENV-BLOCKED", "NEEDS-REAL-MACHINE", "NOT-RUN"]}, "classification": {"enum": ["NONE", "READINESS_TIMEOUT"]}, "gate_decision": {"const": "BLOCKED"}, "exit_code": {"minimum": 1}}}
+      ]
+    }
+  }
+}

@@ -1,0 +1,305 @@
+#!/usr/bin/env python3
+"""Focused source/unit tests for the quality kernel.
+
+The tests use in-memory malicious fixtures and read-only inspection of the
+current repository.  They do not run providers, Science, SSH, databases,
+network, installed apps, or the existing run_all gate.
+"""
+
+import copy
+import pathlib
+import tempfile
+import unittest
+
+try:
+    from validate_quality_metadata import PRODUCT_BUG_IDS, Validator, ROOT
+except ModuleNotFoundError:
+    from test.quality.validate_quality_metadata import PRODUCT_BUG_IDS, Validator, ROOT
+
+
+class QualityKernelFocused(unittest.TestCase):
+    def fresh(self):
+        validator = Validator(ROOT)
+        validator.load_schemas()
+        validator.load_data()
+        validator.errors = []
+        return validator
+
+    def errors_after(self, validator, method):
+        validator.errors = []
+        method()
+        return "\n".join(validator.errors)
+
+    def test_metadata_registry_is_closed_and_product_eight_are_independent(self):
+        validator = self.fresh()
+        self.assertTrue(validator.run("metadata"), "\n".join(validator.errors))
+        self.assertEqual(PRODUCT_BUG_IDS, {bug_id for bug_id in validator.bugs if bug_id in PRODUCT_BUG_IDS})
+        for bug_id in PRODUCT_BUG_IDS:
+            bug = validator.bugs[bug_id]
+            self.assertEqual(bug["resolution_state"], "open-not-fixed")
+            self.assertEqual(len(bug["change_ids"]), 1)
+            self.assertTrue(any(gate.startswith("GATE-") for gate in bug["expected_gate_ids"]))
+
+    def test_unknown_field_and_foreign_key_fail(self):
+        validator = self.fresh()
+        requirement_schema = validator.kernel["$defs"]["RequirementV1"]
+        before = len(validator.errors)
+        validator.validate_instance({"id": "REQ-BAD", "unknown": True}, requirement_schema, validator.kernel, "fixture.requirement")
+        self.assertGreater(len(validator.errors), before)
+        validator = self.fresh()
+        validator.changes["CHG-QUALITY-KERNEL"]["requirement_ids"] = ["REQ-NOT-REAL"]
+        errors = self.errors_after(validator, validator.check_references)
+        self.assertIn("unknown requirement foreign key REQ-NOT-REAL", errors)
+
+    def test_duplicate_cycle_and_tombstone_fail(self):
+        validator = self.fresh()
+        duplicate = copy.deepcopy(validator.bugs["BUG-083-RC"])
+        validator.add_record(validator.bugs, duplicate, "bug", "malicious-duplicate")
+        self.assertTrue(any("duplicate global ID BUG-083-RC" in error for error in validator.errors))
+
+        validator = self.fresh()
+        validator.requirements["REQ-083-SCHEMA"]["depends_on"] = ["REQ-083-FOCUSED"]
+        validator.requirements["REQ-083-FOCUSED"]["depends_on"] = ["REQ-083-SCHEMA"]
+        errors = self.errors_after(validator, validator.check_requirement_cycles)
+        self.assertIn("requirement dependency cycle", errors)
+
+        validator = self.fresh()
+        validator.bugs["BUG-083-RC"]["status"] = "retired"
+        validator.bugs["BUG-083-RC"]["resolution_state"] = "retired"
+        validator.bugs["BUG-083-RC"]["retirement"] = None
+        errors = self.errors_after(validator, validator.check_lifecycle)
+        self.assertIn("retired record requires a tombstone", errors)
+
+    def test_illegal_high_risk_exemption_fails_closed(self):
+        validator = self.fresh()
+        impact = validator.changes["CHG-QUALITY-KERNEL"]["test_impact"]
+        impact["kind"] = "not-yet-automatable"
+        errors = self.errors_after(validator, validator.check_test_impact)
+        self.assertIn("high-risk change cannot use manual-evidence/not-yet-automatable", errors)
+
+    def test_lineage_target_and_base_rules_fail(self):
+        validator = self.fresh()
+        self.assertNotIn("candidate_head_sha", validator.lineage)
+        validator.lineage["previous_release"]["tag_object_sha"] = "0" * 40
+        errors = self.errors_after(validator, validator.check_lineage)
+        self.assertIn("refs/tags/v0.8.2 does not match tag_object_sha", errors)
+        validator = self.fresh()
+        errors = self.errors_after(validator, lambda: validator.check_impact("impact-pr", None))
+        self.assertIn("impact-pr requires an explicit --target-ref", errors)
+        validator = self.fresh()
+        errors = self.errors_after(validator, lambda: validator.check_impact("impact-pr", "ref-that-does-not-exist"))
+        self.assertIn("target ref does not resolve", errors)
+
+    def test_dirty_untracked_unknown_and_rename_delete_fail(self):
+        validator = self.fresh()
+        errors = self.errors_after(validator, lambda: validator.check_changed_paths([("??", "mystery-production/file.py")], "impact-release"))
+        self.assertIn("unknown production path", errors)
+        errors = self.errors_after(validator, lambda: validator.check_changed_paths([("D", "quality/requirements.v1.json")], "impact-release"))
+        self.assertIn("rename/delete/copy status is fail-closed", errors)
+        errors = self.errors_after(validator, lambda: validator.check_impact("impact-release", None))
+        self.assertIn("worktree must be clean", errors)
+
+    def test_orphan_and_cargo_manifest_inventory_is_closed(self):
+        validator = self.fresh()
+        orphan_ids = {
+            "SUITE-ORPHAN-AGGREGATOR",
+            "SUITE-ORPHAN-RETRY",
+            "SUITE-ORPHAN-SKILL-BRIDGE",
+            "SUITE-ORPHAN-SKILL-BOUNDARY",
+        }
+        self.assertTrue(orphan_ids.issubset(validator.suites))
+        self.assertTrue(all(validator.suites[item]["expected_status"] != "PASS" for item in orphan_ids))
+        manifests = sorted((ROOT / "desktop").glob("**/Cargo.toml"))
+        self.assertEqual(
+            {path.relative_to(ROOT).as_posix() for path in manifests},
+            {
+                "desktop/codex-network/Cargo.toml",
+                "desktop/gateway/Cargo.toml",
+                "desktop/skill-package/Cargo.toml",
+                "desktop/src-tauri/Cargo.toml",
+            },
+        )
+        catalog_paths = {path for suite in validator.suites.values() for path in suite["source_paths"]}
+        self.assertTrue({path.relative_to(ROOT).as_posix() for path in manifests}.issubset(catalog_paths))
+
+    def test_test_result_pass_marker_exit7_fails(self):
+        validator = self.fresh()
+        schema = validator.schemas["test-result.v1.schema.json"]
+        valid = {
+            "schema": "test-result.v1",
+            "entrypoint_id": "ENTRY-PASS-MARKER",
+            "outcome": "PASS",
+            "classification": "NONE",
+            "gate_decision": "PASS",
+            "exit_code": 0,
+            "attempts": 1,
+            "evidence_layer": "source-test",
+            "source_sha": "0" * 40,
+            "release_tag": "v0.8.3",
+        }
+        validator.validate_instance(valid, schema, schema, "fixture.valid-result")
+        validator.check_test_result_semantics(valid)
+        self.assertFalse(validator.errors)
+        invalid = dict(valid)
+        invalid["exit_code"] = 7
+        validator.errors = []
+        validator.validate_instance(invalid, schema, schema, "fixture.pass-marker-exit7")
+        validator.check_test_result_semantics(invalid)
+        errors = "\n".join(validator.errors)
+        self.assertIn("must match exactly one schema branch", errors)
+        self.assertIn("PASS requires exit_code=0", errors)
+
+    def test_test_result_three_dimensions_reject_contradictions_and_bind_downstream(self):
+        validator = self.fresh()
+        schema = validator.schemas["test-result.v1.schema.json"]
+        base = {
+            "schema": "test-result.v1",
+            "entrypoint_id": "ENTRY-BOUNDARY",
+            "outcome": "FAIL",
+            "classification": "NONE",
+            "gate_decision": "FAIL",
+            "exit_code": 7,
+            "attempts": 1,
+            "evidence_layer": "source-test",
+            "source_sha": "0" * 40,
+            "release_tag": "v0.8.3",
+        }
+        validator.validate_instance(base, schema, schema, "fixture.valid-fail")
+        validator.check_test_result_semantics(base)
+        self.assertFalse(validator.errors)
+
+        for name, invalid in (
+            ("fail-exit0", dict(base, exit_code=0)),
+            ("missing-dimensions", {key: value for key, value in base.items() if key not in {"outcome", "classification", "gate_decision"}}),
+            ("flaky-pass", dict(base, outcome="PASS", classification="FLAKY", gate_decision="BLOCKED", exit_code=0)),
+            ("env-pass", dict(base, outcome="ENV-BLOCKED", classification="NONE", gate_decision="PASS", exit_code=7)),
+        ):
+            validator.errors = []
+            validator.validate_instance(invalid, schema, schema, "fixture." + name)
+            validator.check_test_result_semantics(invalid)
+            self.assertTrue(validator.errors, name)
+
+        evidence_schema = validator.schemas["evidence-manifest.v1.schema.json"]
+        evidence = {
+            "schema": "evidence-manifest.v1",
+            "version": "v0.8.3",
+            "evidence": [{
+                "evidence_id": "EVID-BOUNDARY",
+                "layer": "source-test",
+                "result_schema": "test-result.v1",
+                "outcome": "PASS",
+                "classification": "NONE",
+                "gate_decision": "PASS",
+                "exit_code": 0,
+                "source_sha": "0" * 40,
+                "reference": "source-test fixture"
+            }]
+        }
+        validator.errors = []
+        validator.validate_instance(evidence, evidence_schema, evidence_schema, "fixture.evidence-manifest")
+        self.assertFalse(validator.errors)
+
+        valid_downstream = copy.deepcopy(evidence)
+        valid_downstream["evidence"][0].update(
+            outcome="FAIL",
+            classification="NONE",
+            gate_decision="FAIL",
+            exit_code=7,
+        )
+        validator.errors = []
+        validator.validate_instance(valid_downstream, evidence_schema, evidence_schema, "fixture.valid-downstream-evidence")
+        self.assertFalse(validator.errors)
+
+        malicious_downstream = copy.deepcopy(evidence)
+        malicious_downstream["evidence"][0].update(
+            outcome="PASS",
+            classification="FLAKY",
+            gate_decision="BLOCKED",
+            exit_code=0,
+        )
+        validator.errors = []
+        validator.validate_instance(malicious_downstream, evidence_schema, evidence_schema, "fixture.pass-flaky-blocked-zero")
+        self.assertIn("must match exactly one schema branch", "\n".join(validator.errors))
+
+        run_schema = validator.schemas["run-manifest.v1.schema.json"]
+        run_manifest = {
+            "schema": "run-manifest.v1",
+            "version": "v0.8.3",
+            "entries": [{
+                "entrypoint_id": "ENTRY-BOUNDARY",
+                "command": "future runner",
+                "owner": "quality-kernel",
+                "evidence_layer": "source-test",
+                "result_schema": "test-result.v1",
+                "required_for": ["source-test-gate"]
+            }]
+        }
+        validator.errors = []
+        validator.validate_instance(run_manifest, run_schema, run_schema, "fixture.run-manifest")
+        self.assertFalse(validator.errors)
+        candidate_schema = validator.schemas["release-candidate.v1.schema.json"]
+        candidate = {
+            "schema": "release-candidate.v1",
+            "version": "v0.8.3",
+            "candidate_head_sha": "0" * 40,
+            "previous_release": {"tag": "v0.8.2", "tag_object_sha": "0" * 40, "peeled_sha": "1" * 40},
+            "gate_ids": ["GATE-QUALITY-RELEASE"],
+            "evidence_manifest": "evidence-manifest.v1",
+            "test_result_schema": "test-result.v1"
+        }
+        validator.errors = []
+        validator.validate_instance(candidate, candidate_schema, candidate_schema, "fixture.release-candidate")
+        self.assertFalse(validator.errors)
+
+    def test_production_policy_requires_active_change_and_exact_policy_closure(self):
+        validator = self.fresh()
+        change = validator.changes["CHG-QUALITY-KERNEL"]
+        change["test_impact"]["required_suite_ids"] = ["SUITE-PY-OFFLINE"]
+        change["test_impact"]["required_gate_ids"] = ["GATE-S0-LEGACY"]
+        errors = self.errors_after(
+            validator,
+            lambda: validator.check_changed_paths([("M", "quality/schema/test-result.v1.schema.json")], "impact-pr"),
+        )
+        self.assertIn("misses policy required suites", errors)
+        self.assertIn("misses policy required gates", errors)
+
+        validator = self.fresh()
+        validator.changes["CHG-QUALITY-KERNEL"]["status"] = "retired"
+        errors = self.errors_after(
+            validator,
+            lambda: validator.check_changed_paths([("M", "quality/schema/test-result.v1.schema.json")], "impact-pr"),
+        )
+        self.assertIn("no active matching ChangeRecordV1", errors)
+
+    def test_replacement_cycle_and_retired_gate_need_tombstone(self):
+        validator = self.fresh()
+        validator.suites["SUITE-QUALITY-METADATA"]["replacement_id"] = "SUITE-QUALITY-FOCUSED"
+        validator.suites["SUITE-QUALITY-FOCUSED"]["replacement_id"] = "SUITE-QUALITY-METADATA"
+        errors = self.errors_after(validator, validator.check_replacement_graph)
+        self.assertIn("replacement graph cycle", errors)
+        validator = self.fresh()
+        gate = validator.gates["GATE-QUALITY-META"]
+        gate["status"] = "retired"
+        gate["replacement_id"] = "GATE-QUALITY-PR"
+        gate["retirement"] = None
+        errors = self.errors_after(validator, validator.check_lifecycle)
+        self.assertIn("retired gate requires a tombstone", errors)
+
+    def test_discovery_is_dynamic_and_unregistered_fixture_fails(self):
+        validator = self.fresh()
+        self.assertEqual(set(validator.catalog["discovery_paths"]), validator.discover_catalog_paths())
+        with tempfile.TemporaryDirectory() as directory:
+            fixture_root = pathlib.Path(directory)
+            fixture = fixture_root / "test" / "test_new_fixture.py"
+            fixture.parent.mkdir()
+            fixture.write_text("# temporary discovery fixture\n", encoding="utf-8")
+            self.assertIn("test/test_new_fixture.py", Validator(fixture_root).discover_catalog_paths())
+        errors = self.errors_after(
+            validator,
+            lambda: validator.check_discovery_set(set(validator.catalog["discovery_paths"]), set(validator.catalog["discovery_paths"]) | {"test/test_new_fixture.py"}),
+        )
+        self.assertIn("discovered entrypoint is not registered", errors)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

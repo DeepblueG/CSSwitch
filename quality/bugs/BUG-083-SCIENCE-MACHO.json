@@ -1,0 +1,34 @@
+{
+  "schema": "bug-record.v1",
+  "bug": {
+    "id": "BUG-083-SCIENCE-MACHO",
+    "version": "v0.8.3",
+    "title": "Science Mach-O metadata is incorrectly rejected",
+    "summary": "The v0.8.3 product issue is the independent risk that valid Science Mach-O metadata can be rejected at the production identity boundary; parser, signing, installed, and live claims remain separate.",
+    "status": "active",
+    "owner": "science-runtime",
+    "severity": "P1",
+    "claim_state": "unknown",
+    "reproduction_state": "not-run-current-target",
+    "resolution_state": "open-not-fixed",
+    "affected_paths": ["desktop/src-tauri/src/runtime/science.rs", "desktop/src-tauri/src/runtime/sandbox_session.rs", "test/run_all.sh"],
+    "requirement_ids": ["REQ-083-MACHO-METADATA", "REQ-083-SCIENCE-UPDATER", "REQ-083-EVIDENCE"],
+    "change_ids": ["CHG-SCIENCE-MACHO"],
+    "expected_suite_ids": ["SUITE-PRODUCT-MACHO", "SUITE-QUALITY-FOCUSED"],
+    "expected_gate_ids": ["GATE-SCIENCE-MACHO", "GATE-QUALITY-RELEASE"],
+    "evidence_boundary": {
+      "allowed_layers": ["source-test"],
+      "excluded_layers": ["isolated-test-app", "final-dmg", "installed-final", "live", "signing", "public"],
+      "basis": [".agents/rules/science-runtime.md", "product issue registration; no current parser rerun"]
+    },
+    "reproduction": {
+      "state": "not-run-current-target",
+      "steps": ["Exercise valid, malformed, and mismatched Science Mach-O metadata in an isolated fixture.", "Compare parser rejection with the intended identity contract."],
+      "observed": "The product issue is registered as open; no current parser, final Mach-O, signing, or installed-runtime result is asserted here.",
+      "not_claimed": ["isolated-test-app", "final-dmg", "installed-final", "live", "signing", "public"]
+    },
+    "confirmed_facts": [{"statement": "The Science Mach-O metadata rejection concern is registered as an independent source-only product boundary.", "evidence_ref": ".agents/rules/science-runtime.md", "verification_status": "confirmed"}],
+    "hypotheses": [{"statement": "Valid Mach-O metadata may be rejected by the parser before signing or installed-runtime checks; the current target has not been run.", "evidence_ref": "docs/audits/v082-change-audit.md", "verification_status": "unknown"}],
+    "retirement": null
+  }
+}

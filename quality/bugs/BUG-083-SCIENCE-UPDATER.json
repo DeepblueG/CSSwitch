@@ -1,0 +1,25 @@
+{
+  "schema": "bug-record.v1",
+  "bug": {
+    "id": "BUG-083-SCIENCE-UPDATER",
+    "version": "v0.8.3",
+    "title": "Science check-only and CSSwitch updater behavior are not closed",
+    "summary": "The product issue distinguishes Science check-only behavior from the CSSwitch updater path; their selection, identity, and failure boundaries are not claimed closed by this node.",
+    "status": "active",
+    "owner": "science-runtime",
+    "severity": "P1",
+    "claim_state": "inferred",
+    "reproduction_state": "not-run-current-target",
+    "resolution_state": "open-not-fixed",
+    "affected_paths": ["desktop/src-tauri/src/runtime/science.rs", "desktop/src-tauri/src/runtime/sandbox_session.rs", "scripts/launch-virtual-sandbox.sh"],
+    "requirement_ids": ["REQ-083-SCIENCE-UPDATER", "REQ-083-EVIDENCE"],
+    "change_ids": ["CHG-SCIENCE-UPDATER"],
+    "expected_suite_ids": ["SUITE-PRODUCT-SCIENCE-UPDATER", "SUITE-QUALITY-FOCUSED"],
+    "expected_gate_ids": ["GATE-SCIENCE-UPDATER", "GATE-QUALITY-RELEASE"],
+    "evidence_boundary": {"allowed_layers": ["source-test"], "excluded_layers": ["isolated-test-app", "final-dmg", "installed-final", "live", "signing", "public"], "basis": [".agents/rules/science-runtime.md", "product issue registration"]},
+    "reproduction": {"state": "not-run-current-target", "steps": ["Compare the check-only path with updater candidate selection in an isolated fixture.", "Record executable identity and failure behavior without reading real Science data."], "observed": "The issue is registered as open; no updater, installed, or live Science result is asserted here.", "not_claimed": ["isolated-test-app", "final-dmg", "installed-final", "live", "signing", "public"]},
+    "confirmed_facts": [{"statement": "The requirement registry keeps the Science check-only path and CSSwitch updater selection as separate concerns.", "evidence_ref": "quality/requirements.v1.json", "verification_status": "confirmed"}],
+    "hypotheses": [{"statement": "An invalid or mismatched candidate may be accepted or rejected at the updater identity boundary; the current target has not been run.", "evidence_ref": ".agents/rules/science-runtime.md", "verification_status": "inferred"}],
+    "retirement": null
+  }
+}

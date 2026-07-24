@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://csswitch.local/schema/run-manifest.v1.schema.json",
+  "title": "CSSwitch future run manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "version", "entries"],
+  "properties": {
+    "schema": {"const": "run-manifest.v1"},
+    "version": {"type": "string", "pattern": "^v[0-9]{1,4}\\.[0-9]{1,4}\\.[0-9]{1,4}$", "maxLength": 32},
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["entrypoint_id", "command", "owner", "evidence_layer", "result_schema", "required_for"],
+        "properties": {
+          "entrypoint_id": {"type": "string", "pattern": "^ENTRY-[A-Z0-9][A-Z0-9-]{0,31}$", "maxLength": 38},
+          "command": {"type": "string", "minLength": 1, "maxLength": 320},
+          "owner": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{2,64}$"},
+          "evidence_layer": {"type": "string", "enum": ["source-test", "isolated-test-app", "final-dmg", "installed-final", "live", "signing", "public"]},
+          "result_schema": {"const": "test-result.v1"},
+          "required_for": {"type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true, "items": {"type": "string", "enum": ["source-test-gate", "release-ready", "diagnostic"]}}
+        }
+      }
+    }
+  }
+}
