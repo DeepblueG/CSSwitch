@@ -136,52 +136,54 @@ class QualityKernelFocused(unittest.TestCase):
         schema = validator.schemas["test-result.v1.schema.json"]
         valid = {
             "schema": "test-result.v1",
+            "run_id": "0123456789abcdef0123456789abcdef",
+            "suite_id": "SUITE-QUALITY-FOCUSED",
             "entrypoint_id": "ENTRY-PASS-MARKER",
+            "kind": "PASS",
             "outcome": "PASS",
             "classification": "NONE",
             "gate_decision": "PASS",
-            "exit_code": 0,
-            "attempts": 1,
-            "evidence_layer": "source-test",
-            "source_sha": "0" * 40,
-            "release_tag": "v0.8.3",
+            "reason_code": "NONE",
+            "runner_exit": 0,
+            "attempt_records": [{"attempt_index": 0, "process_exit": 0}],
         }
         validator.validate_instance(valid, schema, schema, "fixture.valid-result")
         validator.check_test_result_semantics(valid)
         self.assertFalse(validator.errors)
         invalid = dict(valid)
-        invalid["exit_code"] = 7
+        invalid["runner_exit"] = 7
         validator.errors = []
         validator.validate_instance(invalid, schema, schema, "fixture.pass-marker-exit7")
         validator.check_test_result_semantics(invalid)
         errors = "\n".join(validator.errors)
         self.assertIn("must match exactly one schema branch", errors)
-        self.assertIn("PASS requires exit_code=0", errors)
+        self.assertIn("PASS requires runner_exit=0", errors)
 
     def test_test_result_three_dimensions_reject_contradictions_and_bind_downstream(self):
         validator = self.fresh()
         schema = validator.schemas["test-result.v1.schema.json"]
         base = {
             "schema": "test-result.v1",
+            "run_id": "0123456789abcdef0123456789abcdef",
+            "suite_id": "SUITE-QUALITY-FOCUSED",
             "entrypoint_id": "ENTRY-BOUNDARY",
+            "kind": "TEST_FAIL",
             "outcome": "FAIL",
             "classification": "NONE",
             "gate_decision": "FAIL",
-            "exit_code": 7,
-            "attempts": 1,
-            "evidence_layer": "source-test",
-            "source_sha": "0" * 40,
-            "release_tag": "v0.8.3",
+            "reason_code": "ASSERTION_FAILED",
+            "runner_exit": 10,
+            "attempt_records": [{"attempt_index": 0, "process_exit": 10}],
         }
         validator.validate_instance(base, schema, schema, "fixture.valid-fail")
         validator.check_test_result_semantics(base)
         self.assertFalse(validator.errors)
 
         for name, invalid in (
-            ("fail-exit0", dict(base, exit_code=0)),
+            ("fail-runner0", dict(base, runner_exit=0)),
             ("missing-dimensions", {key: value for key, value in base.items() if key not in {"outcome", "classification", "gate_decision"}}),
-            ("flaky-pass", dict(base, outcome="PASS", classification="FLAKY", gate_decision="BLOCKED", exit_code=0)),
-            ("env-pass", dict(base, outcome="ENV-BLOCKED", classification="NONE", gate_decision="PASS", exit_code=7)),
+            ("flaky-pass", dict(base, kind="FLAKY_RETRY", outcome="PASS", classification="FLAKY", gate_decision="BLOCKED", reason_code="READINESS_RETRY_CHANGED", runner_exit=0, attempt_records=[{"attempt_index": 0, "process_exit": 0}, {"attempt_index": 1, "process_exit": 0}])),
+            ("env-pass", dict(base, kind="ENV", outcome="ENV-BLOCKED", classification="NONE", gate_decision="PASS", reason_code="ENVIRONMENT", runner_exit=11)),
         ):
             validator.errors = []
             validator.validate_instance(invalid, schema, schema, "fixture." + name)

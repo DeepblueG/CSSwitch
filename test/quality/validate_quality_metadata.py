@@ -9,6 +9,7 @@ credentials, databases, Science state, installed apps, or other worktrees.
 from __future__ import annotations
 
 import argparse
+import math
 import json
 import re
 import subprocess
@@ -168,6 +169,11 @@ class Validator:
         return value
 
     def validate_instance(self, value: Any, schema: Dict[str, Any], root_schema: Dict[str, Any], path: str) -> None:
+        if schema is True:
+            return
+        if schema is False:
+            self.error(path, "must not contain a value")
+            return
         if "$ref" in schema:
             self.validate_instance(value, self.resolve_ref(schema["$ref"], root_schema), root_schema, path)
             return
@@ -211,7 +217,7 @@ class Validator:
                 self.error(path, "string longer than maxLength")
             if "pattern" in schema:
                 try:
-                    matches = re.search(schema["pattern"], value)
+                    matches = re.fullmatch(schema["pattern"], value)
                 except re.error as exc:
                     self.error(path, "invalid schema pattern: {}".format(exc))
                     matches = True
@@ -231,9 +237,17 @@ class Validator:
                 normalized = [json.dumps(item, sort_keys=True, separators=(",", ":")) for item in value]
                 if len(set(normalized)) != len(normalized):
                     self.error(path, "array items must be unique")
+            prefix_items = schema.get("prefixItems", [])
+            for index, item_schema in enumerate(prefix_items):
+                if index < len(value):
+                    self.validate_instance(value[index], item_schema, root_schema, "{}[{}]".format(path, index))
             if "items" in schema:
-                for index, item in enumerate(value):
-                    self.validate_instance(item, schema["items"], root_schema, "{}[{}]".format(path, index))
+                if schema["items"] is False:
+                    if len(value) > len(prefix_items):
+                        self.error(path, "array contains an item beyond prefixItems")
+                else:
+                    for index in range(len(prefix_items), len(value)):
+                        self.validate_instance(value[index], schema["items"], root_schema, "{}[{}]".format(path, index))
         if isinstance(value, dict):
             required = schema.get("required", [])
             for key in required:
@@ -257,7 +271,7 @@ class Validator:
         if expected == "string":
             return isinstance(value, str)
         if expected == "integer":
-            return isinstance(value, int) and not isinstance(value, bool)
+            return Validator.is_json_integer(value)
         if expected == "number":
             return isinstance(value, (int, float)) and not isinstance(value, bool)
         if expected == "boolean":
@@ -265,6 +279,14 @@ class Validator:
         if expected == "null":
             return value is None
         return True
+
+    @staticmethod
+    def is_json_integer(value: Any) -> bool:
+        if isinstance(value, bool):
+            return False
+        if isinstance(value, int):
+            return True
+        return isinstance(value, float) and math.isfinite(value) and value.is_integer()
 
     # ----- data loading -----
 
@@ -616,7 +638,7 @@ class Validator:
         if not isinstance(result, dict):
             self.error(source, "test result must be an object")
             return
-        required = ("outcome", "classification", "gate_decision", "exit_code")
+        required = ("kind", "outcome", "classification", "gate_decision", "reason_code", "runner_exit", "attempt_records")
         missing = [field for field in required if field not in result]
         if missing:
             self.error(source, "test result is missing dimensions: {}".format(", ".join(missing)))
@@ -624,22 +646,22 @@ class Validator:
         outcome = result.get("outcome")
         classification = result.get("classification")
         gate_decision = result.get("gate_decision")
-        exit_code = result.get("exit_code")
-        if not isinstance(exit_code, int) or isinstance(exit_code, bool) or not 0 <= exit_code <= 255:
-            self.error(source, "exit_code must be an integer from 0 to 255")
+        runner_exit = result.get("runner_exit")
+        if not self.is_json_integer(runner_exit) or not 0 <= runner_exit <= 255:
+            self.error(source, "runner_exit must be an integer from 0 to 255")
             return
-        if gate_decision == "PASS" and not (outcome == "PASS" and classification == "NONE" and exit_code == 0):
-            self.error(source, "gate PASS requires outcome PASS, classification NONE, and exit_code=0")
+        if gate_decision == "PASS" and not (outcome == "PASS" and classification == "NONE" and runner_exit == 0):
+            self.error(source, "gate PASS requires outcome PASS, classification NONE, and runner_exit=0")
         if outcome == "PASS":
             if classification != "NONE":
                 self.error(source, "PASS cannot carry a non-NONE classification")
-            if exit_code != 0:
-                self.error(source, "PASS requires exit_code=0")
+            if runner_exit != 0:
+                self.error(source, "PASS requires runner_exit=0")
             if gate_decision != "PASS":
                 self.error(source, "outcome PASS must have gate_decision PASS")
         else:
-            if exit_code == 0:
-                self.error(source, "non-PASS outcome requires a nonzero exit_code")
+            if runner_exit == 0:
+                self.error(source, "non-PASS outcome requires a nonzero runner_exit")
             if gate_decision == "PASS":
                 self.error(source, "non-PASS outcome cannot have gate_decision PASS")
         if classification in {"FLAKY", "QUARANTINED"}:
