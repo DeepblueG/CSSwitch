@@ -544,7 +544,6 @@ class AtomicStoreTests(unittest.TestCase):
     def test_37_publish_rechecks_actual_private_parent_before_temp_open(self):
         cases = (
             ("failure", "evidence", "run-failure.json", lambda layout: record_first_failure(layout, self._failure(layout))),
-            ("ordinary", "snapshot", "source-snapshot-manifest.json", lambda layout: layout.publish_json("snapshot", "source-snapshot-manifest.json", {"a": 1})),
             ("ordinary", "attempts", "attempt-0.json", lambda layout: layout.publish_json("attempts", "attempt-0.json", {"a": 1})),
             ("ordinary", "results", "SUITE-TEST.json", lambda layout: layout.publish_json("results", "SUITE-TEST.json", {"a": 1})),
         )
@@ -576,6 +575,113 @@ class AtomicStoreTests(unittest.TestCase):
                     self.assertFalse(any(item.name.startswith(".tmp-") for item in parent.iterdir()))
                 finally:
                     os.chmod(parent, 0o700)
+
+    def test_38_snapshot_capture_lease_blocks_close_and_generic_snapshot_publish(self):
+        layout = self.layout()
+        with layout.snapshot_capture_lease() as lease:
+            with self.assertRaises(RunStoreError) as active:
+                layout.close()
+            self.assertEqual(active.exception.code, "ACTIVE_OPERATION")
+            with self.assertRaises(RunStoreError) as generic:
+                layout.publish_json("snapshot", "source-snapshot-manifest.json", {"a": 1})
+            self.assertEqual(generic.exception.code, "SNAPSHOT_SPECIAL_PUBLISH_REQUIRED")
+            copied = store.SnapshotCaptureLease(lease.run_id, lease._nonce)
+            with self.assertRaises(RunStoreError) as forged:
+                layout._require_snapshot_lease(copied)
+            self.assertEqual(forged.exception.code, "LEASE_INVALID")
+            self.assertEqual(lease.run_id, layout.run_id)
+        layout.close()
+
+    @staticmethod
+    def _snapshot_manifest(layout):
+        return {"schema": "source-snapshot-manifest.v1", "run_id": layout.run_id, "head_sha": "a" * 40,
+                "snapshot_mode": "clean-commit", "entry_count": 0, "total_bytes": 0, "entries": []}
+
+    def test_39_pending_stage_order_ticket_forge_replay_and_consumption(self):
+        layout = self.layout()
+        with layout.snapshot_capture_lease() as lease:
+            ticket = layout.publish_snapshot_manifest(self._snapshot_manifest(layout), expected_head_sha="a" * 40, lease=lease)
+            later = {"schema": "run-failure.v1", "run_id": layout.run_id, "stage": "CHANGE_SET", "reason_code": "CHANGE_SET_MISMATCH", "run_manifest": None, "created_at": "2026-07-24T00:00:00Z", "terminal": True}
+            with self.assertRaises(RunStoreError) as early:
+                layout.record_first_failure(later)
+            self.assertEqual(early.exception.code, "STAGE_ORDER_UNSAFE")
+            with self.assertRaises(RunStoreError) as owner_early:
+                layout.record_first_failure(later, _snapshot_lease=lease)
+            self.assertEqual(owner_early.exception.code, "STAGE_ORDER_UNSAFE")
+            forged = store.SnapshotPublicationTicket(ticket.run_id, ticket.expected_head_sha, ticket.publication, ticket.identity, ticket._nonce)
+            with self.assertRaises(RunStoreError) as copied:
+                layout.linearize_snapshot_success(forged, lease=lease)
+            self.assertEqual(copied.exception.code, "TICKET_INVALID")
+            self.assertEqual(layout.linearize_snapshot_success(ticket, lease=lease), ticket.publication)
+            self.assertIsNone(layout._snapshot_ticket)
+            with self.assertRaises(RunStoreError) as replay:
+                layout.linearize_snapshot_success(ticket, lease=lease)
+            self.assertEqual(replay.exception.code, "TICKET_INVALID")
+        self.assertEqual(layout.record_first_failure(later).status, "RECORDED")
+
+    def test_40_linearize_rechecks_public_layout_binding(self):
+        layout = self.layout(); state = Path(layout.state_path); detached = self.base / "snapshot-detached"
+        with layout.snapshot_capture_lease() as lease:
+            ticket = layout.publish_snapshot_manifest(self._snapshot_manifest(layout), expected_head_sha="a" * 40, lease=lease)
+            os.rename(state / "snapshot", detached); (state / "snapshot").mkdir(mode=0o700)
+            with self.assertRaises(RunStoreError) as raised:
+                layout.linearize_snapshot_success(ticket, lease=lease)
+            self.assertTrue(raised.exception.published_may_exist)
+            self.assertIn(raised.exception.code, {"PATH_DRIFT", "PUBLISH_VERIFY_FAILED"})
+
+    def test_41_active_run_root_and_unhashable_stage_fail_typed(self):
+        layout = self.layout()
+        run_root = self._failure(layout)
+        with layout.snapshot_capture_lease() as lease:
+            with self.assertRaises(RunStoreError) as outsider:
+                layout.record_first_failure(run_root)
+            self.assertEqual(outsider.exception.code, "STAGE_ORDER_UNSAFE")
+            with self.assertRaises(RunStoreError) as owner:
+                layout.record_first_failure(run_root, _snapshot_lease=lease)
+            self.assertEqual(owner.exception.code, "STAGE_ORDER_UNSAFE")
+            invalid = dict(run_root); invalid["stage"] = []
+            with self.assertRaises(RunStoreError) as unhashable:
+                layout.record_first_failure(invalid, _snapshot_lease=lease)
+            self.assertEqual(unhashable.exception.code, "FAILURE_INVALID")
+
+    def test_42_snapshot_failure_consumes_pending_or_enters_published_failed(self):
+        layout = self.layout()
+        failure = {"schema": "run-failure.v1", "run_id": layout.run_id, "stage": "SNAPSHOT",
+                   "reason_code": "SNAPSHOT_FAILED", "run_manifest": None,
+                   "created_at": "2026-07-24T00:00:00Z", "terminal": True}
+        with layout.snapshot_capture_lease() as lease:
+            layout.publish_snapshot_manifest(self._snapshot_manifest(layout), expected_head_sha="a" * 40, lease=lease)
+            with self.assertRaises(RunStoreError) as pending:
+                with layout.snapshot_capture_lease():
+                    pass
+            self.assertEqual(pending.exception.code, "ACTIVE_OPERATION")
+            self.assertEqual(layout.record_first_failure(failure, _snapshot_lease=lease).status, "RECORDED")
+            self.assertEqual(layout._snapshot_state, "TERMINAL")
+            self.assertIsNone(layout._snapshot_ticket)
+        with self.assertRaises(RunStoreError) as terminal:
+            with layout.snapshot_capture_lease():
+                pass
+        self.assertEqual(terminal.exception.code, "SNAPSHOT_UNAVAILABLE")
+        layout.close()
+
+        self.tearDown(); self.setUp(); layout = self.layout()
+        failure["run_id"] = layout.run_id
+        with layout.snapshot_capture_lease() as lease:
+            layout.publish_snapshot_manifest(self._snapshot_manifest(layout), expected_head_sha="a" * 40, lease=lease)
+            with mock.patch.object(store, "_publish", side_effect=RunStoreError("FAILURE_WRITE_FAILED")):
+                with self.assertRaises(RunStoreError):
+                    layout.record_first_failure(failure, _snapshot_lease=lease)
+            self.assertEqual(layout._snapshot_state, "PUBLISHED_FAILED")
+            self.assertIsNone(layout._snapshot_ticket)
+            later = dict(failure); later.update({"stage": "CHANGE_SET", "reason_code": "CHANGE_SET_MISMATCH"})
+            with self.assertRaises(RunStoreError) as blocked:
+                layout.record_first_failure(later)
+            self.assertEqual(blocked.exception.code, "STAGE_ORDER_UNSAFE")
+            with self.assertRaises(RunStoreError) as unavailable:
+                with layout.snapshot_capture_lease():
+                    pass
+            self.assertEqual(unavailable.exception.code, "SNAPSHOT_UNAVAILABLE")
+        layout.close()
 
 
 if __name__ == "__main__":

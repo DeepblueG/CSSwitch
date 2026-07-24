@@ -1,6 +1,7 @@
-"""RUE-03: private run roots and durable no-clobber canonical JSON records.
+"""RUE-03 durable store plus RUE-04 snapshot lease/linearization primitives.
 
-This module intentionally has no subprocess, snapshot, retry, or cleanup logic.
+This module intentionally has no Git subprocess, retry, aggregation, or CLI
+logic; RUE-04 source capture completes its post-check before linearization.
 """
 from __future__ import annotations
 
@@ -15,15 +16,16 @@ import threading
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Mapping
 
-from .manifest_contracts import canonical_json_bytes, load_canonical_json, validate_terminal_set
+from .manifest_contracts import canonical_json_bytes, load_canonical_json, validate_source_snapshot, validate_terminal_set
 
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
 _RENAME_FLAGS = 0x4 | 0x10 | 0x20
 _MAX_RECORD_BYTES = 1024 * 1024
 _MAX_FAILURE_BYTES = 64 * 1024
+_FAILURE_STAGES = frozenset(("RUN_ROOT", "SNAPSHOT", "CHANGE_SET", "PLAN", "EXECUTE", "AGGREGATE", "SEAL", "INTERRUPT", "INTERNAL"))
 # mkdir(2) is subject to the process-global umask.  Serialise the short
 # critical section so a new private directory has the requested mode before
 # its descriptor is opened; permissions are never adjusted through its name.
@@ -106,6 +108,25 @@ class FirstFailureResult:
     path: str
     sha256: str
     size: int
+
+
+@dataclass(frozen=True)
+class SnapshotCaptureLease:
+    """An unforgeable, layout-local capability for one snapshot capture."""
+
+    run_id: str
+    _nonce: bytes
+
+
+@dataclass(frozen=True)
+class SnapshotPublicationTicket:
+    """A published snapshot which has not yet crossed the success boundary."""
+
+    run_id: str
+    expected_head_sha: str
+    publication: PublishedJson
+    identity: TempOwnerIdentityV1
+    _nonce: bytes
 
 
 def _error(code: str, **kwargs: Any) -> RunStoreError:
@@ -515,6 +536,10 @@ class RunLayout:
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
     _state_root_path: str = field(default="", repr=False)
     _evidence_root_path: str = field(default="", repr=False)
+    _snapshot_nonce: bytes | None = field(default=None, repr=False)
+    _snapshot_lease: SnapshotCaptureLease | None = field(default=None, repr=False)
+    _snapshot_ticket: SnapshotPublicationTicket | None = field(default=None, repr=False)
+    _snapshot_state: str = field(default="OPEN", repr=False)
 
     def _state_fd_required(self) -> int:
         if self._state_fd is None:
@@ -576,43 +601,219 @@ class RunLayout:
 
     def publish_json(self, area: str, leaf: str, value: Any) -> PublishedJson:
         with self._lock:
+            if area == "snapshot":
+                raise _error("SNAPSHOT_SPECIAL_PUBLISH_REQUIRED", stage="SNAPSHOT", run_id=self.run_id)
             return _publish(self, area, leaf, canonical_json_bytes(value), failure=False)
 
-    def record_first_failure(self, failure: Any) -> FirstFailureResult:
+    def snapshot_capture_lease(self):
+        """Return a context manager spanning capture through terminal handling.
+
+        The lease is intentionally layout-local: a copied dataclass has no
+        authority because its nonce must be the active object identity.
+        """
+        layout = self
+
+        class _LeaseContext:
+            lease: SnapshotCaptureLease | None = None
+
+            def __enter__(self) -> SnapshotCaptureLease:
+                with layout._lock:
+                    layout._open()
+                    if layout._snapshot_state in {"CAPTURING", "PUBLISHED_PENDING"}:
+                        raise _error("ACTIVE_OPERATION", stage="SNAPSHOT", run_id=layout.run_id)
+                    if layout._snapshot_state != "OPEN":
+                        raise _error("SNAPSHOT_UNAVAILABLE", stage="SNAPSHOT", run_id=layout.run_id, published_may_exist=True)
+                    if layout._snapshot_nonce is not None:
+                        raise _error("ACTIVE_OPERATION", stage="SNAPSHOT", run_id=layout.run_id)
+                    nonce = secrets.token_bytes(32)
+                    layout._snapshot_nonce = nonce
+                    self.lease = SnapshotCaptureLease(layout.run_id, nonce)
+                    layout._snapshot_lease = self.lease
+                    layout._snapshot_state = "CAPTURING"
+                    return self.lease
+
+            def __exit__(self, exc_type: object, exc: object, traceback: object) -> bool:
+                with layout._lock:
+                    if self.lease is not None and layout._snapshot_nonce == self.lease._nonce:
+                        layout._snapshot_nonce = None
+                        layout._snapshot_lease = None
+                        if layout._snapshot_state == "CAPTURING":
+                            layout._snapshot_state = "OPEN"
+                return False
+
+        return _LeaseContext()
+
+    def _require_snapshot_lease(self, lease: SnapshotCaptureLease) -> None:
+        if (
+            not isinstance(lease, SnapshotCaptureLease)
+            or lease.run_id != self.run_id
+            or self._snapshot_nonce is None
+            or lease is not self._snapshot_lease
+            or not secrets.compare_digest(lease._nonce, self._snapshot_nonce)
+        ):
+            raise _error("LEASE_INVALID", stage="SNAPSHOT", run_id=self.run_id)
+
+    def _snapshot_terminal_absent(self) -> None:
+        parent = self._evidence_fd_required()
+        for leaf in ("run-failure.json", "completion-seal.json"):
+            try:
+                item = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                raise _error("TERMINAL_STATE_UNSAFE", stage="SNAPSHOT", run_id=self.run_id)
+            if not stat.S_ISREG(item.st_mode):
+                raise _error("TERMINAL_STATE_UNSAFE", stage="SNAPSHOT", run_id=self.run_id)
+            raise _error("TERMINAL_CONFLICT", stage="SNAPSHOT", run_id=self.run_id)
+
+    def publish_snapshot_manifest(
+        self, manifest: Mapping[str, Any], *, expected_head_sha: str, lease: SnapshotCaptureLease
+    ) -> SnapshotPublicationTicket:
+        """Publish a validated clean-commit manifest but do not report success yet."""
+        with self._lock:
+            self._open(); self._require_snapshot_lease(lease)
+            if self._snapshot_state != "CAPTURING" or self._snapshot_ticket is not None:
+                raise _error("FINALIZED", stage="SNAPSHOT", run_id=self.run_id, published_may_exist=True)
+            if not isinstance(expected_head_sha, str) or len(expected_head_sha) != 40:
+                raise _error("SNAPSHOT_BINDING_MISMATCH", stage="SNAPSHOT", run_id=self.run_id)
+            if not isinstance(manifest, Mapping) or (
+                manifest.get("run_id") != self.run_id
+                or manifest.get("head_sha") != expected_head_sha
+                or manifest.get("snapshot_mode") != "clean-commit"
+            ):
+                raise _error("SNAPSHOT_BINDING_MISMATCH", stage="SNAPSHOT", run_id=self.run_id)
+            try:
+                validate_source_snapshot(manifest)
+                raw = canonical_json_bytes(manifest)
+            except Exception:
+                raise _error("SNAPSHOT_VALIDATION_FAILED", stage="SNAPSHOT", run_id=self.run_id)
+            if len(raw) > _MAX_RECORD_BYTES:
+                raise _error("SNAPSHOT_VALIDATION_FAILED", stage="SNAPSHOT", run_id=self.run_id)
+            self._snapshot_terminal_absent()
+            publication = _publish(self, "snapshot", "source-snapshot-manifest.json", raw, failure=False)
+            try:
+                item = os.stat("source-snapshot-manifest.json", dir_fd=self._snapshot_fd_required(), follow_symlinks=False)
+                if not stat.S_ISREG(item.st_mode) or _mode(item) != 0o600 or item.st_nlink != 1:
+                    raise OSError()
+                identity = _owner(item)
+            except OSError:
+                raise _error("PUBLISH_VERIFY_FAILED", stage="SNAPSHOT", run_id=self.run_id, published_may_exist=True)
+            ticket = SnapshotPublicationTicket(self.run_id, expected_head_sha, publication, identity, lease._nonce)
+            self._snapshot_ticket = ticket
+            self._snapshot_state = "PUBLISHED_PENDING"
+            return ticket
+
+    def linearize_snapshot_success(self, ticket: SnapshotPublicationTicket, *, lease: SnapshotCaptureLease) -> PublishedJson:
+        """Atomically verify and finalize a post-checked snapshot publication."""
+        with self._lock:
+            self._open(); self._require_snapshot_lease(lease)
+            if (
+                self._snapshot_state != "PUBLISHED_PENDING"
+                or ticket is not self._snapshot_ticket
+                or not isinstance(ticket, SnapshotPublicationTicket)
+                or ticket._nonce != lease._nonce
+            ):
+                raise _error("TICKET_INVALID", stage="SNAPSHOT", run_id=self.run_id, published_may_exist=True)
+            try:
+                _verify_live_layout(self)
+            except RunStoreError as error:
+                raise _error(error.code, stage=error.stage, run_id=self.run_id, published_may_exist=True, secondary_code=error.secondary_code)
+            try:
+                fd = _again(os.open, ticket.publication.leaf, _READ_FLAGS, dir_fd=self._snapshot_fd_required())
+            except OSError:
+                raise _error("PUBLISH_VERIFY_FAILED", stage="SNAPSHOT", run_id=self.run_id, published_may_exist=True)
+            primary: RunStoreError | None = None
+            try:
+                before = os.fstat(fd)
+                named = os.stat(ticket.publication.leaf, dir_fd=self._snapshot_fd_required(), follow_symlinks=False)
+                raw = _read_exact(fd, before.st_size, code="PUBLISH_VERIFY_FAILED")
+                after = os.fstat(fd)
+                if (
+                    not _stable(before, after) or not _stable(after, named) or not _owner_matches(after, ticket.identity)
+                    or _mode(after) != 0o600 or after.st_nlink != 1 or after.st_size != ticket.publication.size
+                    or hashlib.sha256(raw).hexdigest() != ticket.publication.sha256 or canonical_json_bytes(load_canonical_json(raw)) != raw
+                ):
+                    raise _error("PUBLISH_VERIFY_FAILED", stage="SNAPSHOT", run_id=self.run_id, published_may_exist=True)
+                self._snapshot_terminal_absent()
+            except RunStoreError as error:
+                primary = _error(error.code, stage=error.stage, run_id=self.run_id, published_may_exist=True)
+            except Exception:
+                primary = _error("PUBLISH_VERIFY_FAILED", stage="SNAPSHOT", run_id=self.run_id, published_may_exist=True)
+            primary = _owned_close(fd, primary, run_id=self.run_id, published=True, final_leaf=ticket.publication.leaf)
+            if primary is not None:
+                raise primary
+            self._snapshot_state = "FINALIZED"
+            self._snapshot_ticket = None
+            return ticket.publication
+
+    def record_first_failure(self, failure: Any, *, _snapshot_lease: SnapshotCaptureLease | None = None) -> FirstFailureResult:
         with self._lock:
             self._evidence_open()
-            _verify_evidence_binding(self)
-            if not isinstance(failure, dict) or failure.get("run_id") != self.run_id or failure.get("run_manifest") is not None:
+            if not isinstance(failure, dict):
                 raise _error("FAILURE_INVALID", stage="FAILURE", run_id=self.run_id)
-            try:
-                validate_terminal_set(None, failure)
-                raw = canonical_json_bytes(failure)
-            except Exception:
+            stage = failure.get("stage")
+            if not isinstance(stage, str) or stage not in _FAILURE_STAGES:
                 raise _error("FAILURE_INVALID", stage="FAILURE", run_id=self.run_id)
-            parent = self._evidence_fd_required()
+            owner = (
+                isinstance(_snapshot_lease, SnapshotCaptureLease)
+                and _snapshot_lease.run_id == self.run_id
+                and _snapshot_lease is self._snapshot_lease
+                and self._snapshot_nonce is not None
+                and secrets.compare_digest(_snapshot_lease._nonce, self._snapshot_nonce)
+            )
+            post_snapshot = _FAILURE_STAGES - {"RUN_ROOT", "SNAPSHOT"}
+            active_snapshot = self._snapshot_state in {"CAPTURING", "PUBLISHED_PENDING"}
+            if active_snapshot and stage != "SNAPSHOT":
+                raise _error("STAGE_ORDER_UNSAFE", stage="FAILURE", run_id=self.run_id)
+            if active_snapshot and not owner:
+                # Only the capture owner may terminalize its SNAPSHOT stage.
+                raise _error("ACTIVE_OPERATION", stage="FAILURE", run_id=self.run_id)
+            if self._snapshot_state == "OPEN" and stage != "RUN_ROOT":
+                raise _error("STAGE_ORDER_UNSAFE", stage="FAILURE", run_id=self.run_id)
+            if self._snapshot_state == "PUBLISHED_FAILED":
+                raise _error("STAGE_ORDER_UNSAFE", stage="FAILURE", run_id=self.run_id)
+            if self._snapshot_state == "FINALIZED" and stage not in post_snapshot:
+                raise _error("STAGE_FINALIZED", stage="FAILURE", run_id=self.run_id)
+            pending_owner = self._snapshot_state == "PUBLISHED_PENDING" and owner
             try:
-                os.stat("completion-seal.json", dir_fd=parent, follow_symlinks=False)
-            except FileNotFoundError:
-                pass
-            except OSError:
-                raise _error("TERMINAL_CONFLICT", stage="FAILURE", run_id=self.run_id)
-            else:
-                raise _error("TERMINAL_CONFLICT", stage="FAILURE", run_id=self.run_id)
-            try:
-                preflight_fd = _again(os.open, "run-failure.json", _READ_FLAGS, dir_fd=parent)
-            except FileNotFoundError:
-                preflight_fd = None
-            except OSError:
-                raise _error("FAILURE_EXISTING_UNSAFE", stage="FAILURE", run_id=self.run_id)
-            if preflight_fd is not None:
-                existing = self._existing_failure(parent, preflight_fd)
                 _verify_evidence_binding(self)
-                return existing
-            try:
-                value = _publish(self, "evidence", "run-failure.json", raw, failure=True)
-                return FirstFailureResult("RECORDED", value.path, value.sha256, value.size)
-            except RunStoreError:
+                if failure.get("run_id") != self.run_id or failure.get("run_manifest") is not None:
+                    raise _error("FAILURE_INVALID", stage="FAILURE", run_id=self.run_id)
+                try:
+                    validate_terminal_set(None, failure)
+                    raw = canonical_json_bytes(failure)
+                except Exception:
+                    raise _error("FAILURE_INVALID", stage="FAILURE", run_id=self.run_id)
+                parent = self._evidence_fd_required()
+                try:
+                    os.stat("completion-seal.json", dir_fd=parent, follow_symlinks=False)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    raise _error("TERMINAL_CONFLICT", stage="FAILURE", run_id=self.run_id)
+                else:
+                    raise _error("TERMINAL_CONFLICT", stage="FAILURE", run_id=self.run_id)
+                try:
+                    preflight_fd = _again(os.open, "run-failure.json", _READ_FLAGS, dir_fd=parent)
+                except FileNotFoundError:
+                    preflight_fd = None
+                except OSError:
+                    raise _error("FAILURE_EXISTING_UNSAFE", stage="FAILURE", run_id=self.run_id)
+                if preflight_fd is not None:
+                    result = self._existing_failure(parent, preflight_fd)
+                    _verify_evidence_binding(self)
+                else:
+                    value = _publish(self, "evidence", "run-failure.json", raw, failure=True)
+                    result = FirstFailureResult("RECORDED", value.path, value.sha256, value.size)
+            except BaseException:
+                if pending_owner:
+                    self._snapshot_state = "PUBLISHED_FAILED"
+                    self._snapshot_ticket = None
                 raise
+            if active_snapshot and owner:
+                self._snapshot_state = "TERMINAL"
+                self._snapshot_ticket = None
+            return result
 
     def _existing_failure(self, parent_fd: int, preflight_fd: int | None = None) -> FirstFailureResult:
         """Read an existing terminal record only while its name stays FD-bound."""
@@ -664,6 +865,8 @@ class RunLayout:
 
     def close(self) -> None:
         with self._lock:
+            if self._snapshot_nonce is not None:
+                raise _error("ACTIVE_OPERATION", stage="LAYOUT", run_id=self.run_id)
             if self._closed:
                 if self._close_error is not None:
                     raise self._close_error
