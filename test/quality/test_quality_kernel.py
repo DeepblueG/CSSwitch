@@ -96,6 +96,15 @@ class QualityKernelFocused(unittest.TestCase):
         self.assertIn("unknown production path", errors)
         errors = self.errors_after(validator, lambda: validator.check_changed_paths([("D", "quality/requirements.v1.json")], "impact-release"))
         self.assertIn("rename/delete/copy status is fail-closed", errors)
+
+        original_git = validator.git
+
+        def git_with_dirty_fixture(args, allow_failure=False):
+            if list(args) == ["status", "--porcelain=v1"]:
+                return 0, " M docs/README.md", ""
+            return original_git(args, allow_failure=allow_failure)
+
+        validator.git = git_with_dirty_fixture
         errors = self.errors_after(validator, lambda: validator.check_impact("impact-release", None))
         self.assertIn("worktree must be clean", errors)
 
