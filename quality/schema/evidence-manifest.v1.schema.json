@@ -1,81 +1,21 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://csswitch.local/schema/evidence-manifest.v1.schema.json",
-  "title": "CSSwitch future evidence manifest v1",
+  "title": "Evidence manifest v1",
   "$defs": {
-    "CommonEvidenceResultV1": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["evidence_id", "layer", "result_schema", "outcome", "classification", "gate_decision", "exit_code", "source_sha", "reference"],
-      "properties": {
-        "evidence_id": {"type": "string", "pattern": "^EVID-[A-Z0-9][A-Z0-9-]{0,31}$", "maxLength": 38},
-        "layer": {"type": "string", "enum": ["source-test", "isolated-test-app", "final-dmg", "installed-final", "live", "signing", "public"]},
-        "result_schema": {"const": "test-result.v1"},
-        "outcome": {"type": "string", "enum": ["PASS", "FAIL", "IGNORED", "SKIPPED", "TIMEOUT", "INFRA_ERROR", "ENV-BLOCKED", "NEEDS-REAL-MACHINE", "NOT-RUN"]},
-        "classification": {"type": "string", "enum": ["NONE", "READINESS_TIMEOUT", "FLAKY", "QUARANTINED"]},
-        "gate_decision": {"type": "string", "enum": ["PASS", "BLOCKED", "FAIL"]},
-        "exit_code": {"type": "integer", "minimum": 0, "maximum": 255},
-        "source_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$", "maxLength": 40},
-        "reference": {"type": "string", "minLength": 1, "maxLength": 240}
-      }
-    },
-    "EvidencePassResultV1": {
-      "allOf": [
-        {"$ref": "#/$defs/CommonEvidenceResultV1"},
-        {"properties": {"outcome": {"const": "PASS"}, "classification": {"const": "NONE"}, "gate_decision": {"const": "PASS"}, "exit_code": {"const": 0}}}
-      ]
-    },
-    "EvidenceFailureResultV1": {
-      "allOf": [
-        {"$ref": "#/$defs/CommonEvidenceResultV1"},
-        {"properties": {"outcome": {"enum": ["FAIL", "INFRA_ERROR"]}, "classification": {"const": "NONE"}, "gate_decision": {"enum": ["BLOCKED", "FAIL"]}, "exit_code": {"minimum": 1}}}
-      ]
-    },
-    "EvidenceFlakyResultV1": {
-      "allOf": [
-        {"$ref": "#/$defs/CommonEvidenceResultV1"},
-        {"properties": {"outcome": {"enum": ["FAIL", "IGNORED", "SKIPPED", "TIMEOUT", "INFRA_ERROR", "ENV-BLOCKED", "NEEDS-REAL-MACHINE", "NOT-RUN"]}, "classification": {"const": "FLAKY"}, "gate_decision": {"const": "BLOCKED"}, "exit_code": {"minimum": 1}}}
-      ]
-    },
-    "EvidenceQuarantinedResultV1": {
-      "allOf": [
-        {"$ref": "#/$defs/CommonEvidenceResultV1"},
-        {"properties": {"outcome": {"enum": ["FAIL", "IGNORED", "SKIPPED", "TIMEOUT", "INFRA_ERROR", "ENV-BLOCKED", "NEEDS-REAL-MACHINE", "NOT-RUN"]}, "classification": {"const": "QUARANTINED"}, "gate_decision": {"const": "BLOCKED"}, "exit_code": {"minimum": 1}}}
-      ]
-    },
-    "EvidenceReadinessTimeoutResultV1": {
-      "allOf": [
-        {"$ref": "#/$defs/CommonEvidenceResultV1"},
-        {"properties": {"outcome": {"const": "TIMEOUT"}, "classification": {"const": "READINESS_TIMEOUT"}, "gate_decision": {"const": "BLOCKED"}, "exit_code": {"minimum": 1}}}
-      ]
-    },
-    "EvidenceBlockedResultV1": {
-      "allOf": [
-        {"$ref": "#/$defs/CommonEvidenceResultV1"},
-        {"properties": {"outcome": {"enum": ["IGNORED", "SKIPPED", "ENV-BLOCKED", "NEEDS-REAL-MACHINE", "NOT-RUN"]}, "classification": {"enum": ["NONE", "READINESS_TIMEOUT"]}, "gate_decision": {"const": "BLOCKED"}, "exit_code": {"minimum": 1}}}
-      ]
-    }
+    "RunId": {"type": "string", "pattern": "^[0-9a-f]{32}(?![\\s\\S])", "minLength": 32, "maxLength": 32},
+    "Sha": {"type": "string", "pattern": "^[0-9a-f]{64}(?![\\s\\S])", "minLength": 64, "maxLength": 64},
+    "Path": {"type": "string", "pattern": "^(?!/)(?!.*[\\u0000-\\u001f\\u007f])(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*(?:^|/)(?:/|$)).{1,240}$(?![\\s\\S])", "minLength": 1, "maxLength": 240},
+    "ArtifactRef": {"type": "object", "additionalProperties": false, "required": ["path", "sha256"], "properties": {"path": {"$ref": "#/$defs/Path"}, "sha256": {"$ref": "#/$defs/Sha"}}},
+    "ResultRef": {"type": "object", "additionalProperties": false, "required": ["suite_id", "entrypoint_id", "path", "sha256"], "properties": {"suite_id": {"type": "string", "pattern": "^SUITE-[A-Z0-9][A-Z0-9-]{0,31}(?![\\s\\S])", "maxLength": 38}, "entrypoint_id": {"type": "string", "pattern": "^ENTRY-[A-Z0-9][A-Z0-9-]{0,31}(?![\\s\\S])", "maxLength": 38}, "path": {"$ref": "#/$defs/Path"}, "sha256": {"$ref": "#/$defs/Sha"}}}
   },
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "version", "evidence"],
+  "required": ["schema", "run_id", "run_manifest", "test_results"],
   "properties": {
     "schema": {"const": "evidence-manifest.v1"},
-    "version": {"type": "string", "pattern": "^v[0-9]{1,4}\\.[0-9]{1,4}\\.[0-9]{1,4}$", "maxLength": 32},
-    "evidence": {
-      "type": "array",
-      "minItems": 1,
-      "maxItems": 128,
-      "items": {
-        "oneOf": [
-          {"$ref": "#/$defs/EvidencePassResultV1"},
-          {"$ref": "#/$defs/EvidenceFailureResultV1"},
-          {"$ref": "#/$defs/EvidenceFlakyResultV1"},
-          {"$ref": "#/$defs/EvidenceQuarantinedResultV1"},
-          {"$ref": "#/$defs/EvidenceReadinessTimeoutResultV1"},
-          {"$ref": "#/$defs/EvidenceBlockedResultV1"}
-        ]
-      }
-    }
+    "run_id": {"$ref": "#/$defs/RunId"},
+    "run_manifest": {"allOf": [{"$ref": "#/$defs/ArtifactRef"}, {"properties": {"path": {"const": "run-manifest.json"}}}]},
+    "test_results": {"type": "array", "minItems": 1, "maxItems": 128, "items": {"$ref": "#/$defs/ResultRef"}}
   }
 }

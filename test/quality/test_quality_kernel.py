@@ -193,17 +193,13 @@ class QualityKernelFocused(unittest.TestCase):
         evidence_schema = validator.schemas["evidence-manifest.v1.schema.json"]
         evidence = {
             "schema": "evidence-manifest.v1",
-            "version": "v0.8.3",
-            "evidence": [{
-                "evidence_id": "EVID-BOUNDARY",
-                "layer": "source-test",
-                "result_schema": "test-result.v1",
-                "outcome": "PASS",
-                "classification": "NONE",
-                "gate_decision": "PASS",
-                "exit_code": 0,
-                "source_sha": "0" * 40,
-                "reference": "source-test fixture"
+            "run_id": "0123456789abcdef0123456789abcdef",
+            "run_manifest": {"path": "run-manifest.json", "sha256": "0" * 64},
+            "test_results": [{
+                "suite_id": "SUITE-QUALITY-FOCUSED",
+                "entrypoint_id": "ENTRY-BOUNDARY",
+                "path": "results/SUITE-QUALITY-FOCUSED.json",
+                "sha256": "0" * 64
             }]
         }
         validator.errors = []
@@ -211,39 +207,31 @@ class QualityKernelFocused(unittest.TestCase):
         self.assertFalse(validator.errors)
 
         valid_downstream = copy.deepcopy(evidence)
-        valid_downstream["evidence"][0].update(
-            outcome="FAIL",
-            classification="NONE",
-            gate_decision="FAIL",
-            exit_code=7,
-        )
+        valid_downstream["test_results"][0]["sha256"] = "1" * 64
         validator.errors = []
         validator.validate_instance(valid_downstream, evidence_schema, evidence_schema, "fixture.valid-downstream-evidence")
         self.assertFalse(validator.errors)
 
         malicious_downstream = copy.deepcopy(evidence)
-        malicious_downstream["evidence"][0].update(
-            outcome="PASS",
-            classification="FLAKY",
-            gate_decision="BLOCKED",
-            exit_code=0,
-        )
+        malicious_downstream["test_results"][0]["outcome"] = "PASS"
         validator.errors = []
         validator.validate_instance(malicious_downstream, evidence_schema, evidence_schema, "fixture.pass-flaky-blocked-zero")
-        self.assertIn("must match exactly one schema branch", "\n".join(validator.errors))
+        self.assertTrue(validator.errors)
 
         run_schema = validator.schemas["run-manifest.v1.schema.json"]
         run_manifest = {
             "schema": "run-manifest.v1",
-            "version": "v0.8.3",
-            "entries": [{
-                "entrypoint_id": "ENTRY-BOUNDARY",
-                "command": "future runner",
-                "owner": "quality-kernel",
-                "evidence_layer": "source-test",
-                "result_schema": "test-result.v1",
-                "required_for": ["source-test-gate"]
-            }]
+            "run_id": "0123456789abcdef0123456789abcdef",
+            "profile": "source",
+            "head_sha": "0" * 40,
+            "comparison_base": {"policy": "merge-base-origin-main", "sha": "0" * 40},
+            "source_snapshot_manifest": {"path": "snapshot/source-snapshot-manifest.json", "sha256": "0" * 64},
+            "change_set": None,
+            "invocation_argv": ["python3"],
+            "expected_suites": [{"suite_id": "SUITE-QUALITY-FOCUSED", "entrypoint_id": "ENTRY-BOUNDARY"}],
+            "input_digests": {key: "0" * 64 for key in ("schema_bundle", "catalog", "gates", "runner", "fixtures", "build_recipes", "sanitized_environment", "tools")},
+            "platform": {"os": "test", "arch": "test", "toolchain": "test"},
+            "started_at": "2026-07-24T00:00:00Z"
         }
         validator.errors = []
         validator.validate_instance(run_manifest, run_schema, run_schema, "fixture.run-manifest")
@@ -255,8 +243,7 @@ class QualityKernelFocused(unittest.TestCase):
             "candidate_head_sha": "0" * 40,
             "previous_release": {"tag": "v0.8.2", "tag_object_sha": "0" * 40, "peeled_sha": "1" * 40},
             "gate_ids": ["GATE-QUALITY-RELEASE"],
-            "evidence_manifest": "evidence-manifest.v1",
-            "test_result_schema": "test-result.v1"
+            "completion_seal": {"path": "completion-seal.json", "sha256": "0" * 64}
         }
         validator.errors = []
         validator.validate_instance(candidate, candidate_schema, candidate_schema, "fixture.release-candidate")

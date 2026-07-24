@@ -18,7 +18,8 @@
       "base_policy": "none",
       "requires_clean": false,
       "requires_non_shallow": false,
-      "release_claim": "metadata-pass"
+      "release_claim": "metadata-pass",
+      "candidate_policy": "required"
     },
     {
       "id": "GATE-QUALITY-PR",
@@ -36,7 +37,8 @@
       "base_policy": "target-ref-merge-base",
       "requires_clean": false,
       "requires_non_shallow": false,
-      "release_claim": "impact-covered"
+      "release_claim": "impact-covered",
+      "candidate_policy": "excluded"
     },
     {
       "id": "GATE-QUALITY-RELEASE",
@@ -54,7 +56,8 @@
       "base_policy": "previous-release-peeled",
       "requires_clean": true,
       "requires_non_shallow": true,
-      "release_claim": "impact-covered"
+      "release_claim": "impact-covered",
+      "candidate_policy": "required"
     },
     {
       "id": "GATE-S0-LEGACY",
@@ -72,7 +75,8 @@
       "base_policy": "none",
       "requires_clean": false,
       "requires_non_shallow": false,
-      "release_claim": "legacy-known-unreliable"
+      "release_claim": "legacy-known-unreliable",
+      "candidate_policy": "excluded"
     },
     {
       "id": "GATE-SCIENCE-UPDATER",
@@ -90,7 +94,8 @@
       "base_policy": "none",
       "requires_clean": false,
       "requires_non_shallow": false,
-      "release_claim": "product-open-not-run"
+      "release_claim": "product-open-not-run",
+      "candidate_policy": "required"
     },
     {
       "id": "GATE-DEEPSEEK-THINKING",
@@ -108,7 +113,8 @@
       "base_policy": "none",
       "requires_clean": false,
       "requires_non_shallow": false,
-      "release_claim": "product-open-not-run"
+      "release_claim": "product-open-not-run",
+      "candidate_policy": "required"
     },
     {
       "id": "GATE-DATABASE-ERROR",
@@ -126,7 +132,8 @@
       "base_policy": "none",
       "requires_clean": false,
       "requires_non_shallow": false,
-      "release_claim": "product-open-not-run"
+      "release_claim": "product-open-not-run",
+      "candidate_policy": "required"
     },
     {
       "id": "GATE-GITHUB-BUNDLE",
@@ -144,7 +151,8 @@
       "base_policy": "none",
       "requires_clean": false,
       "requires_non_shallow": false,
-      "release_claim": "product-open-not-run"
+      "release_claim": "product-open-not-run",
+      "candidate_policy": "required"
     },
     {
       "id": "GATE-MCP-BOUNDARY",
@@ -162,7 +170,8 @@
       "base_policy": "none",
       "requires_clean": false,
       "requires_non_shallow": false,
-      "release_claim": "product-open-not-run"
+      "release_claim": "product-open-not-run",
+      "candidate_policy": "required"
     },
     {
       "id": "GATE-OPENCODE-65",
@@ -180,7 +189,8 @@
       "base_policy": "none",
       "requires_clean": false,
       "requires_non_shallow": false,
-      "release_claim": "product-open-not-run"
+      "release_claim": "product-open-not-run",
+      "candidate_policy": "required"
     },
     {
       "id": "GATE-SCIENCE-MACHO",
@@ -198,7 +208,8 @@
       "base_policy": "none",
       "requires_clean": false,
       "requires_non_shallow": false,
-      "release_claim": "product-open-not-run"
+      "release_claim": "product-open-not-run",
+      "candidate_policy": "required"
     },
     {
       "id": "GATE-SSH-LATE",
@@ -216,7 +227,8 @@
       "base_policy": "none",
       "requires_clean": false,
       "requires_non_shallow": false,
-      "release_claim": "product-open-not-run"
+      "release_claim": "product-open-not-run",
+      "candidate_policy": "required"
     }
   ]
 }
