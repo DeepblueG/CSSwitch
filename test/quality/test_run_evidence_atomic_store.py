@@ -23,6 +23,7 @@ from test.quality.run_evidence.atomic_store import (
     publish_json,
     record_first_failure,
 )
+from test.quality.run_evidence.contracts import adjudicate_adapter_attempt, adjudicate_parent_event
 
 
 class AtomicStoreTests(unittest.TestCase):
@@ -544,7 +545,6 @@ class AtomicStoreTests(unittest.TestCase):
     def test_37_publish_rechecks_actual_private_parent_before_temp_open(self):
         cases = (
             ("failure", "evidence", "run-failure.json", lambda layout: record_first_failure(layout, self._failure(layout))),
-            ("ordinary", "attempts", "attempt-0.json", lambda layout: layout.publish_json("attempts", "attempt-0.json", {"a": 1})),
             ("ordinary", "results", "SUITE-TEST.json", lambda layout: layout.publish_json("results", "SUITE-TEST.json", {"a": 1})),
         )
         for kind, area, leaf, invoke in cases:
@@ -682,6 +682,145 @@ class AtomicStoreTests(unittest.TestCase):
                     pass
             self.assertEqual(unavailable.exception.code, "SNAPSHOT_UNAVAILABLE")
         layout.close()
+
+    def test_43_attempt0_is_bound_to_finalized_snapshot_and_cannot_be_generic(self):
+        layout = self.layout()
+        with layout.snapshot_capture_lease() as lease:
+            ticket = layout.publish_snapshot_manifest(self._snapshot_manifest(layout), expected_head_sha="a" * 40, lease=lease)
+            layout.linearize_snapshot_success(ticket, lease=lease)
+            with self.assertRaises(RunStoreError) as generic:
+                layout.publish_json("attempts", "attempt-0.json", {})
+            self.assertEqual(generic.exception.code, "PUBLISH_AREA_INVALID")
+            manifest = layout.begin_attempt0()
+            self.assertEqual(manifest["head_sha"], "a" * 40)
+            with self.assertRaises(RunStoreError) as duplicate:
+                layout.begin_attempt0()
+            self.assertEqual(duplicate.exception.code, "ATTEMPT_DUPLICATE")
+            decision = adjudicate_parent_event("SPAWN_EXEC_FAILED", None, layout.run_id, "SUITE-RUE05A", "ENTRY-RUE05A-ATTEMPT0", 0)
+            published = layout.publish_attempt0_decision(decision)
+            self.assertEqual(published.leaf, "attempt-0.json")
+            with self.assertRaises(RunStoreError) as replay:
+                layout.publish_attempt0_decision(decision)
+            self.assertEqual(replay.exception.code, "ATTEMPT_DUPLICATE")
+
+    def test_44_attempt0_rejects_snapshot_name_replacement_before_claim(self):
+        layout = self.layout()
+        with layout.snapshot_capture_lease() as lease:
+            ticket = layout.publish_snapshot_manifest(self._snapshot_manifest(layout), expected_head_sha="a" * 40, lease=lease)
+            layout.linearize_snapshot_success(ticket, lease=lease)
+        replacement = Path(layout.state_path) / "snapshot" / "replacement"
+        replacement.write_bytes(b'{"entries":[],"entry_count":0,"head_sha":"' + b"a" * 40 + b'","run_id":"' + layout.run_id.encode() + b'","schema":"source-snapshot-manifest.v1","snapshot_mode":"clean-commit","total_bytes":0}')
+        os.replace(replacement, Path(layout.state_path) / "snapshot" / "source-snapshot-manifest.json")
+        with self.assertRaises(RunStoreError) as raised:
+            layout.begin_attempt0()
+        self.assertEqual(raised.exception.code, "SNAPSHOT_BINDING_MISMATCH")
+
+    def test_45_terminal_failure_blocks_claim_and_publication_under_layout_lock(self):
+        layout = self.layout()
+        with layout.snapshot_capture_lease() as lease:
+            ticket = layout.publish_snapshot_manifest(self._snapshot_manifest(layout), expected_head_sha="a" * 40, lease=lease)
+            layout.linearize_snapshot_success(ticket, lease=lease)
+        failure = {"schema": "run-failure.v1", "run_id": layout.run_id, "stage": "EXECUTE",
+                   "reason_code": "INTERNAL_ERROR", "run_manifest": None,
+                   "created_at": "2026-07-25T00:00:00Z", "terminal": True}
+        layout.record_first_failure(failure)
+        with self.assertRaises(RunStoreError) as blocked:
+            layout.begin_attempt0()
+        self.assertEqual(blocked.exception.code, "TERMINAL_CONFLICT")
+
+        self.tearDown(); self.setUp(); layout = self.layout()
+        with layout.snapshot_capture_lease() as lease:
+            ticket = layout.publish_snapshot_manifest(self._snapshot_manifest(layout), expected_head_sha="a" * 40, lease=lease)
+            layout.linearize_snapshot_success(ticket, lease=lease)
+        layout.begin_attempt0()
+        failure["run_id"] = layout.run_id
+        layout.record_first_failure(failure)
+        decision = adjudicate_parent_event("SPAWN_EXEC_FAILED", None, layout.run_id, "SUITE-RUE05A", "ENTRY-RUE05A-ATTEMPT0", 0)
+        with self.assertRaises(RunStoreError) as coexist:
+            layout.publish_attempt0_decision(decision)
+        self.assertEqual(coexist.exception.code, "TERMINAL_CONFLICT")
+
+    def test_46_publish_revalidates_snapshot_and_fixed_attempt_identity(self):
+        def finalized_started():
+            layout = self.layout()
+            with layout.snapshot_capture_lease() as lease:
+                ticket = layout.publish_snapshot_manifest(self._snapshot_manifest(layout), expected_head_sha="a" * 40, lease=lease)
+                layout.linearize_snapshot_success(ticket, lease=lease)
+            layout.begin_attempt0()
+            return layout
+
+        decision_for = lambda layout, suite, entry: adjudicate_parent_event(
+            "SPAWN_EXEC_FAILED", None, layout.run_id, suite, entry, 0
+        )
+        layout = finalized_started()
+        forged = decision_for(layout, "SUITE-OTHER", "ENTRY-OTHER",)
+        with self.assertRaises(RunStoreError) as identity:
+            layout.publish_attempt0_decision(forged)
+        self.assertEqual(identity.exception.code, "ATTEMPT_BINDING_MISMATCH")
+        self.assertFalse((Path(layout.state_path) / "attempts/attempt-0.json").exists())
+
+        for replacement_raw in (b"corrupt", None):
+            layout = finalized_started()
+            snapshot = Path(layout.state_path) / "snapshot"
+            replacement = snapshot / "replacement"
+            if replacement_raw is None:
+                fake = self._snapshot_manifest(layout)
+                fake["entries"] = [{"path": "x", "type": "file", "mode": "100644", "size": 0,
+                                    "sha256": hashlib.sha256(b"").hexdigest()}]
+                fake["entry_count"] = 1
+                replacement_raw = store.canonical_json_bytes(fake)
+            replacement.write_bytes(replacement_raw)
+            os.chmod(replacement, 0o600)
+            os.replace(replacement, snapshot / "source-snapshot-manifest.json")
+            decision = decision_for(layout, "SUITE-RUE05A", "ENTRY-RUE05A-ATTEMPT0")
+            with self.assertRaises(RunStoreError) as changed:
+                layout.publish_attempt0_decision(decision)
+            self.assertEqual(changed.exception.code, "SNAPSHOT_BINDING_MISMATCH")
+            self.assertFalse((Path(layout.state_path) / "attempts/attempt-0.json").exists())
+
+    def test_47_attempt0_publication_claim_is_one_way_across_leaf_deletion_replacement_and_failure(self):
+        def started():
+            layout = self.layout()
+            with layout.snapshot_capture_lease() as lease:
+                ticket = layout.publish_snapshot_manifest(self._snapshot_manifest(layout), expected_head_sha="a" * 40, lease=lease)
+                layout.linearize_snapshot_success(ticket, lease=lease)
+            layout.begin_attempt0()
+            return layout
+
+        def decisions(layout):
+            infra = adjudicate_parent_event("SPAWN_EXEC_FAILED", None, layout.run_id, "SUITE-RUE05A", "ENTRY-RUE05A-ATTEMPT0", 0)
+            adapter = {"schema": "adapter-result.v1", "run_id": layout.run_id, "suite_id": "SUITE-RUE05A",
+                       "entrypoint_id": "ENTRY-RUE05A-ATTEMPT0", "attempt_index": 0,
+                       "outcome_hint": "PASS", "classification_hint": "NONE", "reason_code": "NONE"}
+            passed = adjudicate_adapter_attempt(adapter, 0, layout.run_id, "SUITE-RUE05A", "ENTRY-RUE05A-ATTEMPT0", 0)
+            return infra, passed
+
+        layout = started(); infra, passed = decisions(layout)
+        layout.publish_attempt0_decision(infra)
+        leaf = Path(layout.state_path) / "attempts/attempt-0.json"
+        leaf.unlink()
+        with self.assertRaises(RunStoreError) as deleted:
+            layout.publish_attempt0_decision(passed)
+        self.assertEqual(deleted.exception.code, "ATTEMPT_DUPLICATE")
+        self.assertFalse(leaf.exists())
+
+        layout = started(); infra, passed = decisions(layout)
+        layout.publish_attempt0_decision(infra)
+        replacement = Path(layout.state_path) / "attempts/replacement"
+        replacement.write_bytes(b"foreign")
+        os.replace(replacement, Path(layout.state_path) / "attempts/attempt-0.json")
+        with self.assertRaises(RunStoreError) as replaced:
+            layout.publish_attempt0_decision(passed)
+        self.assertEqual(replaced.exception.code, "ATTEMPT_DUPLICATE")
+        self.assertEqual((Path(layout.state_path) / "attempts/attempt-0.json").read_bytes(), b"foreign")
+
+        layout = started(); infra, passed = decisions(layout)
+        with mock.patch.object(store, "_publish", side_effect=RunStoreError("PUBLISH_VERIFY_FAILED", published_may_exist=True)):
+            with self.assertRaises(RunStoreError):
+                layout.publish_attempt0_decision(infra)
+        with self.assertRaises(RunStoreError) as uncertain:
+            layout.publish_attempt0_decision(passed)
+        self.assertEqual(uncertain.exception.code, "ATTEMPT_DUPLICATE")
 
 
 if __name__ == "__main__":
