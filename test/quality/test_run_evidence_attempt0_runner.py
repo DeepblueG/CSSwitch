@@ -323,6 +323,36 @@ class Attempt0RunnerTests(unittest.TestCase):
         with self.assertRaises(ProcessLookupError):
             os.kill(pids[0], 0)
 
+    def test_15_unversioned_cwd_sitecustomize_cannot_preload_before_fixture(self):
+        layout = self._layout()
+        unversioned_cwd = self.base / "unversioned-cwd"
+        unversioned_cwd.mkdir()
+        sentinel = unversioned_cwd / "sitecustomize-loaded"
+        (unversioned_cwd / "sitecustomize.py").write_text(
+            "from pathlib import Path\n"
+            f"Path({str(sentinel)!r}).write_text('loaded')\n"
+        )
+        real_spawn = runner.os.posix_spawn
+        spawned_argv = []
+
+        def capture_spawn(path, argv, *args, **kwargs):
+            spawned_argv.append(list(argv))
+            return real_spawn(path, argv, *args, **kwargs)
+
+        previous_cwd = os.getcwd()
+        try:
+            os.chdir(unversioned_cwd)
+            with mock.patch.object(runner.os, "posix_spawn", side_effect=capture_spawn):
+                decision = run_attempt0(repo_root=str(self.repo), layout=layout)
+        finally:
+            os.chdir(previous_cwd)
+        self.assertEqual(
+            (decision.disposition, decision.reason_code, decision.attempt_record.process_exit),
+            ("PASS", "NONE", 0),
+        )
+        self.assertEqual(spawned_argv[0][1:3], ["-I", "-S"])
+        self.assertFalse(sentinel.exists())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

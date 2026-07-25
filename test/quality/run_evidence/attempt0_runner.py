@@ -306,7 +306,7 @@ def _run_attempt0(*, repo_root: str | os.PathLike[str], layout: RunLayout, scena
         env = {"HOME": layout.state_path, "PATH": os.defpath, "PYTHONNOUSERSITE": "1", "RUE05A_ENTRYPOINT": _ENTRYPOINT_ID}
         if scenario != "normal": env["RUE05A_PRIVATE_SCENARIO"] = scenario
         actions = _spawn_actions(held_cache_fd, child_sock.fileno(), out_write, child_cache, child_adapter, child_output)
-        argv = [sys.executable, "-c", _CACHE_BOOTSTRAP, "--adapter-fd", str(_CHILD_ADAPTER_FD), layout.run_id, _SUITE_ID, _ENTRYPOINT_ID]
+        argv = [sys.executable, "-I", "-S", "-c", _CACHE_BOOTSTRAP, "--adapter-fd", str(_CHILD_ADAPTER_FD), layout.run_id, _SUITE_ID, _ENTRYPOINT_ID]
         pid = os.posix_spawn(sys.executable, argv, env, file_actions=actions, setpgroup=0)
     except OSError:
         _close_fds([child_cache, child_adapter, child_output, held_cache_fd, out_read, out_write])
