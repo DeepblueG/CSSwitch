@@ -9,6 +9,7 @@ credentials, databases, Science state, installed apps, or other worktrees.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import math
 import json
 import re
@@ -80,6 +81,10 @@ ID_PATTERNS = {
 }
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 VERSION_RE = re.compile(r"^v[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}([.-][A-Za-z0-9.-]{1,24})?$")
+RUE_SUITE_ID = "SUITE-RUE05A"
+RUE_RULE_NAME = "run-evidence-fixed-one-suite"
+RUE_SUITE_SHA256 = "05e4f38d179a36af2b2c0dcc5298881016b1cab12a014a40ab951ac9a415784c"
+RUE_RULE_SHA256 = "c87f2d0e751368d8b670a8f033a086969d258db229a7cc0920b364f9a5cde4d5"
 
 
 class ValidationError(Exception):
@@ -418,6 +423,66 @@ class Validator:
         self.check_lineage()
         self.check_production_policy_shape()
         self.check_catalog_discovery()
+        self.check_fixed_run_evidence_catalog()
+
+    @staticmethod
+    def canonical_record_sha256(value: Any) -> str:
+        raw = json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(raw).hexdigest()
+
+    def check_fixed_run_evidence_catalog(self) -> None:
+        suite = self.suites.get(RUE_SUITE_ID)
+        if (
+            not isinstance(suite, dict)
+            or self.canonical_record_sha256(suite) != RUE_SUITE_SHA256
+        ):
+            self.error(
+                RUE_SUITE_ID,
+                "fixed one-suite NODE-RUN-EVIDENCE catalog record drifted",
+            )
+        rules = [
+            rule
+            for rule in self.catalog.get("selection_rules", [])
+            if isinstance(rule, dict)
+            and (
+                rule.get("name") == RUE_RULE_NAME
+                or RUE_SUITE_ID in rule.get("suite_ids", [])
+            )
+        ]
+        if (
+            len(rules) != 1
+            or self.canonical_record_sha256(rules[0]) != RUE_RULE_SHA256
+        ):
+            self.error(
+                "quality/test-catalog.v1.json",
+                "fixed one-suite NODE-RUN-EVIDENCE selection rule drifted",
+            )
+        for suite_id, record in self.suites.items():
+            if (
+                suite_id != RUE_SUITE_ID
+                and record.get("retry_policy") != "none"
+            ):
+                self.error(
+                    suite_id,
+                    "only SUITE-RUE05A may use the fixed readiness retry",
+                )
+            if suite_id != RUE_SUITE_ID and not record.get("gate_ids"):
+                self.error(
+                    suite_id,
+                    "only SUITE-RUE05A may be explicitly gate-free",
+                )
+        for gate_id, gate in self.gates.items():
+            if RUE_SUITE_ID in gate.get("required_suite_ids", []):
+                self.error(
+                    gate_id,
+                    "SUITE-RUE05A must not be promoted into a gate",
+                )
 
     def check_versions(self) -> None:
         for kind, records in (("requirement", self.requirements), ("change", self.changes), ("bug", self.bugs), ("gate", self.gates)):

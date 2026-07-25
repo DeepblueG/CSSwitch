@@ -1,8 +1,7 @@
-"""The deliberately small RUE-05A attempt-0 runner vertical slice.
+"""The deliberately small RUE-05A/RUE-06 fixed attempt executor.
 
 This module owns one fixture, one child, one adapter channel and one private
-attempt record.  It is not a suite runner, retry scheduler, or generic
-authority layer.
+attempt record at a time.  Policy and retry scheduling remain outside it.
 """
 from __future__ import annotations
 
@@ -104,7 +103,8 @@ def _snapshot_fixture_digest(manifest: Mapping[str, Any]) -> tuple[str, int, str
 
 
 def _copy_bound_fixture(
-    repo_root: str | os.PathLike[str], layout: RunLayout, expected_digest: str, expected_size: int, expected_mode: str
+    repo_root: str | os.PathLike[str], layout: RunLayout, expected_digest: str,
+    expected_size: int, expected_mode: str, attempt_index: int,
 ) -> int:
     """Copy source bytes through held descriptors and return a held cache FD."""
     root_fd = source_fd = cache_fd = verify_fd = result_fd = None
@@ -136,7 +136,8 @@ def _copy_bound_fixture(
         ):
             raise Attempt0RunnerError("TOOL_IDENTITY_CHANGED")
         try:
-            cache_fd = os.open("attempt0-fixture.py", os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=layout._cache_fd_required())
+            cache_leaf = f"attempt{attempt_index}-fixture.py"
+            cache_fd = os.open(cache_leaf, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=layout._cache_fd_required())
         except FileExistsError:
             raise Attempt0RunnerError("CACHE_REPLAY")
         offset = 0
@@ -149,13 +150,32 @@ def _copy_bound_fixture(
         written = os.fstat(cache_fd)
         if not stat.S_ISREG(written.st_mode) or written.st_nlink != 1 or written.st_size != expected_size:
             raise Attempt0RunnerError("FD_DRIFT")
-        verify_fd = os.open("attempt0-fixture.py", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=layout._cache_fd_required())
-        cache_named = os.stat("attempt0-fixture.py", dir_fd=layout._cache_fd_required(), follow_symlinks=False)
+        written_identity = _identity(written)
+        verify_fd = os.open(cache_leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=layout._cache_fd_required())
+        cache_named = os.stat(cache_leaf, dir_fd=layout._cache_fd_required(), follow_symlinks=False)
         verified = os.fstat(verify_fd)
-        reread = _read_exact(verify_fd, verified.st_size)
         if (
-            _identity(verified) != _identity(cache_named) or verified.st_nlink != 1
-            or verified.st_size != expected_size or hashlib.sha256(reread).hexdigest() != expected_digest
+            not stat.S_ISREG(verified.st_mode)
+            or stat.S_IMODE(verified.st_mode) != 0o600
+            or verified.st_uid != os.geteuid()
+            or verified.st_nlink != 1
+            or verified.st_size != expected_size
+            or expected_size > _MAX_FIXTURE_BYTES
+            or _identity(verified) != written_identity
+            or _identity(verified) != _identity(cache_named)
+        ):
+            raise Attempt0RunnerError("TOOL_IDENTITY_CHANGED")
+        reread = _read_exact(verify_fd, expected_size)
+        verified_after = os.fstat(verify_fd)
+        cache_named_after = os.stat(
+            cache_leaf,
+            dir_fd=layout._cache_fd_required(),
+            follow_symlinks=False,
+        )
+        if (
+            _identity(verified_after) != written_identity
+            or _identity(cache_named_after) != written_identity
+            or hashlib.sha256(reread).hexdigest() != expected_digest
         ):
             raise Attempt0RunnerError("TOOL_IDENTITY_CHANGED")
         os.close(cache_fd); cache_fd = None
@@ -265,21 +285,39 @@ def _exit_code(status: int) -> int:
     return -255
 
 
-def _infra(reason: str, rc: int, run_id: str) -> AttemptDecisionV1:
+def _infra(reason: str, rc: int, run_id: str, attempt_index: int) -> AttemptDecisionV1:
     # Existing RUE-01 decision type and reason vocabulary; no runner schema.
     from .contracts import AttemptRecord
-    return AttemptDecisionV1(run_id, _SUITE_ID, _ENTRYPOINT_ID, 0, AttemptRecord(0, rc), "INFRA", reason)
+    return AttemptDecisionV1(
+        run_id, _SUITE_ID, _ENTRYPOINT_ID, attempt_index,
+        AttemptRecord(attempt_index, rc), "INFRA", reason,
+    )
 
 
-def _run_attempt0(*, repo_root: str | os.PathLike[str], layout: RunLayout, scenario: str = "normal") -> AttemptDecisionV1:
-    manifest = layout.begin_attempt0()
+def _run_attempt(
+    *, repo_root: str | os.PathLike[str], layout: RunLayout,
+    attempt_index: int, scenario: str = "normal",
+) -> AttemptDecisionV1:
+    if attempt_index == 0:
+        manifest = layout.begin_attempt0()
+        publish = layout.publish_attempt0_decision
+    elif attempt_index == 1:
+        manifest = layout.begin_attempt1()
+        publish = layout.publish_attempt1_decision
+    else:
+        raise Attempt0RunnerError("ATTEMPT_INDEX_UNSAFE")
     digest, fixture_size, fixture_mode = _snapshot_fixture_digest(manifest)
     try:
-        held_cache_fd = _copy_bound_fixture(repo_root, layout, digest, fixture_size, fixture_mode)
+        held_cache_fd = _copy_bound_fixture(
+            repo_root, layout, digest, fixture_size, fixture_mode, attempt_index,
+        )
     except Attempt0RunnerError as error:
         if error.code == "TOOL_IDENTITY_CHANGED":
-            decision = adjudicate_parent_event("TOOL_IDENTITY_CHANGED", None, layout.run_id, _SUITE_ID, _ENTRYPOINT_ID, 0)
-            layout.publish_attempt0_decision(decision)
+            decision = adjudicate_parent_event(
+                "TOOL_IDENTITY_CHANGED", None, layout.run_id,
+                _SUITE_ID, _ENTRYPOINT_ID, attempt_index,
+            )
+            publish(decision)
             return decision
         raise
     parent_sock: socket.socket | None = None
@@ -303,17 +341,27 @@ def _run_attempt0(*, repo_root: str | os.PathLike[str], layout: RunLayout, scena
         child_cache = _moved_child_fd(held_cache_fd)
         child_adapter = _moved_child_fd(child_sock.fileno())
         child_output = _moved_child_fd(out_write)
-        env = {"HOME": layout.state_path, "PATH": os.defpath, "PYTHONNOUSERSITE": "1", "RUE05A_ENTRYPOINT": _ENTRYPOINT_ID}
+        env = {
+            "HOME": layout.state_path, "PATH": os.defpath, "PYTHONNOUSERSITE": "1",
+            "RUE05A_ENTRYPOINT": _ENTRYPOINT_ID,
+        }
         if scenario != "normal": env["RUE05A_PRIVATE_SCENARIO"] = scenario
         actions = _spawn_actions(held_cache_fd, child_sock.fileno(), out_write, child_cache, child_adapter, child_output)
-        argv = [sys.executable, "-I", "-S", "-c", _CACHE_BOOTSTRAP, "--adapter-fd", str(_CHILD_ADAPTER_FD), layout.run_id, _SUITE_ID, _ENTRYPOINT_ID]
+        argv = [
+            sys.executable, "-I", "-S", "-c", _CACHE_BOOTSTRAP,
+            "--adapter-fd", str(_CHILD_ADAPTER_FD), "--attempt-index",
+            str(attempt_index), layout.run_id, _SUITE_ID, _ENTRYPOINT_ID,
+        ]
         pid = os.posix_spawn(sys.executable, argv, env, file_actions=actions, setpgroup=0)
     except OSError:
         _close_fds([child_cache, child_adapter, child_output, held_cache_fd, out_read, out_write])
         if parent_sock is not None: parent_sock.close()
         if child_sock is not None: child_sock.close()
-        decision = adjudicate_parent_event("SPAWN_EXEC_FAILED", None, layout.run_id, _SUITE_ID, _ENTRYPOINT_ID, 0)
-        layout.publish_attempt0_decision(decision)
+        decision = adjudicate_parent_event(
+            "SPAWN_EXEC_FAILED", None, layout.run_id,
+            _SUITE_ID, _ENTRYPOINT_ID, attempt_index,
+        )
+        publish(decision)
         return decision
     _close_fds([child_cache, child_adapter, child_output, held_cache_fd, out_write])
     held_cache_fd = out_write = None
@@ -460,17 +508,17 @@ def _run_attempt0(*, repo_root: str | os.PathLike[str], layout: RunLayout, scena
         child_reaped = True
         rc = _exit_code(slot[0])
         if output_limit:
-            decision = adjudicate_parent_event("OUTPUT_LIMIT", rc, layout.run_id, _SUITE_ID, _ENTRYPOINT_ID, 0)
+            decision = adjudicate_parent_event("OUTPUT_LIMIT", rc, layout.run_id, _SUITE_ID, _ENTRYPOINT_ID, attempt_index)
         elif timed_out:
-            decision = adjudicate_parent_event("HARD_TIMEOUT", rc, layout.run_id, _SUITE_ID, _ENTRYPOINT_ID, 0)
+            decision = adjudicate_parent_event("HARD_TIMEOUT", rc, layout.run_id, _SUITE_ID, _ENTRYPOINT_ID, attempt_index)
         elif adapter_error == "ADAPTER_LATE":
-            decision = _infra("ADAPTER_LATE", rc, layout.run_id)
+            decision = _infra("ADAPTER_LATE", rc, layout.run_id, attempt_index)
         elif adapter_error is not None:
-            decision = adjudicate_adapter_attempt({}, rc, layout.run_id, _SUITE_ID, _ENTRYPOINT_ID, 0)
+            decision = adjudicate_adapter_attempt({}, rc, layout.run_id, _SUITE_ID, _ENTRYPOINT_ID, attempt_index)
         elif adapter is None:
-            decision = adjudicate_adapter_attempt(None, rc, layout.run_id, _SUITE_ID, _ENTRYPOINT_ID, 0)
+            decision = adjudicate_adapter_attempt(None, rc, layout.run_id, _SUITE_ID, _ENTRYPOINT_ID, attempt_index)
         else:
-            decision = adjudicate_adapter_attempt(adapter, rc, layout.run_id, _SUITE_ID, _ENTRYPOINT_ID, 0)
+            decision = adjudicate_adapter_attempt(adapter, rc, layout.run_id, _SUITE_ID, _ENTRYPOINT_ID, attempt_index)
     except BaseException:
         child_reaped = child_reaped or bool(slot)
         if pid is not None and not child_reaped:
@@ -518,8 +566,14 @@ def _run_attempt0(*, repo_root: str | os.PathLike[str], layout: RunLayout, scena
         if parent_sock is not None:
             parent_sock.close()
         _close_fds([out_read])
-    layout.publish_attempt0_decision(decision)
+    publish(decision)
     return decision
+
+
+def _run_attempt0(*, repo_root: str | os.PathLike[str], layout: RunLayout, scenario: str = "normal") -> AttemptDecisionV1:
+    return _run_attempt(
+        repo_root=repo_root, layout=layout, attempt_index=0, scenario=scenario,
+    )
 
 
 def run_attempt0(*, repo_root: str | os.PathLike[str], layout: RunLayout) -> AttemptDecisionV1:

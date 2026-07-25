@@ -43,6 +43,15 @@ class AtomicStoreTests(unittest.TestCase):
         return value
 
     @staticmethod
+    def _store_publish(layout, area, leaf, value):
+        """Exercise the internal store primitive without public authority."""
+        with layout._lock:
+            return store._publish(
+                layout, area, leaf, store.canonical_json_bytes(value),
+                failure=False,
+            )
+
+    @staticmethod
     def _quiet_close(layout) -> None:
         try:
             layout.close()
@@ -155,7 +164,7 @@ class AtomicStoreTests(unittest.TestCase):
              mock.patch.object(store.os, "unlink", side_effect=AssertionError("forbidden"), create=True), \
              mock.patch.object(store.os, "link", side_effect=AssertionError("forbidden"), create=True):
             with self.assertRaises(RunStoreError) as raised:
-                layout.publish_json("root", "run-manifest.json", {})
+                self._store_publish(layout, "root", "run-manifest.json", {})
         self.assertEqual(raised.exception.code, "PUBLISH_TEMP_COLLISION")
         self.assertIsNone(raised.exception.residual)
         self.assertEqual(foreign.read_bytes(), b"foreign")
@@ -170,7 +179,7 @@ class AtomicStoreTests(unittest.TestCase):
             return real_fstat(fd)
         with mock.patch.object(store, "_verify_live_layout"), mock.patch.object(store.os, "fstat", side_effect=fail_first):
             with self.assertRaises(RunStoreError) as raised:
-                layout.publish_json("root", "run-manifest.json", {})
+                self._store_publish(layout, "root", "run-manifest.json", {})
         self.assertEqual(raised.exception.residual.state, "UNKNOWN")
         self.assertIsNone(raised.exception.residual.owner_identity)
 
@@ -178,7 +187,7 @@ class AtomicStoreTests(unittest.TestCase):
         layout = self.layout()
         with mock.patch.object(store.os, "fchmod", side_effect=OSError(errno.EIO, "fail")):
             with self.assertRaises(RunStoreError) as raised:
-                layout.publish_json("root", "run-manifest.json", {})
+                self._store_publish(layout, "root", "run-manifest.json", {})
         self.assertEqual(raised.exception.residual.state, "PRESENT_BOUND")
         self.assertIsInstance(raised.exception.residual.owner_identity, TempOwnerIdentityV1)
 
@@ -192,18 +201,18 @@ class AtomicStoreTests(unittest.TestCase):
             return item
         with mock.patch.object(store, "_verify_live_layout"), mock.patch.object(store.os, "fstat", side_effect=drift):
             with self.assertRaises(RunStoreError) as raised:
-                layout.publish_json("root", "run-manifest.json", {})
+                self._store_publish(layout, "root", "run-manifest.json", {})
         self.assertEqual(raised.exception.code, "FD_DRIFT")
 
     def test_13_short_write_and_file_fsync_leave_residual(self):
         layout = self.layout()
         with mock.patch.object(store.os, "write", return_value=0):
             with self.assertRaises(RunStoreError) as short:
-                layout.publish_json("root", "run-manifest.json", {"a": 1})
+                self._store_publish(layout, "root", "run-manifest.json", {"a": 1})
         self.assertEqual(short.exception.residual.state, "PRESENT_BOUND")
         with mock.patch.object(store, "_fsync", side_effect=RunStoreError("PUBLISH_IO_FAILED")):
             with self.assertRaises(RunStoreError) as synced:
-                layout.publish_json("root", "evidence-manifest.json", {"a": 1})
+                self._store_publish(layout, "root", "evidence-manifest.json", {"a": 1})
         self.assertEqual(synced.exception.residual.state, "PRESENT_BOUND")
 
     def test_14_pre_rename_name_drift_prevents_rename_call(self):
@@ -216,13 +225,13 @@ class AtomicStoreTests(unittest.TestCase):
         with mock.patch.object(store.os, "stat", side_effect=missing), \
              mock.patch.object(store, "_rename_exclusive", side_effect=AssertionError("must not rename")):
             with self.assertRaises(RunStoreError) as raised:
-                layout.publish_json("root", "run-manifest.json", {"a": 1})
+                self._store_publish(layout, "root", "run-manifest.json", {"a": 1})
         self.assertEqual(raised.exception.code, "PATH_DRIFT")
 
     def test_15_eexist_keeps_temp_and_never_falls_back(self):
         layout = self.layout(); target = Path(layout.evidence_path) / "run-manifest.json"; target.write_bytes(b"foreign")
         with self.assertRaises(RunStoreError) as raised:
-            layout.publish_json("root", "run-manifest.json", {"a": 1})
+            self._store_publish(layout, "root", "run-manifest.json", {"a": 1})
         self.assertEqual(raised.exception.code, "PUBLISH_EXISTS")
         self.assertEqual(target.read_bytes(), b"foreign")
         self.assertEqual(raised.exception.residual.state, "PRESENT_BOUND")
@@ -232,7 +241,7 @@ class AtomicStoreTests(unittest.TestCase):
         def note(fd, code="PUBLISH_IO_FAILED"):
             events.append(fd); return real_fsync(fd, code)
         with mock.patch.object(store, "_fsync", side_effect=note):
-            layout.publish_json("root", "run-manifest.json", {"a": 1})
+            self._store_publish(layout, "root", "run-manifest.json", {"a": 1})
         self.assertGreaterEqual(len(events), 4)
         self.assertEqual(events[1], layout._evidence_fd)  # rename -> first parent fsync
         self.assertEqual(events[-1], layout._evidence_fd)  # final -> second parent fsync
@@ -250,7 +259,7 @@ class AtomicStoreTests(unittest.TestCase):
             return result
         with mock.patch.object(store, "_fsync", side_effect=replace):
             with self.assertRaises(RunStoreError) as raised:
-                layout.publish_json("root", "run-manifest.json", {"a": 1})
+                self._store_publish(layout, "root", "run-manifest.json", {"a": 1})
         self.assertTrue(raised.exception.published_may_exist)
 
     def test_18_existing_failure_reads_only_stably_bound_terminal_record(self):
@@ -281,7 +290,7 @@ class AtomicStoreTests(unittest.TestCase):
             entered.set(); release.wait(2); return real_publish(*args, **kwargs)
         result = []
         with mock.patch.object(store, "_publish", side_effect=held):
-            worker = threading.Thread(target=lambda: result.append(layout.publish_json("root", "run-manifest.json", {"a": 1})))
+            worker = threading.Thread(target=lambda: result.append(self._store_publish(layout, "root", "run-manifest.json", {"a": 1})))
             worker.start(); self.assertTrue(entered.wait(1))
             closer = threading.Thread(target=layout.close); closer.start(); time.sleep(0.02); self.assertTrue(closer.is_alive())
             release.set(); worker.join(2); closer.join(2)
@@ -402,7 +411,7 @@ class AtomicStoreTests(unittest.TestCase):
             return original(fd, primary, **kwargs)
         with mock.patch.object(store, "_owned_close", side_effect=published_close):
             with self.assertRaises(RunStoreError) as published:
-                layout.publish_json("root", "run-manifest.json", {"a": 1})
+                self._store_publish(layout, "root", "run-manifest.json", {"a": 1})
         self.assertEqual((published.exception.code, published.exception.published_may_exist), ("CLOSE_FAILED", True))
 
     def test_29_existing_failure_rejects_same_inode_same_size_inplace_rewrite_during_read(self):
@@ -433,7 +442,7 @@ class AtomicStoreTests(unittest.TestCase):
         old_hash = hashlib.sha256(b'{"a":1}').hexdigest()
         with mock.patch.object(store, "_read_exact", side_effect=mutate):
             with self.assertRaises(RunStoreError) as raised:
-                layout.publish_json("root", "run-manifest.json", {"a": 1})
+                self._store_publish(layout, "root", "run-manifest.json", {"a": 1})
         self.assertTrue(raised.exception.published_may_exist)
         self.assertNotEqual(hashlib.sha256(path.read_bytes()).hexdigest(), old_hash)
 
@@ -500,7 +509,7 @@ class AtomicStoreTests(unittest.TestCase):
                 os.chmod(target, 0o777)
                 try:
                     with self.assertRaises(RunStoreError):
-                        layout.publish_json("root", "run-manifest.json", {"a": 1})
+                        self._store_publish(layout, "root", "run-manifest.json", {"a": 1})
                     evidence = Path(layout.evidence_path)
                     self.assertFalse((evidence / "run-manifest.json").exists())
                     self.assertFalse(any(item.name.startswith(".tmp-") for item in evidence.iterdir()))
@@ -545,7 +554,7 @@ class AtomicStoreTests(unittest.TestCase):
     def test_37_publish_rechecks_actual_private_parent_before_temp_open(self):
         cases = (
             ("failure", "evidence", "run-failure.json", lambda layout: record_first_failure(layout, self._failure(layout))),
-            ("ordinary", "results", "SUITE-TEST.json", lambda layout: layout.publish_json("results", "SUITE-TEST.json", {"a": 1})),
+            ("ordinary", "results", "SUITE-TEST.json", lambda layout: self._store_publish(layout, "results", "SUITE-TEST.json", {"a": 1})),
         )
         for kind, area, leaf, invoke in cases:
             with self.subTest(area=area):
@@ -821,6 +830,159 @@ class AtomicStoreTests(unittest.TestCase):
         with self.assertRaises(RunStoreError) as uncertain:
             layout.publish_attempt0_decision(passed)
         self.assertEqual(uncertain.exception.code, "ATTEMPT_DUPLICATE")
+
+    def test_48_snapshot_ticket_never_adopts_same_byte_replacement_after_publish(self):
+        layout = self.layout()
+        real_publish = store._publish
+
+        def publish_then_replace(*args, **kwargs):
+            publication = real_publish(*args, **kwargs)
+            if args[2] == "source-snapshot-manifest.json":
+                leaf = Path(layout.state_path) / "snapshot/source-snapshot-manifest.json"
+                replacement = leaf.parent / "replacement"
+                replacement.write_bytes(leaf.read_bytes())
+                os.chmod(replacement, 0o600)
+                os.replace(replacement, leaf)
+            return publication
+
+        with layout.snapshot_capture_lease() as lease:
+            with mock.patch.object(store, "_publish", side_effect=publish_then_replace):
+                with self.assertRaises(RunStoreError) as raised:
+                    layout.publish_snapshot_manifest(
+                        self._snapshot_manifest(layout),
+                        expected_head_sha="a" * 40,
+                        lease=lease,
+                    )
+            self.assertEqual(raised.exception.code, "PUBLISH_VERIFY_FAILED")
+            self.assertTrue(raised.exception.published_may_exist)
+            self.assertNotEqual(layout._snapshot_state, "FINALIZED")
+            self.assertIsNone(layout._snapshot_ticket)
+
+    def test_49_finalized_snapshot_replacement_is_rejected_before_untrusted_size_read(self):
+        for replacement_raw in (None, b"x" * (2 * 1024 * 1024)):
+            with self.subTest(
+                replacement="same-byte" if replacement_raw is None else "large",
+            ):
+                layout = self.layout()
+                with layout.snapshot_capture_lease() as lease:
+                    ticket = layout.publish_snapshot_manifest(
+                        self._snapshot_manifest(layout),
+                        expected_head_sha="a" * 40,
+                        lease=lease,
+                    )
+                    layout.linearize_snapshot_success(ticket, lease=lease)
+                leaf = (
+                    Path(layout.state_path)
+                    / "snapshot/source-snapshot-manifest.json"
+                )
+                raw = leaf.read_bytes() if replacement_raw is None else replacement_raw
+                replacement = leaf.parent / "replacement"
+                replacement.write_bytes(raw)
+                os.chmod(replacement, 0o600)
+                os.replace(replacement, leaf)
+                replacement_identity = (leaf.stat().st_dev, leaf.stat().st_ino)
+                real_read = store._read_exact
+
+                def reject_replacement_read(fd, size, *, code):
+                    item = os.fstat(fd)
+                    if (item.st_dev, item.st_ino) == replacement_identity:
+                        raise AssertionError("untrusted snapshot replacement was read")
+                    return real_read(fd, size, code=code)
+
+                with mock.patch.object(
+                    store, "_read_exact", side_effect=reject_replacement_read,
+                ):
+                    with self.assertRaises(RunStoreError) as raised:
+                        layout.begin_attempt0()
+                self.assertEqual(
+                    raised.exception.code, "SNAPSHOT_BINDING_MISMATCH",
+                )
+
+    def test_50_pending_snapshot_replacement_is_rejected_before_linearize_read(self):
+        for replacement_raw in (None, b"x" * (2 * 1024 * 1024)):
+            with self.subTest(
+                replacement="same-byte" if replacement_raw is None else "large",
+            ):
+                layout = self.layout()
+                with layout.snapshot_capture_lease() as lease:
+                    ticket = layout.publish_snapshot_manifest(
+                        self._snapshot_manifest(layout),
+                        expected_head_sha="a" * 40,
+                        lease=lease,
+                    )
+                    leaf = (
+                        Path(layout.state_path)
+                        / "snapshot/source-snapshot-manifest.json"
+                    )
+                    raw = leaf.read_bytes() if replacement_raw is None else replacement_raw
+                    replacement = leaf.parent / "replacement"
+                    replacement.write_bytes(raw)
+                    os.chmod(replacement, 0o600)
+                    os.replace(replacement, leaf)
+                    replacement_identity = (leaf.stat().st_dev, leaf.stat().st_ino)
+                    real_read = store._read_exact
+
+                    def reject_replacement_read(fd, size, *, code):
+                        item = os.fstat(fd)
+                        if (item.st_dev, item.st_ino) == replacement_identity:
+                            raise AssertionError(
+                                "untrusted pending snapshot replacement was read"
+                            )
+                        return real_read(fd, size, code=code)
+
+                    with mock.patch.object(
+                        store,
+                        "_read_exact",
+                        side_effect=reject_replacement_read,
+                    ):
+                        with self.assertRaises(RunStoreError) as raised:
+                            layout.linearize_snapshot_success(
+                                ticket, lease=lease,
+                            )
+                    self.assertEqual(
+                        raised.exception.code, "PUBLISH_VERIFY_FAILED",
+                    )
+                    self.assertTrue(raised.exception.published_may_exist)
+                    self.assertNotEqual(layout._snapshot_state, "FINALIZED")
+
+    def test_51_second_publish_verify_rejects_mode_drift_from_first_identity(self):
+        layout = self.layout()
+        with layout.snapshot_capture_lease() as lease:
+            ticket = layout.publish_snapshot_manifest(
+                self._snapshot_manifest(layout),
+                expected_head_sha="a" * 40,
+                lease=lease,
+            )
+            layout.linearize_snapshot_success(ticket, lease=lease)
+        layout.begin_attempt0()
+        decision = adjudicate_parent_event(
+            "SPAWN_EXEC_FAILED",
+            None,
+            layout.run_id,
+            "SUITE-RUE05A",
+            "ENTRY-RUE05A-ATTEMPT0",
+            0,
+        )
+        leaf = Path(layout.state_path) / "attempts/attempt-0.json"
+        real_fsync = store._fsync
+        parent_fsyncs = {"count": 0}
+
+        def chmod_between_verifications(fd, code="PUBLISH_IO_FAILED"):
+            result = real_fsync(fd, code)
+            if fd == layout._attempts_fd_required():
+                parent_fsyncs["count"] += 1
+                if parent_fsyncs["count"] == 2:
+                    os.chmod(leaf, 0o644)
+            return result
+
+        with mock.patch.object(
+            store, "_fsync", side_effect=chmod_between_verifications,
+        ):
+            with self.assertRaises(RunStoreError) as raised:
+                layout.publish_attempt0_decision(decision)
+        self.assertTrue(raised.exception.published_may_exist)
+        self.assertEqual(stat.S_IMODE(leaf.stat().st_mode), 0o644)
+        self.assertIsNone(layout._attempt0_publication)
 
 
 if __name__ == "__main__":

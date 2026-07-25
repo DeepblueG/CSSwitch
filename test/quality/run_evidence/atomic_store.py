@@ -1,7 +1,7 @@
-"""RUE-03 durable store plus RUE-04 snapshot lease/linearization primitives.
+"""RUE-03 store plus narrow RUE-04/05/06/fixed-aggregation primitives.
 
-This module intentionally has no Git subprocess, retry, aggregation, or CLI
-logic; RUE-04 source capture completes its post-check before linearization.
+This module has no Git subprocess, retry execution, aggregation policy, or CLI
+logic.  It only owns layout-local publication claims and exact readbacks.
 """
 from __future__ import annotations
 
@@ -103,6 +103,7 @@ class PublishedJson:
     path: str
     sha256: str
     size: int
+    identity: TempOwnerIdentityV1
 
 
 @dataclass(frozen=True)
@@ -519,9 +520,20 @@ def _rename_exclusive(parent_fd: int, temp_leaf: str, final_leaf: str) -> None:
     raise _error(codes.get(number, "CONTRACT_FAILURE" if number == 0 else "RENAME_FAILED"), stage="RENAME")
 
 
-def _publication_name(area: str, leaf: str, *, failure: bool, dedicated_attempt: bool = False) -> None:
-    if area not in _AREAS or not _leaf(leaf) or leaf == "completion-seal.json":
+def _publication_name(
+    area: str,
+    leaf: str,
+    *,
+    failure: bool,
+    dedicated_attempt: bool = False,
+    dedicated_terminal: bool = False,
+) -> None:
+    if area not in _AREAS or not _leaf(leaf):
         raise _error("PUBLISH_AREA_INVALID", stage="PUBLISH")
+    if leaf == "completion-seal.json":
+        if not dedicated_terminal or area != "root" or failure:
+            raise _error("PUBLISH_AREA_INVALID", stage="PUBLISH")
+        return
     if failure:
         if area != "evidence" or leaf != "run-failure.json":
             raise _error("PUBLISH_AREA_INVALID", stage="PUBLISH")
@@ -532,7 +544,7 @@ def _publication_name(area: str, leaf: str, *, failure: bool, dedicated_attempt:
     if area == "results" and not (leaf.startswith("SUITE-") and leaf.endswith(".json")):
         raise _error("PUBLISH_AREA_INVALID", stage="PUBLISH")
     if area == "attempts":
-        if not dedicated_attempt or leaf != "attempt-0.json":
+        if not dedicated_attempt or leaf not in {"attempt-0.json", "attempt-1.json"}:
             raise _error("PUBLISH_AREA_INVALID", stage="PUBLISH")
 
 
@@ -561,6 +573,16 @@ class RunLayout:
     _finalized_snapshot_binding: FinalizedSnapshotBinding | None = field(default=None, repr=False)
     _attempt0_started: bool = field(default=False, repr=False)
     _attempt0_publication_started: bool = field(default=False, repr=False)
+    _attempt0_publication: PublishedJson | None = field(default=None, repr=False)
+    _attempt1_started: bool = field(default=False, repr=False)
+    _attempt1_publication_started: bool = field(default=False, repr=False)
+    _attempt1_publication: PublishedJson | None = field(default=None, repr=False)
+    _fixed_prepare_started: bool = field(default=False, repr=False)
+    _fixed_run_publication: PublishedJson | None = field(default=None, repr=False)
+    _fixed_completion_started: bool = field(default=False, repr=False)
+    _fixed_result_publication: PublishedJson | None = field(default=None, repr=False)
+    _fixed_evidence_publication: PublishedJson | None = field(default=None, repr=False)
+    _fixed_seal_publication: PublishedJson | None = field(default=None, repr=False)
 
     def _state_fd_required(self) -> int:
         if self._state_fd is None:
@@ -627,7 +649,96 @@ class RunLayout:
             if area == "attempts":
                 # Attempt records are evidence decisions, never generic JSON.
                 raise _error("PUBLISH_AREA_INVALID", stage="PUBLISH", run_id=self.run_id)
+            if area in {"root", "evidence", "results"}:
+                # Run, result, evidence, and seal leaves are authority-bearing.
+                # Only the fixed aggregation path may publish them.
+                raise _error("PUBLISH_AREA_INVALID", stage="PUBLISH", run_id=self.run_id)
             return _publish(self, area, leaf, canonical_json_bytes(value), failure=False)
+
+    def _read_bound_publication(
+        self,
+        publication: PublishedJson | None,
+        *,
+        expected_area: str,
+        expected_leaf: str,
+        code: str,
+        max_size: int = _MAX_RECORD_BYTES,
+    ) -> Mapping[str, Any]:
+        """Read canonical JSON from one exact layout-owned publication.
+
+        Size and full publication identity are trusted from the successful
+        no-clobber publication before the descriptor is read.  Both the held
+        descriptor and its public name must retain that exact identity across
+        read and parse passes.
+        """
+        self._open()
+        if (
+            publication is None
+            or publication.area != expected_area
+            or publication.leaf != expected_leaf
+            or not 0 < publication.size <= max_size
+        ):
+            raise _error(code, stage="AGGREGATE", run_id=self.run_id)
+        try:
+            _verify_live_layout(self)
+            parent = self._fd(expected_area)
+            fd = _again(os.open, publication.leaf, _READ_FLAGS, dir_fd=parent)
+        except RunStoreError as rename_error:
+            raise
+        except OSError:
+            raise _error(code, stage="AGGREGATE", run_id=self.run_id)
+        primary: RunStoreError | None = None
+        decoded: Mapping[str, Any] | None = None
+        try:
+            before = os.fstat(fd)
+            named_before = os.stat(
+                publication.leaf, dir_fd=parent, follow_symlinks=False,
+            )
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or _mode(before) != 0o600
+                or before.st_nlink != 1
+                or before.st_size != publication.size
+                or not _owner_matches(before, publication.identity)
+                or not _stable(before, named_before)
+            ):
+                raise _error(code, stage="AGGREGATE", run_id=self.run_id)
+            raw = _read_exact(fd, publication.size, code=code)
+            after_read = os.fstat(fd)
+            named_after_read = os.stat(
+                publication.leaf, dir_fd=parent, follow_symlinks=False,
+            )
+            if (
+                not _owner_matches(after_read, publication.identity)
+                or not _stable(before, after_read)
+                or not _stable(after_read, named_after_read)
+                or hashlib.sha256(raw).hexdigest() != publication.sha256
+            ):
+                raise _error(code, stage="AGGREGATE", run_id=self.run_id)
+            value = load_canonical_json(raw)
+            if not isinstance(value, Mapping) or canonical_json_bytes(value) != raw:
+                raise _error(code, stage="AGGREGATE", run_id=self.run_id)
+            after_parse = os.fstat(fd)
+            named_after_parse = os.stat(
+                publication.leaf, dir_fd=parent, follow_symlinks=False,
+            )
+            if (
+                not _owner_matches(after_parse, publication.identity)
+                or not _stable(after_read, after_parse)
+                or not _stable(after_parse, named_after_parse)
+            ):
+                raise _error(code, stage="AGGREGATE", run_id=self.run_id)
+            decoded = value
+        except RunStoreError as error:
+            primary = error
+        except Exception:
+            primary = _error(code, stage="AGGREGATE", run_id=self.run_id)
+        primary = _owned_close(
+            fd, primary, run_id=self.run_id, final_leaf=publication.leaf,
+        )
+        if primary is not None:
+            raise primary
+        return decoded  # type: ignore[return-value]
 
     def _read_bound_finalized_snapshot(self) -> Mapping[str, Any]:
         """Re-read the exact finalized snapshot through its held layout binding."""
@@ -647,11 +758,26 @@ class RunLayout:
         try:
             before = os.fstat(fd)
             named = os.stat(binding.publication.leaf, dir_fd=self._snapshot_fd_required(), follow_symlinks=False)
-            raw = _read_exact(fd, before.st_size, code="SNAPSHOT_BINDING_MISMATCH")
-            after = os.fstat(fd)
             if (
-                not stat.S_ISREG(before.st_mode) or _mode(before) != 0o600 or before.st_nlink != 1
-                or not _stable(before, after) or not _stable(after, named)
+                not stat.S_ISREG(before.st_mode) or _mode(before) != 0o600
+                or before.st_nlink != 1
+                or before.st_size != binding.publication.size
+                or not _owner_matches(before, binding.identity)
+                or not _stable(before, named)
+            ):
+                raise _error("SNAPSHOT_BINDING_MISMATCH", stage="EXECUTE", run_id=self.run_id)
+            raw = _read_exact(
+                fd, binding.publication.size,
+                code="SNAPSHOT_BINDING_MISMATCH",
+            )
+            after = os.fstat(fd)
+            named_after = os.stat(
+                binding.publication.leaf,
+                dir_fd=self._snapshot_fd_required(),
+                follow_symlinks=False,
+            )
+            if (
+                not _stable(before, after) or not _stable(after, named_after)
                 or not _owner_matches(after, binding.identity) or after.st_size != binding.publication.size
                 or hashlib.sha256(raw).hexdigest() != binding.publication.sha256
             ):
@@ -690,6 +816,8 @@ class RunLayout:
         with self._lock:
             self._open()
             self._snapshot_terminal_absent()
+            if self._fixed_completion_started:
+                raise _error("ATTEMPT_STATE_UNSAFE", stage="EXECUTE", run_id=self.run_id)
             if self._attempt0_started:
                 raise _error("ATTEMPT_DUPLICATE", stage="EXECUTE", run_id=self.run_id)
             try:
@@ -709,6 +837,8 @@ class RunLayout:
         with self._lock:
             self._open()
             self._snapshot_terminal_absent()
+            if self._fixed_completion_started:
+                raise _error("ATTEMPT_STATE_UNSAFE", stage="EXECUTE", run_id=self.run_id)
             if not self._attempt0_started:
                 raise _error("ATTEMPT_NOT_STARTED", stage="EXECUTE", run_id=self.run_id)
             if self._attempt0_publication_started:
@@ -734,7 +864,158 @@ class RunLayout:
             # This is a one-way in-memory claim.  Once publication is called,
             # success, failure and uncertainty all consume attempt-0 forever.
             self._attempt0_publication_started = True
-            return _publish(self, "attempts", "attempt-0.json", canonical_json_bytes(value), failure=False, dedicated_attempt=True)
+            publication = _publish(self, "attempts", "attempt-0.json", canonical_json_bytes(value), failure=False, dedicated_attempt=True)
+            self._attempt0_publication = publication
+            return publication
+
+    def _read_bound_attempt(self, attempt_index: int) -> AttemptDecisionV1:
+        """Read one exact publication owned by this live layout."""
+        if attempt_index == 0:
+            publication = self._attempt0_publication
+        elif attempt_index == 1:
+            publication = self._attempt1_publication
+        else:
+            raise _error("ATTEMPT_BINDING_MISMATCH", stage="EXECUTE", run_id=self.run_id)
+        if publication is None:
+            raise _error("ATTEMPT_STATE_UNSAFE", stage="EXECUTE", run_id=self.run_id)
+        self._read_bound_finalized_snapshot()
+        try:
+            _verify_live_layout(self)
+            fd = _again(os.open, publication.leaf, _READ_FLAGS, dir_fd=self._attempts_fd_required())
+        except RunStoreError:
+            raise
+        except OSError:
+            raise _error("ATTEMPT_STATE_UNSAFE", stage="EXECUTE", run_id=self.run_id)
+        primary: RunStoreError | None = None
+        decision: AttemptDecisionV1 | None = None
+        try:
+            before = os.fstat(fd)
+            named = os.stat(publication.leaf, dir_fd=self._attempts_fd_required(), follow_symlinks=False)
+            if (
+                not stat.S_ISREG(before.st_mode) or _mode(before) != 0o600
+                or before.st_nlink != 1 or before.st_size != publication.size
+                or not _owner_matches(before, publication.identity)
+                or not _stable(before, named)
+            ):
+                raise _error("ATTEMPT_STATE_UNSAFE", stage="EXECUTE", run_id=self.run_id)
+            raw = _read_exact(fd, publication.size, code="ATTEMPT_STATE_UNSAFE")
+            after = os.fstat(fd)
+            named_after = os.stat(
+                publication.leaf,
+                dir_fd=self._attempts_fd_required(),
+                follow_symlinks=False,
+            )
+            if (
+                not _stable(before, after) or not _stable(after, named_after)
+                or not _owner_matches(after, publication.identity)
+                or after.st_size != publication.size
+                or hashlib.sha256(raw).hexdigest() != publication.sha256
+            ):
+                raise _error("ATTEMPT_STATE_UNSAFE", stage="EXECUTE", run_id=self.run_id)
+            value = load_canonical_json(raw)
+            if not isinstance(value, Mapping) or canonical_json_bytes(value) != raw or set(value) != {
+                "run_id", "suite_id", "entrypoint_id", "attempt_index",
+                "process_exit", "disposition", "reason_code",
+            }:
+                raise _error("ATTEMPT_STATE_UNSAFE", stage="EXECUTE", run_id=self.run_id)
+            from .contracts import AttemptRecord
+            decision = AttemptDecisionV1(
+                value["run_id"], value["suite_id"], value["entrypoint_id"],
+                value["attempt_index"], AttemptRecord(value["attempt_index"], value["process_exit"]),
+                value["disposition"], value["reason_code"],
+            )
+            if (
+                decision.run_id != self.run_id
+                or decision.suite_id != _ATTEMPT0_SUITE_ID
+                or decision.entrypoint_id != _ATTEMPT0_ENTRYPOINT_ID
+                or decision.attempt_index != attempt_index
+            ):
+                raise _error("ATTEMPT_BINDING_MISMATCH", stage="EXECUTE", run_id=self.run_id)
+        except RunStoreError as error:
+            primary = error
+        except Exception:
+            primary = _error("ATTEMPT_STATE_UNSAFE", stage="EXECUTE", run_id=self.run_id)
+        primary = _owned_close(fd, primary, run_id=self.run_id, final_leaf=publication.leaf)
+        if primary is not None:
+            raise primary
+        return decision  # type: ignore[return-value]
+
+    def begin_attempt1(self) -> Mapping[str, Any]:
+        """Claim attempt-1 only from the exact persisted readiness attempt-0."""
+        with self._lock:
+            self._open()
+            self._snapshot_terminal_absent()
+            if self._fixed_completion_started:
+                raise _error("ATTEMPT_STATE_UNSAFE", stage="EXECUTE", run_id=self.run_id)
+            if self._attempt1_started:
+                raise _error("ATTEMPT_DUPLICATE", stage="EXECUTE", run_id=self.run_id)
+            try:
+                os.stat("attempt-1.json", dir_fd=self._attempts_fd_required(), follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                raise _error("ATTEMPT_STATE_UNSAFE", stage="EXECUTE", run_id=self.run_id)
+            else:
+                raise _error("ATTEMPT_DUPLICATE", stage="EXECUTE", run_id=self.run_id)
+            manifest = self._read_bound_finalized_snapshot()
+            attempt0 = self._read_bound_attempt(0)
+            if (
+                attempt0.disposition != "READINESS"
+                or attempt0.reason_code != "READINESS_TIMEOUT"
+                or attempt0.attempt_record.process_exit != 13
+            ):
+                raise _error("ATTEMPT_NOT_ELIGIBLE", stage="EXECUTE", run_id=self.run_id)
+            self._attempt1_started = True
+            return manifest
+
+    def publish_attempt1_decision(self, decision: AttemptDecisionV1) -> PublishedJson:
+        """Publish the one eligible attempt-1 decision; uncertainty is terminal."""
+        with self._lock:
+            self._open()
+            self._snapshot_terminal_absent()
+            if self._fixed_completion_started:
+                raise _error("ATTEMPT_STATE_UNSAFE", stage="EXECUTE", run_id=self.run_id)
+            if not self._attempt1_started:
+                raise _error("ATTEMPT_NOT_STARTED", stage="EXECUTE", run_id=self.run_id)
+            if self._attempt1_publication_started:
+                raise _error("ATTEMPT_DUPLICATE", stage="EXECUTE", run_id=self.run_id)
+            if (
+                not isinstance(decision, AttemptDecisionV1)
+                or decision.run_id != self.run_id
+                or decision.attempt_index != 1
+                or decision.suite_id != _ATTEMPT0_SUITE_ID
+                or decision.entrypoint_id != _ATTEMPT0_ENTRYPOINT_ID
+            ):
+                raise _error("ATTEMPT_BINDING_MISMATCH", stage="EXECUTE", run_id=self.run_id)
+            self._read_bound_attempt(0)
+            value = {
+                "run_id": decision.run_id,
+                "suite_id": decision.suite_id,
+                "entrypoint_id": decision.entrypoint_id,
+                "attempt_index": decision.attempt_index,
+                "process_exit": decision.attempt_record.process_exit,
+                "disposition": decision.disposition,
+                "reason_code": decision.reason_code,
+            }
+            self._attempt1_publication_started = True
+            publication = _publish(self, "attempts", "attempt-1.json", canonical_json_bytes(value), failure=False, dedicated_attempt=True)
+            self._attempt1_publication = publication
+            return publication
+
+    def read_retry_decisions(self) -> tuple[AttemptDecisionV1, AttemptDecisionV1]:
+        """Return both exact persisted records for final retry adjudication."""
+        with self._lock:
+            self._open()
+            self._snapshot_terminal_absent()
+            initial = self._read_bound_attempt(0), self._read_bound_attempt(1)
+            closing = self._read_bound_attempt(0), self._read_bound_attempt(1)
+            if closing != initial:
+                raise _error(
+                    "ATTEMPT_STATE_UNSAFE",
+                    stage="EXECUTE",
+                    run_id=self.run_id,
+                )
+            return initial
 
     def snapshot_capture_lease(self):
         """Return a context manager spanning capture through terminal handling.
@@ -824,12 +1105,17 @@ class RunLayout:
             publication = _publish(self, "snapshot", "source-snapshot-manifest.json", raw, failure=False)
             try:
                 item = os.stat("source-snapshot-manifest.json", dir_fd=self._snapshot_fd_required(), follow_symlinks=False)
-                if not stat.S_ISREG(item.st_mode) or _mode(item) != 0o600 or item.st_nlink != 1:
+                if (
+                    not stat.S_ISREG(item.st_mode) or _mode(item) != 0o600 or item.st_nlink != 1
+                    or not _owner_matches(item, publication.identity)
+                ):
                     raise OSError()
-                identity = _owner(item)
             except OSError:
                 raise _error("PUBLISH_VERIFY_FAILED", stage="SNAPSHOT", run_id=self.run_id, published_may_exist=True)
-            ticket = SnapshotPublicationTicket(self.run_id, expected_head_sha, publication, identity, lease._nonce)
+            ticket = SnapshotPublicationTicket(
+                self.run_id, expected_head_sha, publication,
+                publication.identity, lease._nonce,
+            )
             self._snapshot_ticket = ticket
             self._snapshot_state = "PUBLISHED_PENDING"
             return ticket
@@ -857,10 +1143,33 @@ class RunLayout:
             try:
                 before = os.fstat(fd)
                 named = os.stat(ticket.publication.leaf, dir_fd=self._snapshot_fd_required(), follow_symlinks=False)
-                raw = _read_exact(fd, before.st_size, code="PUBLISH_VERIFY_FAILED")
-                after = os.fstat(fd)
                 if (
-                    not _stable(before, after) or not _stable(after, named) or not _owner_matches(after, ticket.identity)
+                    not stat.S_ISREG(before.st_mode) or _mode(before) != 0o600
+                    or before.st_nlink != 1
+                    or before.st_size != ticket.publication.size
+                    or not _owner_matches(before, ticket.identity)
+                    or not _stable(before, named)
+                ):
+                    raise _error(
+                        "PUBLISH_VERIFY_FAILED",
+                        stage="SNAPSHOT",
+                        run_id=self.run_id,
+                        published_may_exist=True,
+                    )
+                raw = _read_exact(
+                    fd, ticket.publication.size,
+                    code="PUBLISH_VERIFY_FAILED",
+                )
+                after = os.fstat(fd)
+                named_after = os.stat(
+                    ticket.publication.leaf,
+                    dir_fd=self._snapshot_fd_required(),
+                    follow_symlinks=False,
+                )
+                if (
+                    not _stable(before, after)
+                    or not _stable(after, named_after)
+                    or not _owner_matches(after, ticket.identity)
                     or _mode(after) != 0o600 or after.st_nlink != 1 or after.st_size != ticket.publication.size
                     or hashlib.sha256(raw).hexdigest() != ticket.publication.sha256 or canonical_json_bytes(load_canonical_json(raw)) != raw
                 ):
@@ -1207,7 +1516,14 @@ def _residual(temp_leaf: str, owner: TempOwnerIdentityV1 | None, digest: str, pa
 
 
 def _publish(
-    layout: RunLayout, area: str, leaf: str, raw: bytes, *, failure: bool, dedicated_attempt: bool = False
+    layout: RunLayout,
+    area: str,
+    leaf: str,
+    raw: bytes,
+    *,
+    failure: bool,
+    dedicated_attempt: bool = False,
+    dedicated_terminal: bool = False,
 ) -> PublishedJson:
     if failure:
         layout._evidence_open()
@@ -1215,7 +1531,13 @@ def _publish(
     else:
         layout._open()
         _verify_live_layout(layout)
-    _publication_name(area, leaf, failure=failure, dedicated_attempt=dedicated_attempt)
+    _publication_name(
+        area,
+        leaf,
+        failure=failure,
+        dedicated_attempt=dedicated_attempt,
+        dedicated_terminal=dedicated_terminal,
+    )
     parent_fd = layout._evidence_fd_required() if failure else layout._fd(area)
     digest = hashlib.sha256(raw).hexdigest()
     temp_leaf = ".tmp-" + secrets.token_bytes(16).hex()
@@ -1231,6 +1553,7 @@ def _publish(
     rename_succeeded = False
     primary: RunStoreError | None = None
     result: PublishedJson | None = None
+    final_safe_identity: TempOwnerIdentityV1 | None = None
     try:
         try:
             fd = _again(os.open, temp_leaf, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=parent_fd)
@@ -1266,10 +1589,74 @@ def _publish(
             named = os.stat(temp_leaf, dir_fd=parent_fd, follow_symlinks=False)
         except OSError:
             raise _error("PATH_DRIFT", stage="RENAME", run_id=layout.run_id, final_leaf=leaf)
-        if not _owner_matches(named, owner, exact=False):
+        if not _owner_matches(
+            named, owner, exact=dedicated_terminal,
+        ):
             raise _error("PATH_DRIFT", stage="RENAME", run_id=layout.run_id, final_leaf=leaf)
+        if dedicated_terminal:
+            # A completion seal becomes authoritative at the exclusive rename.
+            # Complete every fallible durability/binding check while it still
+            # has a non-authoritative temporary name.  After rename succeeds,
+            # no later fsync/readback/close failure may turn a visible,
+            # schema-valid terminal seal into caller-visible uncertainty.
+            try:
+                if canonical_json_bytes(load_canonical_json(raw)) != raw:
+                    raise _error(
+                        "CONTRACT_FAILURE",
+                        stage="SEAL",
+                        run_id=layout.run_id,
+                        final_leaf=leaf,
+                    )
+            except RunStoreError:
+                raise
+            except Exception:
+                raise _error(
+                    "CONTRACT_FAILURE",
+                    stage="SEAL",
+                    run_id=layout.run_id,
+                    final_leaf=leaf,
+                )
+            _verify_live_layout(layout)
+            _fsync(parent_fd)
+            held = os.fstat(fd)
+            named_held = os.stat(
+                temp_leaf, dir_fd=parent_fd, follow_symlinks=False,
+            )
+            final_read = _read_exact(
+                fd, len(raw), code="PUBLISH_VERIFY_FAILED",
+            )
+            post_read = os.fstat(fd)
+            named_post_read = os.stat(
+                temp_leaf, dir_fd=parent_fd, follow_symlinks=False,
+            )
+            if (
+                not _owner_matches(held, owner)
+                or not _owner_matches(named_held, owner)
+                or hashlib.sha256(final_read).hexdigest() != digest
+                or not _owner_matches(post_read, owner)
+                or not _owner_matches(named_post_read, owner)
+            ):
+                raise _error(
+                    "PUBLISH_VERIFY_FAILED",
+                    stage="SEAL",
+                    run_id=layout.run_id,
+                    final_leaf=leaf,
+                )
         _rename_exclusive(parent_fd, temp_leaf, leaf)
         rename_succeeded = True
+        if dedicated_terminal:
+            # rename(2) preserves the already frozen inode.  No post-rename
+            # read, fsync, close, or layout check is allowed to reverse this
+            # terminal success.
+            result = PublishedJson(
+                area, leaf, leaf, digest, len(raw), owner,
+            )
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            fd = None
+            return result
         if failure:
             _verify_evidence_binding(layout)
         _fsync(parent_fd)
@@ -1298,6 +1685,7 @@ def _publish(
             named_post_read = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
             if not _stable(final, final_post_read) or not _stable(final_post_read, named_post_read):
                 raise _error("PATH_DRIFT", stage="VERIFY", run_id=layout.run_id, published_may_exist=True, final_leaf=leaf, final_identity_state="REBOUND")
+            final_safe_identity = _owner(final_post_read)
             _fsync(final_fd)
         except RunStoreError as error:
             final_primary = error
@@ -1314,14 +1702,28 @@ def _publish(
         try:
             post = os.fstat(post_fd)
             named_final = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
-            if not _owner_matches(post, owner, exact=False) or not _same(named_final, post):
+            if (
+                final_safe_identity is None
+                or not stat.S_ISREG(post.st_mode)
+                or post.st_uid != os.geteuid()
+                or _mode(post) != 0o600
+                or post.st_nlink != 1
+                or post.st_size != len(raw)
+                or not _owner_matches(post, final_safe_identity)
+                or not _stable(post, named_final)
+            ):
                 raise _error("PATH_DRIFT", stage="VERIFY", run_id=layout.run_id, published_may_exist=True, final_leaf=leaf, final_identity_state="REBOUND")
             if hashlib.sha256(_read_exact(post_fd, len(raw), code="PUBLISH_VERIFY_FAILED")).hexdigest() != digest:
                 raise _error("PUBLISH_VERIFY_FAILED", stage="VERIFY", run_id=layout.run_id, published_may_exist=True, final_leaf=leaf, final_identity_state="MISMATCH")
             post_after_read = os.fstat(post_fd)
             named_after_read = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
-            if not _stable(post, post_after_read) or not _stable(post_after_read, named_after_read):
+            if (
+                not _owner_matches(post_after_read, final_safe_identity)
+                or not _stable(post, post_after_read)
+                or not _stable(post_after_read, named_after_read)
+            ):
                 raise _error("PATH_DRIFT", stage="VERIFY", run_id=layout.run_id, published_may_exist=True, final_leaf=leaf, final_identity_state="REBOUND")
+            owner = final_safe_identity
         except RunStoreError as error:
             post_primary = error
         except OSError:
@@ -1331,7 +1733,13 @@ def _publish(
             _verify_evidence_binding(layout)
         else:
             _verify_live_layout(layout)
-        result = PublishedJson(area, leaf, ("results/" if area == "results" else "snapshot/" if area == "snapshot" else "attempts/" if area == "attempts" else "") + leaf, digest, len(raw))
+        if owner is None:
+            raise _error("PUBLISH_VERIFY_FAILED", stage="VERIFY", run_id=layout.run_id, published_may_exist=True, final_leaf=leaf)
+        result = PublishedJson(
+            area, leaf,
+            ("results/" if area == "results" else "snapshot/" if area == "snapshot" else "attempts/" if area == "attempts" else "") + leaf,
+            digest, len(raw), owner,
+        )
     except RunStoreError as exc:
         if rename_succeeded and not exc.published_may_exist:
             exc = _error(

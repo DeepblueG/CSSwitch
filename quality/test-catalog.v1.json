@@ -7,10 +7,13 @@
     "test/model_catalog_state.test.mjs",
     "test/quality/test_quality_kernel.py",
     "test/quality/test_run_evidence_contracts.py",
+    "test/quality/test_run_evidence_aggregation_runner.py",
     "test/quality/test_run_evidence_atomic_store.py",
     "test/quality/test_run_evidence_attempt0_runner.py",
     "test/quality/test_run_evidence_clean_commit_snapshot.py",
+    "test/quality/test_run_evidence_cli.py",
     "test/quality/test_run_evidence_manifests.py",
+    "test/quality/test_run_evidence_retry_runner.py",
     "test/runtime_status_state.test.mjs",
     "test/skill_page_state.test.mjs",
     "test/test_capability.py",
@@ -97,12 +100,12 @@
     },
     {
       "id": "SUITE-RUN-EVIDENCE-CONTRACT",
-      "name": "run evidence Result, manifest, atomic-store, clean-commit snapshot, and dedicated attempt-0 runner contracts",
+      "name": "run evidence Result, manifest, atomic-store, clean-commit snapshot, fixed retry, and single-suite completion-seal contracts",
       "kind": "python",
       "category": "runner",
-      "entrypoint": "python3 -m unittest test.quality.test_run_evidence_contracts test.quality.test_run_evidence_manifests test.quality.test_run_evidence_atomic_store test.quality.test_run_evidence_clean_commit_snapshot test.quality.test_run_evidence_attempt0_runner -v",
-      "entrypoint_id": "ENTRY-RUN-EVIDENCE-CONTRACT", "command_argv": ["python3", "-m", "unittest", "test.quality.test_run_evidence_contracts", "test.quality.test_run_evidence_manifests", "test.quality.test_run_evidence_atomic_store", "test.quality.test_run_evidence_clean_commit_snapshot", "test.quality.test_run_evidence_attempt0_runner", "-v"], "cwd_mode": "repo-root", "profiles": [], "adapter_protocol": "legacy", "timeout_seconds": 120, "readiness_timeout_seconds": null, "retry_policy": "none", "fixture_paths": ["test/quality/fixtures/run_evidence/attempt0_fixture.py"], "build_recipe_paths": [], "environment_allowlist": [],
-      "source_paths": ["quality/schema/adapter-result.v1.schema.json", "quality/schema/test-result.v1.schema.json", "quality/schema/run-manifest.v1.schema.json", "quality/schema/source-snapshot-manifest.v1.schema.json", "quality/schema/change-set.v1.schema.json", "quality/schema/evidence-manifest.v1.schema.json", "quality/schema/completion-seal.v1.schema.json", "quality/schema/run-failure.v1.schema.json", "quality/schema/release-candidate.v1.schema.json", "test/quality/run_evidence/contracts.py", "test/quality/run_evidence/manifest_contracts.py", "test/quality/run_evidence/atomic_store.py", "test/quality/run_evidence/clean_commit_snapshot.py", "test/quality/run_evidence/attempt0_runner.py", "test/quality/test_run_evidence_contracts.py", "test/quality/test_run_evidence_manifests.py", "test/quality/test_run_evidence_atomic_store.py", "test/quality/test_run_evidence_clean_commit_snapshot.py", "test/quality/test_run_evidence_attempt0_runner.py"],
+      "entrypoint": "python3 -m unittest discover -s test/quality -p 'test_run_evidence_*.py' -v",
+      "entrypoint_id": "ENTRY-RUN-EVIDENCE-CONTRACT", "command_argv": ["python3", "-m", "unittest", "discover", "-s", "test/quality", "-p", "test_run_evidence_*.py", "-v"], "cwd_mode": "repo-root", "profiles": [], "adapter_protocol": "legacy", "timeout_seconds": 120, "readiness_timeout_seconds": null, "retry_policy": "none", "fixture_paths": ["test/quality/fixtures/run_evidence/attempt0_fixture.py"], "build_recipe_paths": [], "environment_allowlist": [],
+      "source_paths": ["quality/schema/adapter-result.v1.schema.json", "quality/schema/test-result.v1.schema.json", "quality/schema/run-manifest.v1.schema.json", "quality/schema/source-snapshot-manifest.v1.schema.json", "quality/schema/change-set.v1.schema.json", "quality/schema/evidence-manifest.v1.schema.json", "quality/schema/completion-seal.v1.schema.json", "quality/schema/run-failure.v1.schema.json", "quality/schema/release-candidate.v1.schema.json", "test/quality/run_evidence/contracts.py", "test/quality/run_evidence/manifest_contracts.py", "test/quality/run_evidence/atomic_store.py", "test/quality/run_evidence/clean_commit_snapshot.py", "test/quality/run_evidence/attempt0_runner.py", "test/quality/run_evidence/retry_runner.py", "test/quality/run_evidence/aggregation_runner.py", "test/quality/run_evidence/cli.py", "test/quality/test_run_evidence_contracts.py", "test/quality/test_run_evidence_manifests.py", "test/quality/test_run_evidence_atomic_store.py", "test/quality/test_run_evidence_clean_commit_snapshot.py", "test/quality/test_run_evidence_attempt0_runner.py", "test/quality/test_run_evidence_retry_runner.py", "test/quality/test_run_evidence_aggregation_runner.py", "test/quality/test_run_evidence_cli.py"],
       "evidence_layer": "source-test",
       "owner": "quality-kernel",
       "status": "implemented",
@@ -115,6 +118,27 @@
       "expected_status": "PASS",
       "historical_case_ids": [],
       "selection_rule": {"mode": "focused", "include_paths": ["quality/", "test/quality/"], "exclude_statuses": ["legacy", "manual", "quarantine", "retired", "not-yet-automatable"]}
+    },
+    {
+      "id": "SUITE-RUE05A",
+      "name": "fixed one-suite NODE-RUN-EVIDENCE CLI",
+      "kind": "python",
+      "category": "runner",
+      "entrypoint": "/usr/bin/python3 -I test/quality/run_evidence/cli.py run --output-root {ABS_EMPTY_0700_DIR}",
+      "entrypoint_id": "ENTRY-RUE05A-ATTEMPT0", "command_argv": ["/usr/bin/python3", "-I", "test/quality/run_evidence/cli.py", "run", "--output-root", "{ABS_EMPTY_0700_DIR}"], "cwd_mode": "repo-root", "profiles": ["focused"], "adapter_protocol": "adapter-result.v1", "timeout_seconds": 10, "readiness_timeout_seconds": 2, "retry_policy": "readiness-timeout-once", "fixture_paths": ["test/quality/fixtures/run_evidence/attempt0_fixture.py"], "build_recipe_paths": [], "environment_allowlist": [],
+      "source_paths": ["quality/schema/adapter-result.v1.schema.json", "quality/schema/test-result.v1.schema.json", "quality/schema/run-manifest.v1.schema.json", "quality/schema/source-snapshot-manifest.v1.schema.json", "quality/schema/evidence-manifest.v1.schema.json", "quality/schema/completion-seal.v1.schema.json", "test/quality/run_evidence/atomic_store.py", "test/quality/run_evidence/clean_commit_snapshot.py", "test/quality/run_evidence/contracts.py", "test/quality/run_evidence/manifest_contracts.py", "test/quality/run_evidence/attempt0_runner.py", "test/quality/run_evidence/retry_runner.py", "test/quality/run_evidence/aggregation_runner.py", "test/quality/run_evidence/cli.py"],
+      "evidence_layer": "source-test",
+      "owner": "quality-kernel",
+      "status": "implemented",
+      "reason": null,
+      "expiry": null,
+      "replacement_id": null,
+      "requirement_ids": ["REQ-083-SCHEMA", "REQ-083-FOCUSED"],
+      "bug_ids": [],
+      "gate_ids": [],
+      "expected_status": "PASS",
+      "historical_case_ids": [],
+      "selection_rule": {"mode": "focused", "include_paths": ["quality/", "test/quality/run_evidence/", "test/quality/test_run_evidence_cli.py"], "exclude_statuses": ["legacy", "manual", "quarantine", "retired", "not-yet-automatable"]}
     },
     {
       "id": "SUITE-QUALITY-ARTIFACT",
@@ -600,6 +624,12 @@
     }
   ],
   "selection_rules": [
+    {
+      "name": "run-evidence-fixed-one-suite",
+      "purpose": "Execute only the catalog-bound SUITE-RUE05A focused source-unit NODE-RUN-EVIDENCE command.",
+      "suite_ids": ["SUITE-RUE05A"],
+      "executor_implemented": true
+    },
     {
       "name": "metadata",
       "purpose": "Validate all machine metadata and foreign-key/lifecycle invariants without requiring a clean worktree.",

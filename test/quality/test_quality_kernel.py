@@ -298,6 +298,67 @@ class QualityKernelFocused(unittest.TestCase):
         )
         self.assertIn("discovered entrypoint is not registered", errors)
 
+    def test_fixed_run_evidence_suite_rule_and_gate_boundary_fail_closed(self):
+        validator = self.fresh()
+        self.assertEqual(
+            validator.suites["SUITE-RUE05A"]["gate_ids"],
+            [],
+        )
+        self.assertEqual(
+            validator.suites["SUITE-RUE05A"]["retry_policy"],
+            "readiness-timeout-once",
+        )
+        self.assertFalse(
+            any(
+                "SUITE-RUE05A" in gate.get("required_suite_ids", [])
+                for gate in validator.gates.values()
+            ),
+        )
+        self.assertFalse(
+            self.errors_after(
+                validator,
+                validator.check_fixed_run_evidence_catalog,
+            ),
+        )
+
+        validator = self.fresh()
+        validator.suites["SUITE-RUE05A"]["command_argv"][-1] = "/tmp/free"
+        errors = self.errors_after(
+            validator,
+            validator.check_fixed_run_evidence_catalog,
+        )
+        self.assertIn("catalog record drifted", errors)
+
+        validator = self.fresh()
+        validator.catalog["selection_rules"][0]["suite_ids"].append(
+            "SUITE-QUALITY-METADATA",
+        )
+        errors = self.errors_after(
+            validator,
+            validator.check_fixed_run_evidence_catalog,
+        )
+        self.assertIn("selection rule drifted", errors)
+
+        validator = self.fresh()
+        validator.suites["SUITE-QUALITY-METADATA"]["retry_policy"] = (
+            "readiness-timeout-once"
+        )
+        errors = self.errors_after(
+            validator,
+            validator.check_fixed_run_evidence_catalog,
+        )
+        self.assertIn("only SUITE-RUE05A", errors)
+
+        validator = self.fresh()
+        validator.gates["GATE-QUALITY-META"]["required_suite_ids"].append(
+            "SUITE-RUE05A",
+        )
+        errors = self.errors_after(
+            validator,
+            validator.check_fixed_run_evidence_catalog,
+        )
+        self.assertIn("must not be promoted into a gate", errors)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

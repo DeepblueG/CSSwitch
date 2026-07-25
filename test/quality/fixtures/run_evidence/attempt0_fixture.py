@@ -31,10 +31,13 @@ def _recv_ack(peer: socket.socket) -> bool:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 6 or argv[1] != "--adapter-fd":
+    if len(argv) != 8 or argv[1] != "--adapter-fd" or argv[3] != "--attempt-index":
         return 64
     fd = int(argv[2])
-    run_id, suite_id, entrypoint_id = argv[3], argv[4], argv[5]
+    attempt_index = int(argv[4])
+    run_id, suite_id, entrypoint_id = argv[5], argv[6], argv[7]
+    if attempt_index not in (0, 1):
+        return 64
     if entrypoint_id != os.environ["RUE05A_ENTRYPOINT"]:
         return 65
     scenario = os.environ.get("RUE05A_PRIVATE_SCENARIO", "normal")
@@ -65,9 +68,21 @@ def main(argv: list[str]) -> int:
             peer.sendall((10).to_bytes(4, "big") + b"abc")
             time.sleep(0.05)
             return 0
+        outcome, classification, reason, rc = {
+            "normal": ("PASS", "NONE", "NONE", 0),
+            "readiness": ("TIMEOUT", "READINESS_TIMEOUT", "READINESS_TIMEOUT", 13),
+            "test-fail": ("FAIL", "NONE", "ASSERTION_FAILED", 10),
+            "env": ("ENV-BLOCKED", "NONE", "ENVIRONMENT", 11),
+            "real": ("NEEDS-REAL-MACHINE", "NONE", "REAL_MACHINE_REQUIRED", 11),
+            "ignored": ("IGNORED", "NONE", "ADAPTER_REPORTED_IGNORED", 11),
+            "skipped": ("SKIPPED", "NONE", "ADAPTER_REPORTED_SKIPPED", 11),
+        }.get(scenario, ("PASS", "NONE", "NONE", 0))
         adapter = (
-            b'{"attempt_index":0,"classification_hint":"NONE","entrypoint_id":"' + entrypoint_id.encode("ascii")
-            + b'","outcome_hint":"PASS","reason_code":"NONE","run_id":"' + run_id.encode("ascii")
+            b'{"attempt_index":' + str(attempt_index).encode("ascii")
+            + b',"classification_hint":"' + classification.encode("ascii")
+            + b'","entrypoint_id":"' + entrypoint_id.encode("ascii")
+            + b'","outcome_hint":"' + outcome.encode("ascii")
+            + b'","reason_code":"' + reason.encode("ascii") + b'","run_id":"' + run_id.encode("ascii")
             + b'","schema":"adapter-result.v1","suite_id":"' + suite_id.encode("ascii") + b'"}'
         )
         if scenario == "fake-marker":
@@ -123,7 +138,7 @@ def main(argv: list[str]) -> int:
             time.sleep(10)
             os._exit(0)
         peer.sendall(_frame(adapter))
-        return 0 if _recv_ack(peer) else 66
+        return rc if _recv_ack(peer) else 66
     finally:
         peer.close()
 

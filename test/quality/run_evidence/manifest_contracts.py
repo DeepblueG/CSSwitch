@@ -331,6 +331,53 @@ def validate_completion_seal(seal: Any, run_manifest: Any, snapshot: Any, eviden
         _fail("input digest set")
 
 
+def validate_fixed_single_suite_seal(
+    seal: Any,
+    run_manifest: Any,
+    snapshot: Any,
+    evidence: Any,
+    artifacts: Mapping[str, bytes],
+) -> None:
+    """Validate the fixed RUE05A seal and its result-derived decision.
+
+    The general RUE-02 seal contract deliberately permits multi-suite
+    aggregation.  This narrower validator closes the current one-suite
+    vertical slice: the seal cannot claim PASS, FAIL, or BLOCKED independently
+    of its sole durable ``TestResultV1``.
+    """
+    validate_completion_seal(
+        seal, run_manifest, snapshot, evidence, artifacts,
+    )
+    expected = [{
+        "suite_id": "SUITE-RUE05A",
+        "entrypoint_id": "ENTRY-RUE05A-ATTEMPT0",
+    }]
+    if (
+        run_manifest.get("profile") != "focused"
+        or run_manifest.get("comparison_base", {}).get("policy")
+        != "merge-base-origin-main"
+        or run_manifest.get("change_set") is not None
+        or run_manifest.get("invocation_argv") != ["rue-fixed-api.v1"]
+        or run_manifest.get("expected_suites") != expected
+        or evidence.get("test_results") is None
+        or len(evidence["test_results"]) != 1
+    ):
+        _fail("fixed run binding")
+    result_ref = evidence["test_results"][0]
+    result = _ref(
+        {"path": result_ref["path"], "sha256": result_ref["sha256"]},
+        artifacts,
+    )
+    validate_result(result)
+    if (
+        result.get("suite_id") != "SUITE-RUE05A"
+        or result.get("entrypoint_id") != "ENTRY-RUE05A-ATTEMPT0"
+        or seal.get("aggregate_decision") != result.get("gate_decision")
+        or seal.get("runner_exit") != result.get("runner_exit")
+    ):
+        _fail("fixed aggregate decision")
+
+
 def validate_terminal_set(seal: Any | None, failure: Any | None, *, run_manifest: Any | None = None, artifacts: Mapping[str, bytes] | None = None) -> None:
     if seal is not None and failure is not None:
         _fail("seal and failure are mutually exclusive")

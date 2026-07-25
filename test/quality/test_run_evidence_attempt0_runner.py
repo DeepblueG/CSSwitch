@@ -353,6 +353,139 @@ class Attempt0RunnerTests(unittest.TestCase):
         self.assertEqual(spawned_argv[0][1:3], ["-I", "-S"])
         self.assertFalse(sentinel.exists())
 
+    def test_16_cache_replacement_is_rejected_before_untrusted_size_read(self):
+        for replacement_size in (
+            len(self.fixture.read_bytes()),
+            2 * 1024 * 1024,
+        ):
+            with self.subTest(replacement_size=replacement_size):
+                layout = self._layout()
+                manifest = layout.begin_attempt0()
+                digest, expected_size, expected_mode = (
+                    runner._snapshot_fixture_digest(manifest)
+                )
+                cache = Path(layout.state_path) / "cache"
+                replacement = cache / "replacement"
+                replacement.write_bytes(b"x" * replacement_size)
+                os.chmod(replacement, 0o600)
+                real_stat = runner.os.stat
+                real_read = runner._read_exact
+                swapped = {"done": False, "identity": None}
+
+                def replace_before_cache_stat(path, *args, **kwargs):
+                    if (
+                        not swapped["done"]
+                        and path == "attempt0-fixture.py"
+                        and kwargs.get("dir_fd") == layout._cache_fd_required()
+                    ):
+                        swapped["done"] = True
+                        os.replace(
+                            replacement,
+                            cache / "attempt0-fixture.py",
+                        )
+                        item = real_stat(cache / "attempt0-fixture.py")
+                        swapped["identity"] = (item.st_dev, item.st_ino)
+                    return real_stat(path, *args, **kwargs)
+
+                def reject_replacement_read(fd, size):
+                    item = os.fstat(fd)
+                    if (item.st_dev, item.st_ino) == swapped["identity"]:
+                        raise AssertionError("untrusted cache replacement was read")
+                    return real_read(fd, size)
+
+                with mock.patch.object(
+                    runner.os, "stat", side_effect=replace_before_cache_stat,
+                ), mock.patch.object(
+                    runner, "_read_exact", side_effect=reject_replacement_read,
+                ):
+                    with self.assertRaises(runner.Attempt0RunnerError) as raised:
+                        runner._copy_bound_fixture(
+                            str(self.repo),
+                            layout,
+                            digest,
+                            expected_size,
+                            expected_mode,
+                            0,
+                        )
+                self.assertEqual(raised.exception.code, "TOOL_IDENTITY_CHANGED")
+                self.assertTrue(swapped["done"])
+                self.assertFalse(
+                    (
+                        Path(layout.state_path)
+                        / "attempts/attempt-0.json"
+                    ).exists()
+                )
+
+    def test_17_cache_name_replay_before_verify_open_never_becomes_authority(self):
+        source_raw = self.fixture.read_bytes()
+        for replacement_raw in (
+            source_raw,
+            b"x" * len(source_raw),
+            b"x" * (2 * 1024 * 1024),
+        ):
+            with self.subTest(replacement_size=len(replacement_raw)):
+                layout = self._layout()
+                manifest = layout.begin_attempt0()
+                digest, expected_size, expected_mode = (
+                    runner._snapshot_fixture_digest(manifest)
+                )
+                cache = Path(layout.state_path) / "cache"
+                replacement = cache / "replacement"
+                replacement.write_bytes(replacement_raw)
+                os.chmod(replacement, 0o600)
+                real_open = runner.os.open
+                real_read = runner._read_exact
+                swapped = {"done": False, "identity": None}
+
+                def replace_before_verify_open(path, flags, *args, **kwargs):
+                    if (
+                        not swapped["done"]
+                        and path == "attempt0-fixture.py"
+                        and kwargs.get("dir_fd") == layout._cache_fd_required()
+                        and flags & os.O_ACCMODE == os.O_RDONLY
+                    ):
+                        swapped["done"] = True
+                        os.replace(
+                            replacement,
+                            cache / "attempt0-fixture.py",
+                        )
+                        item = os.stat(cache / "attempt0-fixture.py")
+                        swapped["identity"] = (item.st_dev, item.st_ino)
+                    return real_open(path, flags, *args, **kwargs)
+
+                def reject_replacement_read(fd, size):
+                    item = os.fstat(fd)
+                    if (item.st_dev, item.st_ino) == swapped["identity"]:
+                        raise AssertionError("replayed cache name was read")
+                    return real_read(fd, size)
+
+                with mock.patch.object(
+                    runner.os,
+                    "open",
+                    side_effect=replace_before_verify_open,
+                ), mock.patch.object(
+                    runner,
+                    "_read_exact",
+                    side_effect=reject_replacement_read,
+                ):
+                    with self.assertRaises(runner.Attempt0RunnerError) as raised:
+                        runner._copy_bound_fixture(
+                            str(self.repo),
+                            layout,
+                            digest,
+                            expected_size,
+                            expected_mode,
+                            0,
+                        )
+                self.assertEqual(raised.exception.code, "TOOL_IDENTITY_CHANGED")
+                self.assertTrue(swapped["done"])
+                self.assertFalse(
+                    (
+                        Path(layout.state_path)
+                        / "attempts/attempt-0.json"
+                    ).exists()
+                )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
