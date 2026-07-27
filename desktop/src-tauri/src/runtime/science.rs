@@ -1530,18 +1530,21 @@ pub(crate) fn stop_sandbox<R: Runtime>(
 mod tests {
     use std::fs;
     use std::io::Write;
+    use std::net::{TcpListener, TcpStream};
     use std::os::unix::fs::symlink;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::ExitStatusExt;
-    use std::process::{ExitStatus, Output};
+    use std::process::{Command, ExitStatus, Output};
+    use std::time::Duration;
 
     use super::{
         classify_known_runtime_state, classify_sandbox_state, first_http_url,
         official_updated_science_bin_for_home, official_updated_snapshot_for_home,
         official_updated_snapshot_from_process_paths, parse_unique_listener_pid,
-        runtime_identity_is_current, runtime_status_value, safe_science_version_with_timeout,
-        sandbox_home, sandbox_running_ours, sandbox_url, science_executable_fingerprint,
-        science_runtime_preflight_for_paths, science_runtime_preflight_for_paths_cached,
+        probe_sandbox_runtime_cached, runtime_identity_is_current, runtime_status_value,
+        safe_science_version_with_timeout, sandbox_home, sandbox_running_ours, sandbox_url,
+        science_executable_fingerprint, science_runtime_preflight_for_paths,
+        science_runtime_preflight_for_paths_cached,
         science_runtime_preflight_for_paths_with_updated, science_status_running,
         secure_runtime_snapshot_root, select_science_runtime_for_paths,
         select_science_runtime_for_paths_cached, select_science_runtime_for_paths_with_updated,
@@ -1549,6 +1552,149 @@ mod tests {
         SandboxScienceState, ScienceRuntimeIdentity, ScienceRuntimeSource, ScienceVersionCache,
         CACHED_ONCE_CHOICE,
     };
+
+    #[test]
+    fn fresh_restart_rejects_listener_without_managed_launch_identity(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        const CHILD_ENV: &str = "CSSWITCH_TEST_SCIENCE_REATTACH_CHILD";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let root = unique_temp_dir("science-unmanaged-reattach")?;
+            let home = root.join("home");
+            fs::create_dir_all(&home)?;
+            let output = Command::new(std::env::current_exe()?)
+                .arg("--exact")
+                .arg("runtime::science::tests::fresh_restart_rejects_listener_without_managed_launch_identity")
+                .arg("--nocapture")
+                .env(CHILD_ENV, "1")
+                .env("HOME", &home)
+                .output()?;
+            let _ = fs::remove_dir_all(&root);
+            assert!(
+                output.status.success(),
+                "isolated reattach oracle failed: stdout={} stderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return Ok(());
+        }
+
+        let home = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .ok_or("isolated HOME is required")?;
+        let bin = home.join("bin").join("claude-science");
+        let data_dir = sandbox_home().join(".claude-science");
+        let state_dir = data_dir.join("fake-science");
+        fs::create_dir_all(bin.parent().ok_or("fake bin parent is required")?)?;
+        fs::create_dir_all(&state_dir)?;
+        fs::write(
+            &bin,
+            r#"#!/bin/sh
+set -eu
+cmd="${1:-}"
+if [ "$#" -gt 0 ]; then shift; fi
+if [ "$cmd" = "--version" ]; then
+  echo "claude-science unmanaged-reattach-test"
+  exit 0
+fi
+data_dir=""
+port=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --data-dir) data_dir="$2"; shift 2 ;;
+    --port) port="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+state="$data_dir/fake-science"
+mkdir -p "$state"
+case "$cmd" in
+  serve)
+    python3 - "$port" "$state/pid" >/dev/null 2>&1 <<'PY' &
+import http.server
+import os
+import socketserver
+import sys
+port = int(sys.argv[1])
+pidfile = sys.argv[2]
+class Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+    def do_GET(self):
+        if self.path.startswith("/health"):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"status":"ok"}')
+        else:
+            self.send_response(404)
+            self.end_headers()
+socketserver.TCPServer.allow_reuse_address = True
+with open(pidfile, "w", encoding="utf-8") as f:
+    f.write(str(os.getpid()))
+with socketserver.TCPServer(("127.0.0.1", port), Handler) as httpd:
+    httpd.serve_forever()
+PY
+    ;;
+  status)
+    pid="$(cat "$state/pid" 2>/dev/null || true)"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      echo '{"running":true}'
+    else
+      echo '{"running":false}'
+      exit 1
+    fi
+    ;;
+  stop)
+    pid="$(cat "$state/pid" 2>/dev/null || true)"
+    if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
+    rm -f "$state/pid"
+    ;;
+  *) exit 2 ;;
+esac
+"#,
+        )?;
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o700))?;
+        let bin = bin.canonicalize()?;
+        std::env::set_var("SCIENCE_BIN", &bin);
+        std::env::set_var("CSSWITCH_TEST_FAKE_SCIENCE_IDENTITY", "1");
+
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let port = listener.local_addr()?.port();
+        drop(listener);
+        let launch = Command::new(&bin)
+            .arg("serve")
+            .arg("--data-dir")
+            .arg(&data_dir)
+            .arg("--port")
+            .arg(port.to_string())
+            .status()?;
+        assert!(launch.success());
+        for _ in 0..100 {
+            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let observed = probe_sandbox_runtime_cached(port, &ScienceVersionCache::default())?;
+        let listener_still_alive = TcpStream::connect(("127.0.0.1", port)).is_ok();
+        let stopped = Command::new(&bin)
+            .arg("stop")
+            .arg("--data-dir")
+            .arg(&data_dir)
+            .status()?;
+        assert!(stopped.success());
+
+        assert_eq!(
+            observed,
+            (SandboxScienceState::Unknown, None),
+            "a fresh Desktop state must not adopt a listener that has no persisted managed-launch identity"
+        );
+        assert!(
+            listener_still_alive,
+            "rejected adoption must not signal the unproven listener"
+        );
+        Ok(())
+    }
 
     // ---------- P1-c: 端口变更是否需拆链路（纯函数，4 组合） ----------
     #[test]

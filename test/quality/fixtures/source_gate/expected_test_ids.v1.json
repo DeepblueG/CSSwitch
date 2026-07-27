@@ -797,6 +797,7 @@
         "desktop/src-tauri/Cargo.toml::lib::runtime::sandbox_session::transaction_tests::runtime_journal_advances_in_place_and_retargets_without_secrets",
         "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::cached_runtime_symlink_is_never_offered_or_executed",
         "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::first_http_url_takes_only_first_valid_url",
+        "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::fresh_restart_rejects_listener_without_managed_launch_identity",
         "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::historical_updated_snapshots_remain_recoverable_after_source_replacement",
         "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::known_runtime_classifier_requires_listener_binary_identity",
         "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::known_runtime_state_requires_listener_binary_match",
