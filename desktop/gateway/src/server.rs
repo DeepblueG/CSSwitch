@@ -286,6 +286,16 @@ fn api_error_json(stream: &mut TcpStream, status: u16, detail: &str) {
     typed_error_json(stream, status, status_reason(status), "api_error", detail);
 }
 
+fn upstream_protocol_error_json(stream: &mut TcpStream, detail: &str) {
+    typed_error_json(
+        stream,
+        502,
+        "Bad Gateway",
+        "upstream_protocol_error",
+        detail,
+    );
+}
+
 fn status_reason(status: u16) -> &'static str {
     reqwest::StatusCode::from_u16(status)
         .ok()
@@ -1419,10 +1429,11 @@ fn handle_messages(
                     }
                 };
                 let anthropic_resp = if cfg.provider == "openai-responses" {
-                    Ok(openai_responses::openai_to_anthropic(
+                    openai_responses::openai_to_anthropic_validated(
                         &openai_resp,
                         &model_id,
-                    ))
+                        &known_tools,
+                    )
                 } else {
                     openai_chat::openai_to_anthropic(
                         &openai_resp,
@@ -1434,7 +1445,11 @@ fn handle_messages(
                 let anthropic_resp = match anthropic_resp {
                     Ok(response) => response,
                     Err(error) => {
-                        api_error_json(stream, 502, &error);
+                        if cfg.provider == "openai-responses" {
+                            upstream_protocol_error_json(stream, &error);
+                        } else {
+                            api_error_json(stream, 502, &error);
+                        }
                         return;
                     }
                 };
