@@ -33,6 +33,8 @@ const SCIENCE_VERSION_TIMEOUT: Duration = Duration::from_secs(15);
 const MANAGED_LAUNCH_FILE: &str = "science-managed-launch.v1.json";
 const MAX_MANAGED_LAUNCH_BYTES: u64 = 16 * 1024;
 static SCIENCE_VERSION_OUTPUT_NONCE: AtomicU64 = AtomicU64::new(1);
+#[cfg(test)]
+static MANAGED_LAUNCH_LAST_READ_BYTES: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ScienceRuntimeSource {
@@ -1250,6 +1252,15 @@ fn process_start_identity(pid: u32) -> Option<String> {
     if pid <= 1 {
         return None;
     }
+    #[cfg(test)]
+    if std::env::var_os("CSSWITCH_TEST_PROCESS_START_DRIFT_PID")
+        .and_then(|value| value.to_string_lossy().parse::<u32>().ok())
+        == Some(pid)
+        && std::env::var_os("CSSWITCH_TEST_PROCESS_START_DRIFT_MARKER")
+            .is_some_and(|path| PathBuf::from(path).is_file())
+    {
+        return Some("Mon Jan  1 00:00:00 2001".into());
+    }
     let output = Command::new("/bin/ps")
         .args(["-p", &pid.to_string(), "-o", "lstart="])
         .env_clear()
@@ -1379,8 +1390,26 @@ fn read_managed_launch_record() -> Option<ScienceManagedLaunchRecord> {
     {
         return None;
     }
+    #[cfg(test)]
+    if let Some(barrier_dir) = std::env::var_os("CSSWITCH_TEST_MANAGED_LAUNCH_READ_BARRIER") {
+        let barrier_dir = PathBuf::from(barrier_dir);
+        fs::write(barrier_dir.join("ready"), b"ready").ok()?;
+        let mut released = false;
+        for _ in 0..500 {
+            if barrier_dir.join("continue").is_file() {
+                released = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if !released {
+            return None;
+        }
+    }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
     file.read_to_end(&mut bytes).ok()?;
+    #[cfg(test)]
+    MANAGED_LAUNCH_LAST_READ_BYTES.store(bytes.len() as u64, Ordering::SeqCst);
     if bytes.len() as u64 != metadata.len() {
         return None;
     }
@@ -1824,30 +1853,99 @@ pub(crate) fn stop_sandbox<R: Runtime>(
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::fs::{self, OpenOptions};
     use std::io::Write;
     use std::net::{TcpListener, TcpStream};
     use std::os::unix::fs::symlink;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::ExitStatusExt;
     use std::process::{Command, ExitStatus, Output};
+    use std::sync::atomic::Ordering;
     use std::time::Duration;
 
     use super::{
-        classify_known_runtime_state, classify_sandbox_state, first_http_url,
+        classify_known_runtime_state, classify_sandbox_state, first_http_url, managed_launch_path,
         official_updated_science_bin_for_home, official_updated_snapshot_for_home,
         official_updated_snapshot_from_process_paths, parse_unique_listener_pid,
-        probe_sandbox_runtime_cached, runtime_identity_is_current, runtime_status_value,
-        safe_science_version_with_timeout, sandbox_home, sandbox_running_ours, sandbox_url,
-        science_executable_fingerprint, science_runtime_preflight_for_paths,
-        science_runtime_preflight_for_paths_cached,
+        probe_sandbox_runtime_cached, read_managed_launch_record, runtime_identity_is_current,
+        runtime_status_value, safe_science_version_with_timeout, sandbox_home,
+        sandbox_running_ours, sandbox_url, science_executable_fingerprint,
+        science_runtime_preflight_for_paths, science_runtime_preflight_for_paths_cached,
         science_runtime_preflight_for_paths_with_updated, science_status_running,
         secure_runtime_snapshot_root, select_science_runtime_for_paths,
         select_science_runtime_for_paths_cached, select_science_runtime_for_paths_with_updated,
         settings_change_needs_teardown, stop_runtime_from_probe, trusted_science_status,
         SandboxScienceState, ScienceRuntimeIdentity, ScienceRuntimeSource, ScienceVersionCache,
-        CACHED_ONCE_CHOICE,
+        CACHED_ONCE_CHOICE, MANAGED_LAUNCH_LAST_READ_BYTES, MAX_MANAGED_LAUNCH_BYTES,
     };
+
+    #[test]
+    fn managed_launch_receipt_growth_read_is_hard_bounded() -> Result<(), Box<dyn std::error::Error>>
+    {
+        const CHILD_ENV: &str = "CSSWITCH_TEST_MANAGED_LAUNCH_GROWTH_CHILD";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let root = unique_temp_dir("science-managed-launch-growth")?;
+            let home = root.join("home");
+            fs::create_dir_all(&home)?;
+            let output = Command::new(std::env::current_exe()?)
+                .arg("--exact")
+                .arg("runtime::science::tests::managed_launch_receipt_growth_read_is_hard_bounded")
+                .arg("--nocapture")
+                .env(CHILD_ENV, "1")
+                .env("HOME", &home)
+                .output()?;
+            let _ = fs::remove_dir_all(&root);
+            assert!(
+                output.status.success(),
+                "isolated bounded receipt oracle failed: stdout={} stderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return Ok(());
+        }
+
+        let config_dir = crate::config::default_dir();
+        fs::create_dir_all(&config_dir)?;
+        fs::set_permissions(&config_dir, fs::Permissions::from_mode(0o700))?;
+        let receipt = managed_launch_path();
+        fs::write(&receipt, b"{}")?;
+        fs::set_permissions(&receipt, fs::Permissions::from_mode(0o600))?;
+        let barrier = config_dir.join("managed-launch-read-barrier");
+        fs::create_dir_all(&barrier)?;
+        std::env::set_var("CSSWITCH_TEST_MANAGED_LAUNCH_READ_BARRIER", &barrier);
+        MANAGED_LAUNCH_LAST_READ_BYTES.store(0, Ordering::SeqCst);
+
+        let receipt_for_writer = receipt.clone();
+        let barrier_for_writer = barrier.clone();
+        let writer = std::thread::spawn(move || -> std::io::Result<()> {
+            for _ in 0..500 {
+                if barrier_for_writer.join("ready").is_file() {
+                    let mut file = OpenOptions::new().append(true).open(&receipt_for_writer)?;
+                    file.write_all(&vec![b' '; 1024 * 1024])?;
+                    file.sync_all()?;
+                    fs::write(barrier_for_writer.join("continue"), b"continue")?;
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "managed launch reader never reached the deterministic barrier",
+            ))
+        });
+        let _ = read_managed_launch_record();
+        writer
+            .join()
+            .map_err(|_| "managed launch writer panicked")??;
+        std::env::remove_var("CSSWITCH_TEST_MANAGED_LAUNCH_READ_BARRIER");
+        let observed = MANAGED_LAUNCH_LAST_READ_BYTES.load(Ordering::SeqCst);
+        assert!(
+            observed <= MAX_MANAGED_LAUNCH_BYTES + 1,
+            "managed launch reader consumed {observed} bytes after concurrent growth; hard cap is {}",
+            MAX_MANAGED_LAUNCH_BYTES + 1
+        );
+        Ok(())
+    }
 
     #[test]
     fn fresh_restart_rejects_listener_without_managed_launch_identity(

@@ -1096,6 +1096,11 @@ PY
     echo "http://127.0.0.1:$p/?nonce=$count"
     ;;
   stop)
+    if [ -n "${CSSWITCH_TEST_PROCESS_START_DRIFT_MARKER:-}" ]; then
+      : > "$CSSWITCH_TEST_PROCESS_START_DRIFT_MARKER"
+      echo "stopped-with-identity-drift"
+      exit 0
+    fi
     pid="$(cat "$state/pid" 2>/dev/null || true)"
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
     rm -f "$state/pid"
@@ -1190,6 +1195,18 @@ esac
                     ));
                 }
             }
+            let managed_launch = self
+                .temp
+                .join("home")
+                .join(config::CONFIG_DIR_NAME)
+                .join("science-managed-launch.v1.json");
+            if managed_launch.exists() {
+                return Err(format!(
+                    "confirmed Science stop left managed launch receipt {}; preserved {}",
+                    managed_launch.display(),
+                    self.temp.display()
+                ));
+            }
             fs::remove_dir_all(&self.temp)
                 .map_err(|error| format!("failed to remove {}: {error}", self.temp.display()))
         }
@@ -1264,12 +1281,14 @@ esac
             .count()
     }
 
-    fn unique_listener_pid(port: u16) -> u32 {
+    fn listener_pid_if_unique(port: u16) -> Option<u32> {
         let output = std::process::Command::new("/usr/sbin/lsof")
             .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-t"])
             .output()
             .expect("lsof should inspect the isolated listener");
-        assert!(output.status.success());
+        if !output.status.success() {
+            return None;
+        }
         let pids: Vec<u32> = String::from_utf8(output.stdout)
             .unwrap()
             .lines()
@@ -1277,22 +1296,30 @@ esac
             .filter(|pid| !pid.is_empty())
             .map(|pid| pid.parse().unwrap())
             .collect();
-        assert_eq!(pids.len(), 1, "isolated port must have one listener");
-        pids[0]
+        (pids.len() == 1).then(|| pids[0])
     }
 
-    fn process_start_identity(pid: u32) -> String {
+    fn unique_listener_pid(port: u16) -> u32 {
+        listener_pid_if_unique(port).expect("isolated port must have one listener")
+    }
+
+    fn process_start_identity_if_alive(pid: u32) -> Option<String> {
         let output = std::process::Command::new("/bin/ps")
             .args(["-p", &pid.to_string(), "-o", "lstart="])
             .env_clear()
             .output()
             .expect("ps should inspect the isolated process");
-        assert!(output.status.success());
+        if !output.status.success() {
+            return None;
+        }
         assert!(output.stderr.is_empty());
         let identity = String::from_utf8(output.stdout).unwrap();
         let identity = identity.trim();
-        assert!(!identity.is_empty());
-        identity.to_string()
+        (!identity.is_empty()).then(|| identity.to_string())
+    }
+
+    fn process_start_identity(pid: u32) -> String {
+        process_start_identity_if_alive(pid).expect("isolated process must remain alive")
     }
 
     struct TestChild(std::process::Child);
@@ -1789,12 +1816,36 @@ esac
         };
 
         let mut receipt_mutants = Vec::new();
-        for field in ["port", "runtime_size", "data_dir_inode"] {
+        for field in [
+            "schema_version",
+            "port",
+            "runtime_device",
+            "runtime_inode",
+            "runtime_size",
+            "runtime_modified_seconds",
+            "runtime_modified_nanoseconds",
+            "runtime_mode",
+            "data_dir_device",
+            "data_dir_inode",
+        ] {
             let mut mutant = valid_receipt.clone();
             let value = mutant[field]
                 .as_u64()
                 .unwrap_or_else(|| panic!("{field} must be numeric"));
-            mutant[field] = serde_json::Value::from(value.saturating_add(1));
+            let changed = if value == u64::MAX {
+                value - 1
+            } else {
+                value + 1
+            };
+            mutant[field] = serde_json::Value::from(changed);
+            receipt_mutants.push((field, mutant));
+        }
+        for field in ["runtime_path", "data_dir"] {
+            let mut mutant = valid_receipt.clone();
+            let value = mutant[field]
+                .as_str()
+                .unwrap_or_else(|| panic!("{field} must be a path string"));
+            mutant[field] = serde_json::Value::from(format!("{value}.tampered"));
             receipt_mutants.push((field, mutant));
         }
         let mut listener_pid_mutant = valid_receipt.clone();
@@ -1891,9 +1942,45 @@ esac
             actual_process_start,
             "missing receipt rejection must not recycle the listener process"
         );
-        cleanup
-            .finish()
-            .expect("isolated Science and Gateway fixtures must cleanly stop");
+        fs::write(&managed_launch_path, &valid_receipt_bytes).unwrap();
+        fs::set_permissions(&managed_launch_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let drift_marker = tmp.join("process-start-drift");
+        env_guard.set(
+            "CSSWITCH_TEST_PROCESS_START_DRIFT_PID",
+            actual_listener_pid.to_string(),
+        );
+        env_guard.set("CSSWITCH_TEST_PROCESS_START_DRIFT_MARKER", &drift_marker);
+        let drift_stop = {
+            let mut st = lock(&state);
+            super::stop_sandbox_state(&handle, &mut st)
+        };
+        let listener_after_drift_stop = listener_pid_if_unique(sandbox_port);
+        let receipt_preserved_after_drift = managed_launch_path.is_file();
+        env::remove_var("CSSWITCH_TEST_PROCESS_START_DRIFT_PID");
+        env::remove_var("CSSWITCH_TEST_PROCESS_START_DRIFT_MARKER");
+        let process_start_after_drift_stop = process_start_identity_if_alive(actual_listener_pid);
+        let cleanup_result = cleanup.finish();
+
+        assert!(
+            drift_stop.is_err(),
+            "stop must fail closed when process-start changes after the stop CLI"
+        );
+        assert_eq!(
+            listener_after_drift_stop,
+            Some(actual_listener_pid),
+            "process-start drift must not signal or replace the listener"
+        );
+        assert_eq!(
+            process_start_after_drift_stop,
+            Some(actual_process_start),
+            "process-start drift must leave the original listener alive"
+        );
+        assert!(
+            receipt_preserved_after_drift,
+            "failed stop must preserve the managed launch receipt for safe retry"
+        );
+        cleanup_result.expect("isolated Science and Gateway fixtures must cleanly stop");
     }
 
     #[test]

@@ -804,6 +804,7 @@
         "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::known_runtime_state_requires_listener_binary_match",
         "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::listener_pid_parser_requires_one_safe_identity",
         "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::locally_validated_updated_runtime_wins_over_app_and_is_fingerprint_bound",
+        "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::managed_launch_receipt_growth_read_is_hard_bounded",
         "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::real_updated_runtime_candidate_is_eligible_without_reading_real_science_data",
         "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::replacing_installed_app_uses_new_version_without_mutating_cache_or_data_dir",
         "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::runtime_selection_requires_explicit_one_shot_cache_choice",
