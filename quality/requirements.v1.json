@@ -613,8 +613,8 @@
     {
       "id": "REQ-083-SCIENCE-REATTACH",
       "version": "v0.8.3",
-      "title": "Science reattachment binds four runtime identities",
-      "description": "Desktop restart may adopt a running Science only when executable fingerprint, isolated data-dir, unique listener PID, and managed launch identity all still identify the same runtime.",
+      "title": "Science reattachment and stop bind managed runtime identity",
+      "description": "Desktop restart may adopt a running Science only when executable fingerprint, isolated data-dir, unique listener PID/process-start, and managed launch identity agree. Stop success additionally requires final configured-port closure and atomic no-clobber receipt cleanup.",
       "status": "active",
       "owner": "science-runtime",
       "depends_on": [
@@ -624,6 +624,8 @@
         "An exact managed-runtime fixture reattaches without starting a duplicate Science process.",
         "Unknown listener, executable replacement, duplicate listener, and PID race each fail closed.",
         "Mismatch paths send no signal and preserve the foreign or changed process.",
+        "A false-to-true final port observation or missing data-dir with a live listener cannot publish confirmed-stopped.",
+        "Concurrent receipt creation wins atomically and preserves the old tombstone without overwrite.",
         "The same identity rules are exercised again by the final isolated production artifact runtime."
       ],
       "evidence_boundary": {
@@ -640,7 +642,8 @@
         ],
         "basis": [
           ".agents/rules/science-runtime.md",
-          "red-green-mutation source contract"
+          "red-green-mutation source contract",
+          "fresh dual Science final review"
         ]
       },
       "retirement": null

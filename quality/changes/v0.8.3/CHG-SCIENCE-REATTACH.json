@@ -3,8 +3,8 @@
   "change": {
     "id": "CHG-SCIENCE-REATTACH",
     "version": "v0.8.3",
-    "title": "Register Science identity-safe reattachment contract",
-    "summary": "Registers four-dimensional Science adoption identity and fail-closed mismatch behavior; no runtime fix is claimed by this record.",
+    "title": "Repair Science identity-safe reattachment and stop closure",
+    "summary": "Records source-level red-green-mutation repair for managed reattachment, stop-success final-port proof, and atomic no-clobber receipt restoration. Product artifact/runtime closure is not claimed yet.",
     "status": "active",
     "owner": "science-runtime",
     "changed_paths": [
@@ -12,6 +12,9 @@
       "quality/requirements.v1.json",
       "quality/release-gates.v1.json",
       "quality/core-contract-matrix.v1.json",
+      "quality/test-catalog.v1.json",
+      "test/quality/fixtures/source_gate/expected_test_ids.v1.json",
+      "desktop/src-tauri/src/commands/runtime.rs",
       "desktop/src-tauri/src/runtime/",
       "test/test_process_ownership_policy.py",
       "test/test_scripts.sh"
@@ -56,8 +59,9 @@
         "public"
       ],
       "basis": [
-        "contract registration only",
-        "red-green-mutation evidence pending"
+        "source old-product red, product green, product-only mutation, restore green",
+        "fresh dual Science final review",
+        "isolated production artifact/runtime evidence pending"
       ]
     },
     "does_not_claim_fix": true,

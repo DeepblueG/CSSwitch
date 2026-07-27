@@ -40,6 +40,15 @@ class QualityKernelFocused(unittest.TestCase):
             self.assertEqual(bug["resolution_state"], "open-not-fixed")
             self.assertEqual(len(bug["change_ids"]), 1)
             self.assertTrue(any(gate.startswith("GATE-") for gate in bug["expected_gate_ids"]))
+        science = validator.bugs["BUG-083-SCIENCE-REATTACH"]
+        self.assertEqual(science["resolution_state"], "source-fixed-product-pending")
+        self.assertEqual(science["reproduction_state"], "source-reproduced")
+        science["reproduction_state"] = "historical-observed"
+        errors = self.errors_after(validator, validator.check_lifecycle)
+        self.assertIn(
+            "source-fixed-product-pending bug requires source-reproduced evidence",
+            errors,
+        )
 
     def test_unknown_field_and_foreign_key_fail(self):
         validator = self.fresh()

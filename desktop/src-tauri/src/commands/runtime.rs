@@ -1096,6 +1096,12 @@ PY
     echo "http://127.0.0.1:$p/?nonce=$count"
     ;;
   stop)
+    if [ -n "${CSSWITCH_TEST_PORT_OBSERVATION_SEQUENCE_DIR:-}" ]; then
+      mkdir -p "$CSSWITCH_TEST_PORT_OBSERVATION_SEQUENCE_DIR"
+      : > "$CSSWITCH_TEST_PORT_OBSERVATION_SEQUENCE_DIR/armed"
+      echo "stopped-with-false-then-true-port-observation"
+      exit 0
+    fi
     if [ -n "${CSSWITCH_TEST_PROCESS_START_DRIFT_MARKER:-}" ]; then
       : > "$CSSWITCH_TEST_PROCESS_START_DRIFT_MARKER"
       echo "stopped-with-identity-drift"
@@ -1960,7 +1966,176 @@ esac
         env::remove_var("CSSWITCH_TEST_PROCESS_START_DRIFT_PID");
         env::remove_var("CSSWITCH_TEST_PROCESS_START_DRIFT_MARKER");
         let process_start_after_drift_stop = process_start_identity_if_alive(actual_listener_pid);
-        let cleanup_result = cleanup.finish();
+
+        let (runtime_before_stop_oracles, url_before_stop_oracles) = {
+            let st = lock(&state);
+            (
+                st.science_runtime
+                    .clone()
+                    .expect("failed drift stop must retain the exact runtime"),
+                st.sandbox_url.clone(),
+            )
+        };
+        let port_sequence = tmp.join("false-then-true-port-observation");
+        fs::create_dir_all(&port_sequence).unwrap();
+        let mut concurrent_receipt = valid_receipt.clone();
+        concurrent_receipt["launch_id"] =
+            serde_json::Value::from("concurrent-managed-launch-receipt-0001");
+        let concurrent_receipt_bytes = serde_json::to_vec(&concurrent_receipt).unwrap();
+        assert_ne!(
+            concurrent_receipt_bytes, valid_receipt_bytes,
+            "false-to-true oracle replacement receipt must have a distinct identity"
+        );
+        let concurrent_receipt_source = config_dir.join(".concurrent-managed-launch-receipt.json");
+        fs::write(&concurrent_receipt_source, &concurrent_receipt_bytes).unwrap();
+        fs::set_permissions(
+            &concurrent_receipt_source,
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        env_guard.set(
+            "CSSWITCH_TEST_PORT_OBSERVATION_TARGET",
+            sandbox_port.to_string(),
+        );
+        env_guard.set(
+            "CSSWITCH_TEST_PORT_OBSERVATION_SEQUENCE_DIR",
+            &port_sequence,
+        );
+        env_guard.set(
+            "CSSWITCH_TEST_PORT_OBSERVATION_REPLACEMENT_RECEIPT",
+            &concurrent_receipt_source,
+        );
+        env_guard.set(
+            "CSSWITCH_TEST_PORT_OBSERVATION_RECEIPT",
+            &managed_launch_path,
+        );
+        let false_then_true_stop = {
+            let mut st = lock(&state);
+            super::stop_sandbox_state(&handle, &mut st)
+        };
+        let (
+            false_then_true_confirmed_stopped,
+            false_then_true_runtime,
+            false_then_true_receipt,
+            false_then_true_listener,
+            false_then_true_process_start,
+        ) = {
+            let st = lock(&state);
+            (
+                st.science_confirmed_stopped.clone(),
+                st.science_runtime.clone(),
+                fs::read(&managed_launch_path).ok(),
+                listener_pid_if_unique(sandbox_port),
+                process_start_identity_if_alive(actual_listener_pid),
+            )
+        };
+        env::remove_var("CSSWITCH_TEST_PORT_OBSERVATION_TARGET");
+        env::remove_var("CSSWITCH_TEST_PORT_OBSERVATION_SEQUENCE_DIR");
+        env::remove_var("CSSWITCH_TEST_PORT_OBSERVATION_REPLACEMENT_RECEIPT");
+        env::remove_var("CSSWITCH_TEST_PORT_OBSERVATION_RECEIPT");
+        let complete_port_sequence = port_sequence.join("observed-false").is_file()
+            && port_sequence.join("receipt-replaced").is_file()
+            && port_sequence.join("observed-true").is_file()
+            && !port_sequence.join("receipt-replacement-failed").is_file();
+        {
+            let mut st = lock(&state);
+            st.science_confirmed_stopped = None;
+            st.science_runtime = Some(runtime_before_stop_oracles.clone());
+            st.sandbox_url = url_before_stop_oracles.clone();
+        }
+
+        let sandbox_data_dir = fake_state_dir
+            .parent()
+            .expect("fake Science state must have an isolated data-dir parent")
+            .to_path_buf();
+        let moved_data_dir = sandbox_data_dir.with_extension("missing-for-stop-oracle");
+        fs::rename(&sandbox_data_dir, &moved_data_dir)
+            .expect("isolated data-dir must be movable for the missing-dir stop oracle");
+        let missing_data_dir_stop = {
+            let mut st = lock(&state);
+            super::stop_sandbox_state(&handle, &mut st)
+        };
+        let (missing_data_dir_confirmed_stopped, missing_data_dir_runtime) = {
+            let st = lock(&state);
+            (
+                st.science_confirmed_stopped.clone(),
+                st.science_runtime.clone(),
+            )
+        };
+        let missing_data_dir_receipt = fs::read(&managed_launch_path).ok();
+        let missing_data_dir_listener = listener_pid_if_unique(sandbox_port);
+        let missing_data_dir_process_start = process_start_identity_if_alive(actual_listener_pid);
+        fs::rename(&moved_data_dir, &sandbox_data_dir)
+            .expect("isolated data-dir must be restored for bounded cleanup");
+        {
+            let mut st = lock(&state);
+            st.science_confirmed_stopped = None;
+            st.science_runtime = Some(runtime_before_stop_oracles.clone());
+            st.sandbox_url = url_before_stop_oracles;
+        }
+        cleanup
+            .finish()
+            .expect("all isolated Science and Gateway fixtures must cleanly stop before oracle assertions");
+
+        assert!(
+            complete_port_sequence,
+            "false-to-true stop oracle must inject observed-false, replace the managed receipt, and then inject observed-true"
+        );
+        assert_eq!(
+            false_then_true_receipt.as_deref(),
+            Some(concurrent_receipt_bytes.as_slice()),
+            "false-to-true stop oracle must observe the concurrently committed receipt before evaluating stop success"
+        );
+        if env::var("CSSWITCH_TEST_STOP_ORACLE_FIRST").ok().as_deref() == Some("missing-data-dir") {
+            assert!(
+                missing_data_dir_stop.is_err(),
+                "stop must fail closed when the data-dir disappears while the exact managed listener remains"
+            );
+        }
+        assert!(
+            false_then_true_stop.is_err(),
+            "stop must fail closed when configured-port observations change from false to true after the stop CLI"
+        );
+        assert!(
+            false_then_true_confirmed_stopped.is_none()
+                && false_then_true_runtime.as_ref() == Some(&runtime_before_stop_oracles),
+            "false-to-true port observations must not publish a confirmed-stopped transition"
+        );
+        assert_eq!(
+            false_then_true_listener,
+            Some(actual_listener_pid),
+            "false-to-true port observations must not signal or replace the managed listener"
+        );
+        assert_eq!(
+            false_then_true_process_start,
+            Some(actual_process_start.clone()),
+            "false-to-true port observations must preserve the exact managed process identity"
+        );
+
+        assert!(
+            missing_data_dir_stop.is_err(),
+            "stop must fail closed when the data-dir disappears while the exact managed listener remains"
+        );
+        assert!(
+            missing_data_dir_confirmed_stopped.is_none()
+                && missing_data_dir_runtime.as_ref() == Some(&runtime_before_stop_oracles),
+            "a missing data-dir with a live managed listener must not publish a confirmed-stopped transition"
+        );
+        assert_eq!(
+            missing_data_dir_receipt.as_deref(),
+            Some(concurrent_receipt_bytes.as_slice()),
+            "a missing data-dir with a live managed listener must preserve the managed receipt"
+        );
+        assert_eq!(
+            missing_data_dir_listener,
+            Some(actual_listener_pid),
+            "a missing data-dir stop must leave the exact managed listener untouched"
+        );
+        assert_eq!(
+            missing_data_dir_process_start,
+            Some(actual_process_start.clone()),
+            "a missing data-dir stop must preserve the exact managed process identity"
+        );
 
         assert!(
             drift_stop.is_err(),
@@ -1980,7 +2155,6 @@ esac
             receipt_preserved_after_drift,
             "failed stop must preserve the managed launch receipt for safe retry"
         );
-        cleanup_result.expect("isolated Science and Gateway fixtures must cleanly stop");
     }
 
     #[test]

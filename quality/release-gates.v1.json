@@ -385,7 +385,7 @@
       "profile": "product",
       "status": "active",
       "owner": "science-runtime",
-      "reason": "Requires source identity fixtures and later isolated production-artifact restart/reattach evidence.",
+      "reason": "Source identity, stop-success, no-clobber, mutation, and dual-review evidence passed; isolated production-artifact restart/reattach evidence remains pending.",
       "expiry": "2026-10-01",
       "replacement_id": null,
       "evidence_layer": "source-test",

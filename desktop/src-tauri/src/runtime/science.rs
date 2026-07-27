@@ -1249,6 +1249,71 @@ fn classify_known_runtime_state(
 }
 
 fn loopback_port_accepts_tcp(port: u16) -> bool {
+    #[cfg(test)]
+    if std::env::var_os("CSSWITCH_TEST_PORT_OBSERVATION_TARGET")
+        .and_then(|value| value.to_string_lossy().parse::<u16>().ok())
+        == Some(port)
+    {
+        if let Some(sequence_dir) = std::env::var_os("CSSWITCH_TEST_PORT_OBSERVATION_SEQUENCE_DIR")
+            .map(PathBuf::from)
+            .filter(|path| path.join("armed").is_file())
+        {
+            let false_marker = sequence_dir.join("observed-false");
+            if OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&false_marker)
+                .is_ok()
+            {
+                return false;
+            }
+            let replaced_marker = sequence_dir.join("receipt-replaced");
+            if !replaced_marker.is_file() {
+                let replacement =
+                    std::env::var_os("CSSWITCH_TEST_PORT_OBSERVATION_REPLACEMENT_RECEIPT")
+                        .map(PathBuf::from);
+                let target =
+                    std::env::var_os("CSSWITCH_TEST_PORT_OBSERVATION_RECEIPT").map(PathBuf::from);
+                let replacement_result = (|| -> std::io::Result<()> {
+                    let replacement = replacement.ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "replacement receipt path is missing",
+                        )
+                    })?;
+                    let target = target.ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "managed receipt path is missing",
+                        )
+                    })?;
+                    let bytes = fs::read(replacement)?;
+                    let temp = sequence_dir.join("concurrent-receipt.tmp");
+                    let mut file = OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .mode(0o600)
+                        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                        .open(&temp)?;
+                    file.write_all(&bytes)?;
+                    file.sync_all()?;
+                    fs::rename(&temp, &target)?;
+                    File::open(
+                        target
+                            .parent()
+                            .ok_or_else(|| std::io::Error::other("receipt parent is missing"))?,
+                    )?
+                    .sync_all()?;
+                    fs::write(&replaced_marker, b"replaced")
+                })();
+                if replacement_result.is_err() {
+                    let _ = fs::write(sequence_dir.join("receipt-replacement-failed"), b"failed");
+                }
+            }
+            let _ = fs::write(sequence_dir.join("observed-true"), b"true");
+            return true;
+        }
+    }
     let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     std::net::TcpStream::connect_timeout(&address, Duration::from_millis(250)).is_ok()
 }
@@ -1639,8 +1704,42 @@ fn managed_launch_token_is_current(
 
 fn restore_unmatched_managed_launch_tombstone(tombstone: &Path, path: &Path) -> Result<(), String> {
     match path.symlink_metadata() {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => fs::rename(tombstone, path)
-            .map_err(|_| "Science managed launch 记录变化且无法原位恢复".to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            #[cfg(test)]
+            if let Some(barrier_dir) =
+                std::env::var_os("CSSWITCH_TEST_TOMBSTONE_RESTORE_BARRIER").map(PathBuf::from)
+            {
+                fs::write(barrier_dir.join("ready"), b"ready")
+                    .map_err(|_| "Science managed launch 测试恢复屏障不可用".to_string())?;
+                let mut released = false;
+                for _ in 0..500 {
+                    if barrier_dir.join("continue").is_file() {
+                        released = true;
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                if !released {
+                    return Err("Science managed launch 测试恢复屏障超时".into());
+                }
+            }
+            match fs::hard_link(tombstone, path) {
+                Ok(()) => {
+                    fs::remove_file(tombstone)
+                        .map_err(|_| "Science managed launch 记录已恢复但 tombstone 无法清理")?;
+                    let parent = path.parent().ok_or("Science managed launch 恢复路径无父目录")?;
+                    File::open(parent)
+                        .and_then(|directory| directory.sync_all())
+                        .map_err(|_| "Science managed launch 恢复目录无法持久化")?;
+                    Ok(())
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Err(
+                    "Science managed launch 原子 no-clobber 恢复冲突；新记录与旧 tombstone 均已保留"
+                        .into(),
+                ),
+                Err(_) => Err("Science managed launch 记录变化且无法原位恢复".into()),
+            }
+        }
         Ok(_) => {
             Err("Science managed launch 记录变化且新记录已出现；旧记录保留在 tombstone".into())
         }
@@ -1913,6 +2012,21 @@ pub(crate) fn stop_sandbox_with_launch_token<R: Runtime>(
     launch_token: Option<&ScienceManagedLaunchToken>,
 ) -> Result<(), String> {
     if !sandbox_data_dir().exists() {
+        let sandbox_port = config::load_from(&config::default_dir())
+            .map_err(|error| format!("读取 Science 端口配置失败：{error}"))?
+            .sandbox_port;
+        let first_port_observation = loopback_port_accepts_tcp(sandbox_port);
+        let second_port_observation = if first_port_observation {
+            true
+        } else {
+            std::thread::sleep(Duration::from_millis(20));
+            loopback_port_accepts_tcp(sandbox_port)
+        };
+        if second_port_observation {
+            return Err(
+                "Science data-dir 已消失，但配置端口仍有监听；未发送信号且未确认停止。".into(),
+            );
+        }
         kill_child(sandbox);
         *sandbox_url = None;
         return Ok(());
@@ -2025,8 +2139,13 @@ pub(crate) fn stop_sandbox_with_launch_token<R: Runtime>(
     }
     kill_child(sandbox);
     *sandbox_url = None;
-    if err.is_none() && !loopback_port_accepts_tcp(sandbox_port) {
-        if let Err(error) = clear_managed_launch_identity(&stop_token, runtime) {
+    if err.is_none() {
+        if loopback_port_accepts_tcp(sandbox_port) {
+            err = Some(
+                "Science stop 后配置端口重新出现监听；未确认停止且未清理 managed launch 记录。"
+                    .into(),
+            );
+        } else if let Err(error) = clear_managed_launch_identity(&stop_token, runtime) {
             err = Some(error);
         }
     }
@@ -2041,8 +2160,7 @@ mod tests {
     use std::fs::{self, OpenOptions};
     use std::io::Write;
     use std::net::{TcpListener, TcpStream};
-    use std::os::unix::fs::symlink;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{symlink, OpenOptionsExt, PermissionsExt};
     use std::os::unix::process::ExitStatusExt;
     use std::process::{Command, ExitStatus, Output};
     use std::sync::atomic::Ordering;
@@ -2052,7 +2170,8 @@ mod tests {
         classify_known_runtime_state, classify_sandbox_state, first_http_url, managed_launch_path,
         official_updated_science_bin_for_home, official_updated_snapshot_for_home,
         official_updated_snapshot_from_process_paths, parse_unique_listener_pid,
-        probe_sandbox_runtime_cached, read_managed_launch_record, runtime_identity_is_current,
+        probe_sandbox_runtime_cached, read_managed_launch_record,
+        restore_unmatched_managed_launch_tombstone, runtime_identity_is_current,
         runtime_status_value, safe_science_version_with_timeout, sandbox_home,
         sandbox_running_ours, sandbox_url, science_executable_fingerprint,
         science_runtime_preflight_for_paths, science_runtime_preflight_for_paths_cached,
@@ -2063,6 +2182,95 @@ mod tests {
         SandboxScienceState, ScienceRuntimeIdentity, ScienceRuntimeSource, ScienceVersionCache,
         CACHED_ONCE_CHOICE, MANAGED_LAUNCH_LAST_READ_BYTES, MAX_MANAGED_LAUNCH_BYTES,
     };
+
+    #[test]
+    fn managed_launch_tombstone_restore_uses_no_clobber_primitive() {
+        let source = include_str!("science.rs");
+        let start = source
+            .find("fn restore_unmatched_managed_launch_tombstone")
+            .expect("managed launch tombstone restore implementation must exist");
+        let remainder = &source[start..];
+        let end = remainder
+            .find("\nfn clear_managed_launch_identity")
+            .expect("managed launch tombstone restore implementation must remain bounded");
+        let implementation = &remainder[..end];
+
+        assert!(
+            implementation.contains("fs::hard_link(tombstone, path)"),
+            "managed launch tombstone restore must use hard_link as its final atomic no-clobber destination commit"
+        );
+        assert!(
+            !implementation.contains("rename("),
+            "managed launch tombstone restore must not retain a check-then-overwriting-rename path"
+        );
+    }
+
+    #[test]
+    fn managed_launch_tombstone_restore_is_atomic_no_clobber(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let root = unique_temp_dir("science-managed-launch-restore-race")?;
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
+        let tombstone = root.join("science-managed-launch.old.stopped");
+        let receipt = root.join("science-managed-launch.v1.json");
+        let old_receipt = b"old-private-managed-launch".to_vec();
+        let new_receipt = b"new-concurrent-managed-launch".to_vec();
+        fs::write(&tombstone, &old_receipt)?;
+        fs::set_permissions(&tombstone, fs::Permissions::from_mode(0o600))?;
+        let barrier = root.join("restore-barrier");
+        fs::create_dir(&barrier)?;
+        std::env::set_var("CSSWITCH_TEST_TOMBSTONE_RESTORE_BARRIER", &barrier);
+
+        let receipt_for_writer = receipt.clone();
+        let barrier_for_writer = barrier.clone();
+        let new_receipt_for_writer = new_receipt.clone();
+        let writer = std::thread::spawn(move || -> std::io::Result<()> {
+            for _ in 0..500 {
+                if barrier_for_writer.join("ready").is_file() {
+                    let mut file = OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .mode(0o600)
+                        .open(&receipt_for_writer)?;
+                    file.write_all(&new_receipt_for_writer)?;
+                    file.sync_all()?;
+                    fs::write(barrier_for_writer.join("continue"), b"continue")?;
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "tombstone restore never reached the deterministic race barrier",
+            ))
+        });
+
+        let restore = restore_unmatched_managed_launch_tombstone(&tombstone, &receipt);
+        writer
+            .join()
+            .map_err(|_| "managed launch race writer panicked")??;
+        std::env::remove_var("CSSWITCH_TEST_TOMBSTONE_RESTORE_BARRIER");
+        let receipt_after = fs::read(&receipt)?;
+        let tombstone_after = fs::read(&tombstone).ok();
+        fs::remove_dir_all(&root)?;
+
+        assert_eq!(
+            restore.as_ref().map_err(String::as_str),
+            Err(
+                "Science managed launch 原子 no-clobber 恢复冲突；新记录与旧 tombstone 均已保留"
+            ),
+            "atomic no-clobber restore must report the conflict from its final no-replace commit primitive, not from another check before an overwriting rename"
+        );
+        assert_eq!(
+            receipt_after, new_receipt,
+            "atomic no-clobber restore must preserve the concurrently committed receipt byte-for-byte"
+        );
+        assert_eq!(
+            tombstone_after.as_deref(),
+            Some(old_receipt.as_slice()),
+            "atomic no-clobber restore must retain the old tombstone on conflict"
+        );
+        Ok(())
+    }
 
     #[test]
     fn managed_launch_receipt_growth_read_is_hard_bounded() -> Result<(), Box<dyn std::error::Error>>

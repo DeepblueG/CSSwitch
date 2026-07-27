@@ -307,7 +307,10 @@
           "type": "string",
           "enum": ["historical-observed", "inventory-confirmed", "source-reproduced", "not-run-current-target", "manual-only", "unknown"]
         },
-        "resolution_state": {"type": "string", "enum": ["open-not-fixed", "retired"]},
+        "resolution_state": {
+          "type": "string",
+          "enum": ["open-not-fixed", "source-fixed-product-pending", "retired"]
+        },
         "affected_paths": {
           "type": "array",
           "minItems": 1,

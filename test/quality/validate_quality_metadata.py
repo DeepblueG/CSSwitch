@@ -720,9 +720,23 @@ class Validator:
                 if status == "retired" and not isinstance(retirement, dict):
                     self.error(record_id, "retired record requires a tombstone with replacement")
                 if kind == "bug":
-                    expected = "retired" if status == "retired" else "open-not-fixed"
-                    if record.get("resolution_state") != expected:
-                        self.error(record_id, "bug resolution_state must be {}".format(expected))
+                    resolution = record.get("resolution_state")
+                    if status == "retired":
+                        if resolution != "retired":
+                            self.error(record_id, "retired bug resolution_state must be retired")
+                    elif resolution not in {"open-not-fixed", "source-fixed-product-pending"}:
+                        self.error(
+                            record_id,
+                            "active bug resolution_state must be open-not-fixed or source-fixed-product-pending",
+                        )
+                    elif (
+                        resolution == "source-fixed-product-pending"
+                        and record.get("reproduction_state") != "source-reproduced"
+                    ):
+                        self.error(
+                            record_id,
+                            "source-fixed-product-pending bug requires source-reproduced evidence",
+                        )
                 if kind == "change" and record.get("does_not_claim_fix") is not True:
                     self.error(record_id, "change must explicitly set does_not_claim_fix=true")
         for record_id, record in self.suites.items():
@@ -908,8 +922,15 @@ class Validator:
                     self.error(record_id, "evidence boundary allowed/excluded layers overlap")
                 if kind in {"change", "bug"} and "source-test" not in allowed:
                     self.error(record_id, "change/bug records must include source-test evidence boundary")
-                if kind == "bug" and record.get("resolution_state") not in {"open-not-fixed", "retired"}:
-                    self.error(record_id, "bug resolution state is outside open-not-fixed/retired")
+                if kind == "bug" and record.get("resolution_state") not in {
+                    "open-not-fixed",
+                    "source-fixed-product-pending",
+                    "retired",
+                }:
+                    self.error(
+                        record_id,
+                        "bug resolution state is outside open-not-fixed/source-fixed-product-pending/retired",
+                    )
                 if kind == "bug":
                     facts = record.get("confirmed_facts")
                     if record.get("claim_state") == "confirmed" and not facts:

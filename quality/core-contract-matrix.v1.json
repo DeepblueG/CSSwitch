@@ -278,32 +278,43 @@
       "user_entry": "Stop all",
       "preconditions": ["healthy managed chain and neighboring foreign listener"],
       "fixture": "owned and foreign process identities",
-      "registered_test_ids": ["desktop/src-tauri/Cargo.toml::lib::tests::app_state_drop_reaps_owned_proxy_child"],
+      "registered_test_ids": [
+        "desktop/src-tauri/Cargo.toml::lib::tests::app_state_drop_reaps_owned_proxy_child",
+        "desktop/src-tauri/Cargo.toml::lib::commands::runtime::tests::isolated_one_click_reuse_status_smoke_with_fake_science",
+        "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::managed_launch_tombstone_restore_is_atomic_no_clobber",
+        "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::managed_launch_tombstone_restore_uses_no_clobber_primitive"
+      ],
       "planned_test_ids": ["stop_all_closes_owned_ports_only"],
       "suite_ids": ["SUITE-RUST-DESKTOP"],
       "gate_ids": ["GATE-SOURCE"],
       "positive_oracle": "owned Gateway and Science ports close and managed records clear",
       "negative_oracle": "foreign listener, file, and process remain unchanged",
       "required_evidence_layers": ["source", "artifact", "runtime", "ui"],
-      "current_coverage": "owned proxy drop and ownership units",
-      "current_gap": "no combined stop matrix",
-      "blocking_condition": "owned residual or foreign mutation"
+      "current_coverage": "owned proxy drop plus isolated Science exact stop, PID/start drift, false-to-true final-port, missing data-dir, and receipt no-clobber coverage",
+      "current_gap": "combined Gateway plus Science stop still requires production artifact/runtime/UI evidence",
+      "blocking_condition": "owned residual, false stop success, receipt overwrite, foreign mutation, or missing required artifact/runtime/UI evidence"
     },
     {
       "contract_id": "LIFECYCLE-REATTACH",
       "user_entry": "Restart Desktop while Science remains running",
       "preconditions": ["persisted managed launch record", "same executable and data-dir"],
       "fixture": "fresh AppState and retained fake Science listener",
-      "registered_test_ids": [],
-      "planned_test_ids": ["science_restart_reattaches_only_exact_managed_identity"],
+      "registered_test_ids": [
+        "desktop/src-tauri/Cargo.toml::lib::commands::runtime::tests::isolated_one_click_reuse_status_smoke_with_fake_science",
+        "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::fresh_restart_rejects_listener_without_managed_launch_identity",
+        "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::managed_launch_receipt_growth_read_is_hard_bounded",
+        "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::managed_launch_tombstone_restore_is_atomic_no_clobber",
+        "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::managed_launch_tombstone_restore_uses_no_clobber_primitive"
+      ],
+      "planned_test_ids": [],
       "suite_ids": ["SUITE-RUST-DESKTOP"],
       "gate_ids": ["GATE-SCIENCE-REATTACH", "GATE-SOURCE"],
       "positive_oracle": "fingerprint, data-dir, unique listener PID, and managed launch identity all match and are adopted",
       "negative_oracle": "foreign, replaced, duplicate, or raced identity fails closed without signal",
       "required_evidence_layers": ["source", "artifact", "runtime", "ui"],
-      "current_coverage": "classifier and executable checks only",
-      "current_gap": "managed launch identity and PID-race coverage absent",
-      "blocking_condition": "port or health alone permits adoption"
+      "current_coverage": "source exact reattach, managed receipt bounds/mutants, PID/process-start races, stop final-port proof, and atomic no-clobber restoration",
+      "current_gap": "isolated production artifact/runtime/UI restart and reattach evidence pending",
+      "blocking_condition": "port or health alone permits adoption, stop success lacks final closure, receipt can be overwritten, or required artifact/runtime/UI evidence is missing"
     },
     {
       "contract_id": "LIFECYCLE-GATEWAY-RECOVERY",
