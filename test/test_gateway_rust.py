@@ -2445,6 +2445,122 @@ class RustGatewayLoopback(unittest.TestCase):
         finally:
             upstream.close()
 
+    def test_openai_responses_rejects_upstream_schema_invalid_tool_arguments(self):
+        upstream = MockUpstream(b"{}")
+        thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+        thread.start()
+        schema = {
+            "type": "object",
+            "properties": {
+                "pages": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                },
+                "offset": {"type": "integer"},
+                "limit": {"type": "integer"},
+            },
+            "allOf": [
+                {"not": {"required": ["pages", "offset"]}},
+                {"not": {"required": ["pages", "limit"]}},
+            ],
+            "additionalProperties": False,
+        }
+        try:
+            with tempfile.TemporaryDirectory(
+                prefix="csswitch-responses-invalid-tool-"
+            ) as temp_home:
+                proc, port = self.start_current_gateway(
+                    provider="openai-responses",
+                    openai_base_url=(
+                        f"http://127.0.0.1:{upstream.server_port}/up"
+                    ),
+                    openai_model="gpt-5.2",
+                    env_overrides={"HOME": temp_home},
+                )
+                try:
+                    for forbidden_peer in ("offset", "limit"):
+                        with self.subTest(forbidden_peer=forbidden_peer):
+                            upstream.response_body = json.dumps(
+                                {
+                                    "id": f"resp_invalid_{forbidden_peer}",
+                                    "status": "completed",
+                                    "output": [
+                                        {
+                                            "type": "function_call",
+                                            "call_id": f"call_{forbidden_peer}",
+                                            "name": "read_document",
+                                            "arguments": json.dumps(
+                                                {
+                                                    "pages": [1],
+                                                    forbidden_peer: 10,
+                                                }
+                                            ),
+                                        }
+                                    ],
+                                    "usage": {
+                                        "input_tokens": 3,
+                                        "output_tokens": 2,
+                                    },
+                                }
+                            ).encode()
+                            request = {
+                                "model": "claude-opus-4-8",
+                                "messages": [
+                                    {"role": "user", "content": "read"}
+                                ],
+                                "tools": [
+                                    {
+                                        "name": "read_document",
+                                        "description": "read a document",
+                                        "input_schema": schema,
+                                    }
+                                ],
+                            }
+                            conn = http.client.HTTPConnection(
+                                "127.0.0.1", port, timeout=5
+                            )
+                            conn.request(
+                                "POST",
+                                "/secret/v1/messages",
+                                body=json.dumps(request).encode(),
+                                headers={"content-type": "application/json"},
+                            )
+                            response = conn.getresponse()
+                            raw_body = response.read()
+                            conn.close()
+
+                            self.assertEqual(response.status, 502, raw_body)
+                            parsed = assert_error_shape(
+                                self, raw_body, "upstream_protocol_error"
+                            )
+                            self.assertEqual(
+                                parsed["error"]["message"],
+                                (
+                                    "upstream tool arguments failed the "
+                                    "declared input schema"
+                                ),
+                            )
+                            self.assertLessEqual(
+                                len(parsed["error"]["message"]), 120
+                            )
+                            self.assertNotIn(b"tool_use", raw_body)
+                            self.assertNotIn(b"pages", raw_body)
+                            self.assertNotIn(
+                                forbidden_peer.encode(), raw_body
+                            )
+
+                            captured = upstream.requests[-1]
+                            mapped = json.loads(captured["body"])
+                            self.assertEqual(
+                                mapped["tools"][0]["parameters"], schema
+                            )
+                    self.assertEqual(len(upstream.requests), 2)
+                finally:
+                    self.stop_gateway(proc)
+        finally:
+            upstream.shutdown()
+            upstream.server_close()
+
     def test_dashscope_responses_uppercase_host_rules_and_safe_metadata_logs(self):
         forward_proxy = MockUpstream(
             json.dumps(

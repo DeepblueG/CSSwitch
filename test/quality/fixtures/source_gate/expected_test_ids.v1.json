@@ -109,6 +109,7 @@
         "test.test_gateway_rust.RustGatewayLoopback.test_openai_responses_forced_model_shell_and_nonstream_translation",
         "test.test_gateway_rust.RustGatewayLoopback.test_openai_responses_models_discovery_without_forced_model",
         "test.test_gateway_rust.RustGatewayLoopback.test_openai_responses_recovery_requires_a_new_downstream_request",
+        "test.test_gateway_rust.RustGatewayLoopback.test_openai_responses_rejects_upstream_schema_invalid_tool_arguments",
         "test.test_gateway_rust.RustGatewayLoopback.test_openai_responses_tools_and_tool_result_full_loopback",
         "test.test_gateway_rust.RustGatewayLoopback.test_qwen_models_and_nonstream_translation",
         "test.test_gateway_rust.RustGatewayLoopback.test_qwen_nonstream_upstream_errors_match_python_shape",
