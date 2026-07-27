@@ -236,7 +236,9 @@ class SkillRuntimeBoundary(unittest.TestCase):
         self.assertIn("setBusy(false)", one_click)
         self.assertIn("setBrowserFallback(r.fallback_url)", one_click)
 
-        gateway_ready = session.index("verify_gateway_model_catalog(pport, &secret, active_profile)?")
+        gateway_ready = session.index(
+            "verify_gateway_model_catalog_traced(&trace, pport, &secret, active_profile)?"
+        )
         science_spawn = session.index('Command::new("zsh")', gateway_ready)
         self.assertLess(gateway_ready, science_spawn)
         for stage in ("start_gateway", "start_science", "verify_science_catalog"):

@@ -1185,7 +1185,7 @@ esac
     }
 
     #[test]
-    #[ignore = "explicit isolated runtime smoke; uses fake Science and local loopback ports"]
+    #[ignore = "explicit Acceptance-boundary runtime smoke; uses fake Science and local loopback ports"]
     fn isolated_one_click_reuse_status_smoke_with_fake_science() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -1508,7 +1508,7 @@ esac
     }
 
     #[test]
-    #[ignore = "explicit isolated recovery proof; uses fake Science and local loopback ports"]
+    #[ignore = "explicit Acceptance-boundary recovery proof; uses fake Science and local loopback ports"]
     fn isolated_manual_actions_recover_dead_proxy_with_fake_science() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()

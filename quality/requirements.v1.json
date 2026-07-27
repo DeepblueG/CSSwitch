@@ -16,9 +16,20 @@
         "Version, Git SHA, tag object, and path fields are bounded and structurally validated."
       ],
       "evidence_boundary": {
-        "allowed_layers": ["source-test"],
-        "excluded_layers": ["final-dmg", "installed-final", "live", "signing", "public"],
-        "basis": ["quality/schema/quality-kernel.v1.schema.json", "source/unit validation only"]
+        "allowed_layers": [
+          "source-test"
+        ],
+        "excluded_layers": [
+          "final-dmg",
+          "installed-final",
+          "live",
+          "signing",
+          "public"
+        ],
+        "basis": [
+          "quality/schema/quality-kernel.v1.schema.json",
+          "source/unit validation only"
+        ]
       },
       "retirement": null
     },
@@ -29,16 +40,29 @@
       "description": "Every v0.8.3 quality change and known issue has a stable record, evidence vocabulary, reproduction state, severity, impact, and explicit non-fix boundary.",
       "status": "active",
       "owner": "quality-kernel",
-      "depends_on": ["REQ-083-SCHEMA"],
+      "depends_on": [
+        "REQ-083-SCHEMA"
+      ],
       "acceptance_conditions": [
         "The eight scoped v0.8.3 bugs are present as active open-not-fixed records.",
         "The quality-kernel change covers its own quality, focused-test, and documentation paths.",
         "No source/unit record is promoted to artifact, installed, live, signing, or public evidence."
       ],
       "evidence_boundary": {
-        "allowed_layers": ["source-test"],
-        "excluded_layers": ["final-dmg", "installed-final", "live", "signing", "public"],
-        "basis": ["docs/audits/v083-test-system-audit.md", "docs/audits/v082-change-audit.md"]
+        "allowed_layers": [
+          "source-test"
+        ],
+        "excluded_layers": [
+          "final-dmg",
+          "installed-final",
+          "live",
+          "signing",
+          "public"
+        ],
+        "basis": [
+          "docs/audits/v083-test-system-audit.md",
+          "docs/audits/v082-change-audit.md"
+        ]
       },
       "retirement": null
     },
@@ -49,16 +73,29 @@
       "description": "Audit baseline and previous release tag object/peeled commit are checked in; a future run binds candidate SHA in runtime evidence rather than this lineage source.",
       "status": "active",
       "owner": "quality-kernel",
-      "depends_on": ["REQ-083-SCHEMA"],
+      "depends_on": [
+        "REQ-083-SCHEMA"
+      ],
       "acceptance_conditions": [
         "The previous release records both annotated tag object and peeled commit.",
         "Audit baseline cannot be selected as the release impact base.",
         "PR impact requires an explicit target ref and derives its merge-base; release impact uses the previous peeled commit."
       ],
       "evidence_boundary": {
-        "allowed_layers": ["source-test"],
-        "excluded_layers": ["final-dmg", "installed-final", "live", "signing", "public"],
-        "basis": ["quality/release-lineage.v1.json", "read-only Git identity checks"]
+        "allowed_layers": [
+          "source-test"
+        ],
+        "excluded_layers": [
+          "final-dmg",
+          "installed-final",
+          "live",
+          "signing",
+          "public"
+        ],
+        "basis": [
+          "quality/release-lineage.v1.json",
+          "read-only Git identity checks"
+        ]
       },
       "retirement": null
     },
@@ -69,16 +106,30 @@
       "description": "The stdlib validator checks schemas, foreign keys, lifecycle rules, dependency cycles, test impact, lineage, production paths, and Git state without accepting arbitrary bases.",
       "status": "active",
       "owner": "quality-kernel",
-      "depends_on": ["REQ-083-REGISTRY", "REQ-083-LINEAGE"],
+      "depends_on": [
+        "REQ-083-REGISTRY",
+        "REQ-083-LINEAGE"
+      ],
       "acceptance_conditions": [
         "Duplicate IDs, bad foreign keys, dependency/replacement cycles, invalid frozen test-impact states, and malformed lineage fail.",
         "Release impact fails on dirty, shallow, non-ancestor, rename/delete, untracked production, or unknown production paths.",
         "Only metadata, impact-pr, and impact-release profiles are accepted by the CLI."
       ],
       "evidence_boundary": {
-        "allowed_layers": ["source-test"],
-        "excluded_layers": ["final-dmg", "installed-final", "live", "signing", "public"],
-        "basis": ["test/quality/validate_quality_metadata.py", "test/quality/test_quality_kernel.py"]
+        "allowed_layers": [
+          "source-test"
+        ],
+        "excluded_layers": [
+          "final-dmg",
+          "installed-final",
+          "live",
+          "signing",
+          "public"
+        ],
+        "basis": [
+          "test/quality/validate_quality_metadata.py",
+          "test/quality/test_quality_kernel.py"
+        ]
       },
       "retirement": null
     },
@@ -89,16 +140,29 @@
       "description": "Desktop, scripts, test runners and fixtures, build recipes, quality machine files, version sources, release workflows, and operational quality documentation have explicit coverage.",
       "status": "active",
       "owner": "quality-kernel",
-      "depends_on": ["REQ-083-VALIDATOR"],
+      "depends_on": [
+        "REQ-083-VALIDATOR"
+      ],
       "acceptance_conditions": [
         "Every changed or untracked production path matches one registered policy prefix or an explicit narrative exemption.",
         "A production path change is covered by an active change record and required source-test gate.",
         "Unknown paths and rename/delete operations fail closed in impact profiles."
       ],
       "evidence_boundary": {
-        "allowed_layers": ["source-test"],
-        "excluded_layers": ["final-dmg", "installed-final", "live", "signing", "public"],
-        "basis": ["quality/production-paths.v1.json", "read-only Git status and diff inventory"]
+        "allowed_layers": [
+          "source-test"
+        ],
+        "excluded_layers": [
+          "final-dmg",
+          "installed-final",
+          "live",
+          "signing",
+          "public"
+        ],
+        "basis": [
+          "quality/production-paths.v1.json",
+          "read-only Git status and diff inventory"
+        ]
       },
       "retirement": null
     },
@@ -109,16 +173,29 @@
       "description": "The test catalog records current suite entrypoints, four confirmed orphan entrypoints, four Cargo manifests, runner self-tests, manual states, and future historical escape cases at suite granularity.",
       "status": "active",
       "owner": "quality-kernel",
-      "depends_on": ["REQ-083-SCHEMA"],
+      "depends_on": [
+        "REQ-083-SCHEMA"
+      ],
       "acceptance_conditions": [
         "The four orphan entrypoints are explicitly present and are not counted as PASS.",
         "All four Cargo.toml manifests are explicitly present.",
         "Manual, legacy, quarantine, and not-yet-automatable entries have owner, reason, expiry, and replacement."
       ],
       "evidence_boundary": {
-        "allowed_layers": ["source-test"],
-        "excluded_layers": ["final-dmg", "installed-final", "live", "signing", "public"],
-        "basis": ["quality/test-catalog.v1.json", "docs/audits/v083-test-system-audit.md"]
+        "allowed_layers": [
+          "source-test"
+        ],
+        "excluded_layers": [
+          "final-dmg",
+          "installed-final",
+          "live",
+          "signing",
+          "public"
+        ],
+        "basis": [
+          "quality/test-catalog.v1.json",
+          "docs/audits/v083-test-system-audit.md"
+        ]
       },
       "retirement": null
     },
@@ -129,16 +206,30 @@
       "description": "Source/unit PASS, legacy known-unreliable gate state, artifact, installed, live, signing, and public claims remain separate vocabulary and are not promoted by this node.",
       "status": "active",
       "owner": "quality-kernel",
-      "depends_on": ["REQ-083-REGISTRY"],
+      "depends_on": [
+        "REQ-083-REGISTRY"
+      ],
       "acceptance_conditions": [
         "The quality kernel reports source/unit evidence only.",
         "The old S0 test gate remains legacy-known-unreliable until a later node replaces it.",
         "No release-ready, artifact, installed, live, signing, or public claim is emitted by this node."
       ],
       "evidence_boundary": {
-        "allowed_layers": ["source-test"],
-        "excluded_layers": ["isolated-test-app", "final-dmg", "installed-final", "live", "signing", "public"],
-        "basis": ["docs/operations/quality-kernel.md", ".agents/rules/testing-and-evidence.md"]
+        "allowed_layers": [
+          "source-test"
+        ],
+        "excluded_layers": [
+          "isolated-test-app",
+          "final-dmg",
+          "installed-final",
+          "live",
+          "signing",
+          "public"
+        ],
+        "basis": [
+          "docs/operations/quality-kernel.md",
+          ".agents/rules/testing-and-evidence.md"
+        ]
       },
       "retirement": null
     },
@@ -149,16 +240,68 @@
       "description": "Focused tests use temporary Git repositories or read-only inspection of the current repository and never access credentials, user databases, Science state, installed apps, or other worktrees.",
       "status": "active",
       "owner": "quality-kernel",
-      "depends_on": ["REQ-083-VALIDATOR", "REQ-083-INVENTORY"],
+      "depends_on": [
+        "REQ-083-VALIDATOR",
+        "REQ-083-INVENTORY"
+      ],
       "acceptance_conditions": [
         "Malicious metadata and Git fixtures fail with stable validator errors.",
         "Focused tests do not modify the real worktree or invoke network, credentials, Science, or installed runtime.",
         "The focused entrypoint is separate from the existing run_all entrypoint."
       ],
       "evidence_boundary": {
-        "allowed_layers": ["source-test"],
-        "excluded_layers": ["final-dmg", "installed-final", "live", "signing", "public"],
-        "basis": ["test/quality/test_quality_kernel.py", "stdlib-only implementation"]
+        "allowed_layers": [
+          "source-test"
+        ],
+        "excluded_layers": [
+          "final-dmg",
+          "installed-final",
+          "live",
+          "signing",
+          "public"
+        ],
+        "basis": [
+          "test/quality/test_quality_kernel.py",
+          "stdlib-only implementation"
+        ]
+      },
+      "retirement": null
+    },
+    {
+      "id": "REQ-083-SOURCE-GATE",
+      "version": "v0.8.3",
+      "title": "Trusted exact-catalog source gate is fail closed",
+      "description": "A fixed clean exact-HEAD source run binds all fifteen approved suites, exact discovered and executed test identities, observations, existing TestResultV1 records, evidence, and the terminal completion seal without retry or evidence promotion.",
+      "status": "active",
+      "owner": "quality-kernel",
+      "depends_on": [
+        "REQ-083-SCHEMA",
+        "REQ-083-INVENTORY",
+        "REQ-083-EVIDENCE"
+      ],
+      "acceptance_conditions": [
+        "GATE-SOURCE selects the exact ordered fifteen-suite source catalog and the public CLI cannot select a subset.",
+        "Zero, missing, duplicate, unknown, skipped, ignored, todo, not-run, raw-exit contradiction, retry, drift, or partial authority cannot establish PASS.",
+        "The loopback suite builds csswitch-gateway from the bound clean source and offline dependency view into a newly held private target, and its derived binary record must match an independent parent reopen and digest before publication.",
+        "RUN-EVIDENCE-GREEN and SOURCE-GREEN remain source/unit claims and require a clean exact-HEAD completion seal."
+      ],
+      "evidence_boundary": {
+        "allowed_layers": [
+          "source-test"
+        ],
+        "excluded_layers": [
+          "isolated-test-app",
+          "final-dmg",
+          "installed-final",
+          "live",
+          "signing",
+          "public"
+        ],
+        "basis": [
+          "docs/operations/quality-source-gate.md",
+          "source-observation.v1 and existing run-evidence schemas",
+          "snapshot-bound gateway driver and parent derived-tool binding"
+        ]
       },
       "retirement": null
     },
@@ -169,9 +312,31 @@
       "description": "The Science check-only path and CSSwitch updater selection must remain distinct, fail closed on invalid candidates, and never be recorded as an already-fixed update contract.",
       "status": "active",
       "owner": "science-runtime",
-      "depends_on": ["REQ-083-EVIDENCE"],
-      "acceptance_conditions": ["Record check-only versus updater behavior separately.", "Keep executable identity, selection, and update evidence distinct.", "Do not promote source checks to installed or live Science proof."],
-      "evidence_boundary": {"allowed_layers": ["source-test"], "excluded_layers": ["isolated-test-app", "final-dmg", "installed-final", "live", "signing", "public"], "basis": [".agents/rules/science-runtime.md", "product issue registration only"]},
+      "depends_on": [
+        "REQ-083-EVIDENCE"
+      ],
+      "acceptance_conditions": [
+        "Record check-only versus updater behavior separately.",
+        "Keep executable identity, selection, and update evidence distinct.",
+        "Do not promote source checks to installed or live Science proof."
+      ],
+      "evidence_boundary": {
+        "allowed_layers": [
+          "source-test"
+        ],
+        "excluded_layers": [
+          "isolated-test-app",
+          "final-dmg",
+          "installed-final",
+          "live",
+          "signing",
+          "public"
+        ],
+        "basis": [
+          ".agents/rules/science-runtime.md",
+          "product issue registration only"
+        ]
+      },
       "retirement": null
     },
     {
@@ -181,9 +346,31 @@
       "description": "DeepSeek Pro thinking multi-round requests must have a separately reproducible request/response contract and must not be treated as fixed by local mock coverage.",
       "status": "active",
       "owner": "gateway",
-      "depends_on": ["REQ-083-EVIDENCE"],
-      "acceptance_conditions": ["Register the HTTP 400 multi-round symptom and its model/adapter boundary.", "Keep mock/source evidence separate from provider evidence.", "No fixed claim is accepted without the later required provider-layer evidence."],
-      "evidence_boundary": {"allowed_layers": ["source-test"], "excluded_layers": ["isolated-test-app", "final-dmg", "installed-final", "live", "signing", "public"], "basis": ["product issue registration", "source/unit evidence boundary"]},
+      "depends_on": [
+        "REQ-083-EVIDENCE"
+      ],
+      "acceptance_conditions": [
+        "Register the HTTP 400 multi-round symptom and its model/adapter boundary.",
+        "Keep mock/source evidence separate from provider evidence.",
+        "No fixed claim is accepted without the later required provider-layer evidence."
+      ],
+      "evidence_boundary": {
+        "allowed_layers": [
+          "source-test"
+        ],
+        "excluded_layers": [
+          "isolated-test-app",
+          "final-dmg",
+          "installed-final",
+          "live",
+          "signing",
+          "public"
+        ],
+        "basis": [
+          "product issue registration",
+          "source/unit evidence boundary"
+        ]
+      },
       "retirement": null
     },
     {
@@ -193,9 +380,30 @@
       "description": "Database access errors must identify the owning layer and reproduction boundary before any migration or runtime fix is claimed.",
       "status": "active",
       "owner": "runtime-state",
-      "depends_on": ["REQ-083-EVIDENCE"],
-      "acceptance_conditions": ["Register database access failures without reading real user databases.", "Separate source diagnosis from migration, installed, and live database evidence.", "Require a later owner and recovery contract before closure."],
-      "evidence_boundary": {"allowed_layers": ["source-test"], "excluded_layers": ["final-dmg", "installed-final", "live", "signing", "public"], "basis": ["docs/audits/v082-change-audit.md", "no real database access"]},
+      "depends_on": [
+        "REQ-083-EVIDENCE"
+      ],
+      "acceptance_conditions": [
+        "Register database access failures without reading real user databases.",
+        "Separate source diagnosis from migration, installed, and live database evidence.",
+        "Require a later owner and recovery contract before closure."
+      ],
+      "evidence_boundary": {
+        "allowed_layers": [
+          "source-test"
+        ],
+        "excluded_layers": [
+          "final-dmg",
+          "installed-final",
+          "live",
+          "signing",
+          "public"
+        ],
+        "basis": [
+          "docs/audits/v082-change-audit.md",
+          "no real database access"
+        ]
+      },
       "retirement": null
     },
     {
@@ -205,9 +413,31 @@
       "description": "GitHub Skill bundle archives must distinguish unsupported bundle structure from ordinary install or validation failures.",
       "status": "active",
       "owner": "skill-package",
-      "depends_on": ["REQ-083-EVIDENCE"],
-      "acceptance_conditions": ["Register BUNDLE_STRUCTURE_UNSUPPORTED as an open product issue.", "Keep archive/fixture evidence separate from public GitHub and installed Skill evidence.", "Do not mark the bundle path fixed from a local parser result."],
-      "evidence_boundary": {"allowed_layers": ["source-test"], "excluded_layers": ["isolated-test-app", "final-dmg", "installed-final", "live", "signing", "public"], "basis": ["product issue registration", "Skill package source boundary"]},
+      "depends_on": [
+        "REQ-083-EVIDENCE"
+      ],
+      "acceptance_conditions": [
+        "Register BUNDLE_STRUCTURE_UNSUPPORTED as an open product issue.",
+        "Keep archive/fixture evidence separate from public GitHub and installed Skill evidence.",
+        "Do not mark the bundle path fixed from a local parser result."
+      ],
+      "evidence_boundary": {
+        "allowed_layers": [
+          "source-test"
+        ],
+        "excluded_layers": [
+          "isolated-test-app",
+          "final-dmg",
+          "installed-final",
+          "live",
+          "signing",
+          "public"
+        ],
+        "basis": [
+          "product issue registration",
+          "Skill package source boundary"
+        ]
+      },
       "retirement": null
     },
     {
@@ -217,9 +447,30 @@
       "description": "Local stdio MCP Acceptance behavior and HTTPS/network boundary must be recorded independently, with local mock evidence never promoted to remote provider proof.",
       "status": "active",
       "owner": "gateway",
-      "depends_on": ["REQ-083-EVIDENCE"],
-      "acceptance_conditions": ["Register the local stdio MCP Acceptance symptom and HTTPS boundary separately.", "Keep loopback/local and remote HTTPS claims distinct.", "Do not claim live MCP or provider behavior from source-only tests."],
-      "evidence_boundary": {"allowed_layers": ["source-test"], "excluded_layers": ["final-dmg", "installed-final", "live", "signing", "public"], "basis": ["product issue registration", ".agents/rules/testing-and-evidence.md"]},
+      "depends_on": [
+        "REQ-083-EVIDENCE"
+      ],
+      "acceptance_conditions": [
+        "Register the local stdio MCP Acceptance symptom and HTTPS boundary separately.",
+        "Keep loopback/local and remote HTTPS claims distinct.",
+        "Do not claim live MCP or provider behavior from source-only tests."
+      ],
+      "evidence_boundary": {
+        "allowed_layers": [
+          "source-test"
+        ],
+        "excluded_layers": [
+          "final-dmg",
+          "installed-final",
+          "live",
+          "signing",
+          "public"
+        ],
+        "basis": [
+          "product issue registration",
+          ".agents/rules/testing-and-evidence.md"
+        ]
+      },
       "retirement": null
     },
     {
@@ -229,9 +480,30 @@
       "description": "OpenCode Go issue 65 remains a separately tracked compatibility claim with exact selector, route, and evidence-layer identity.",
       "status": "active",
       "owner": "gateway",
-      "depends_on": ["REQ-083-EVIDENCE"],
-      "acceptance_conditions": ["Register issue 65 with its source paths and expected compatibility suite.", "Separate local mock or catalog evidence from live OpenCode Go evidence.", "Do not record a fixed route without a later exact provider-layer result."],
-      "evidence_boundary": {"allowed_layers": ["source-test"], "excluded_layers": ["final-dmg", "installed-final", "live", "signing", "public"], "basis": ["product issue registration", "docs/audits/v082-change-audit.md"]},
+      "depends_on": [
+        "REQ-083-EVIDENCE"
+      ],
+      "acceptance_conditions": [
+        "Register issue 65 with its source paths and expected compatibility suite.",
+        "Separate local mock or catalog evidence from live OpenCode Go evidence.",
+        "Do not record a fixed route without a later exact provider-layer result."
+      ],
+      "evidence_boundary": {
+        "allowed_layers": [
+          "source-test"
+        ],
+        "excluded_layers": [
+          "final-dmg",
+          "installed-final",
+          "live",
+          "signing",
+          "public"
+        ],
+        "basis": [
+          "product issue registration",
+          "docs/audits/v082-change-audit.md"
+        ]
+      },
       "retirement": null
     },
     {
@@ -241,9 +513,32 @@
       "description": "Science Mach-O metadata must not be incorrectly rejected by the production identity boundary; parser and identity evidence remain separate from signing and installed proof.",
       "status": "active",
       "owner": "science-runtime",
-      "depends_on": ["REQ-083-SCIENCE-UPDATER", "REQ-083-EVIDENCE"],
-      "acceptance_conditions": ["Register metadata false-rejection as an open product issue.", "Require fail-closed parser tests that distinguish malformed, mismatched, and valid metadata.", "Do not convert source parser evidence into signing or installed acceptance."],
-      "evidence_boundary": {"allowed_layers": ["source-test"], "excluded_layers": ["isolated-test-app", "final-dmg", "installed-final", "live", "signing", "public"], "basis": [".agents/rules/science-runtime.md", "docs/audits/v082-change-audit.md"]},
+      "depends_on": [
+        "REQ-083-SCIENCE-UPDATER",
+        "REQ-083-EVIDENCE"
+      ],
+      "acceptance_conditions": [
+        "Register metadata false-rejection as an open product issue.",
+        "Require fail-closed parser tests that distinguish malformed, mismatched, and valid metadata.",
+        "Do not convert source parser evidence into signing or installed acceptance."
+      ],
+      "evidence_boundary": {
+        "allowed_layers": [
+          "source-test"
+        ],
+        "excluded_layers": [
+          "isolated-test-app",
+          "final-dmg",
+          "installed-final",
+          "live",
+          "signing",
+          "public"
+        ],
+        "basis": [
+          ".agents/rules/science-runtime.md",
+          "docs/audits/v082-change-audit.md"
+        ]
+      },
       "retirement": null
     },
     {
@@ -253,9 +548,31 @@
       "description": "OAuth-written then SSH-failed late setup must have an explicit rollback/compensation and deterministic retry contract.",
       "status": "active",
       "owner": "science-runtime",
-      "depends_on": ["REQ-083-EVIDENCE"],
-      "acceptance_conditions": ["Exercise the real late-failure order in a future isolated regression.", "Prove state recovery before any release-layer claim.", "Keep system SSH credentials and real servers outside this node."],
-      "evidence_boundary": {"allowed_layers": ["source-test"], "excluded_layers": ["isolated-test-app", "final-dmg", "installed-final", "live", "signing", "public"], "basis": [".agents/rules/system-ssh.md", "docs/audits/v082-change-audit.md"]},
+      "depends_on": [
+        "REQ-083-EVIDENCE"
+      ],
+      "acceptance_conditions": [
+        "Exercise the real late-failure order in a future isolated regression.",
+        "Prove state recovery before any release-layer claim.",
+        "Keep system SSH credentials and real servers outside this node."
+      ],
+      "evidence_boundary": {
+        "allowed_layers": [
+          "source-test"
+        ],
+        "excluded_layers": [
+          "isolated-test-app",
+          "final-dmg",
+          "installed-final",
+          "live",
+          "signing",
+          "public"
+        ],
+        "basis": [
+          ".agents/rules/system-ssh.md",
+          "docs/audits/v082-change-audit.md"
+        ]
+      },
       "retirement": null
     }
   ]

@@ -24,6 +24,7 @@ RUN_FIELDS = frozenset(("schema", "run_id", "profile", "head_sha", "comparison_b
 SNAPSHOT_FIELDS = frozenset(("schema", "run_id", "head_sha", "snapshot_mode", "entry_count", "total_bytes", "entries"))
 CHANGE_FIELDS = frozenset(("schema", "head_sha", "raw_status_sha256", "created_at", "entries"))
 EVIDENCE_FIELDS = frozenset(("schema", "run_id", "run_manifest", "test_results"))
+SOURCE_EVIDENCE_FIELDS = EVIDENCE_FIELDS | frozenset(("source_observations",))
 SEAL_FIELDS = frozenset(("schema", "run_id", "run_manifest", "source_snapshot_manifest", "evidence_manifest", "input_digest_set_sha256", "aggregate_decision", "runner_exit", "completed_at"))
 FAILURE_FIELDS = frozenset(("schema", "run_id", "stage", "reason_code", "run_manifest", "created_at", "terminal"))
 CANDIDATE_FIELDS = frozenset(("schema", "version", "candidate_head_sha", "previous_release", "gate_ids", "completion_seal"))
@@ -163,6 +164,155 @@ def _utf8_bytes(value: Any) -> bytes:
         _fail("symlink target is not UTF-8")
 
 
+def _test_ids(value: Any, label: str) -> list[str]:
+    if not isinstance(value, list) or len(value) > 1000000:
+        _fail("invalid " + label)
+    if any(
+        not isinstance(item, str)
+        or not item
+        or len(item) > 512
+        or item != unicodedata.normalize("NFC", item)
+        or any(ord(char) < 32 or ord(char) == 127 for char in item)
+        for item in value
+    ):
+        _fail("invalid " + label)
+    if value != sorted(value, key=lambda item: item.encode("utf-8")) or len(set(value)) != len(value):
+        _fail(label + " must be sorted and unique")
+    return value
+
+
+def validate_source_observation(observation: Any) -> None:
+    fields = frozenset((
+        "schema", "run_id", "suite_id", "entrypoint_id", "attempt_index",
+        "command_argv_sha256", "environment_sha256", "tool_identity_sha256",
+        "raw_process", "adapter_exit", "executed", "passed", "failed",
+        "skipped", "ignored", "todo", "not_run", "discovered_test_ids",
+        "executed_test_ids", "failed_test_ids", "skipped_test_ids", "ignored_test_ids",
+        "todo_test_ids", "not_run_test_ids", "stdout", "stderr",
+        "derived_tool", "outcome_hint", "classification_hint", "reason_code",
+    ))
+    observation = _keys(observation, fields, "source observation")
+    if (
+        observation["schema"] != "source-observation.v1"
+        or not _sha(observation["run_id"], 32)
+        or not _matches(SUITE_RE, observation["suite_id"])
+        or not _matches(ENTRY_RE, observation["entrypoint_id"])
+        or observation["attempt_index"] != 0
+    ):
+        _fail("source observation identity")
+    if any(
+        not _sha(observation[key])
+        for key in ("command_argv_sha256", "environment_sha256", "tool_identity_sha256")
+    ):
+        _fail("source observation digest")
+    raw = observation["raw_process"]
+    if not isinstance(raw, Mapping):
+        _fail("source observation raw process")
+    state = raw.get("state")
+    if state == "EXITED":
+        if set(raw) != {"state", "process_exit"} or not _is_int(raw["process_exit"]) or not 0 <= raw["process_exit"] <= 255:
+            _fail("source observation raw exit")
+    elif state == "SIGNALED":
+        if set(raw) != {"state", "process_signal"} or not _is_int(raw["process_signal"]) or not 1 <= raw["process_signal"] <= 255:
+            _fail("source observation raw signal")
+    elif state in {
+        "PRE_EXEC_FAILED", "HARD_TIMEOUT", "OUTPUT_LIMIT", "REAP_FAILED",
+        "TERMINAL_DRAIN_INCOMPLETE", "PROCESS_GROUP_CLEANUP_FAILED",
+    }:
+        if set(raw) != {"state"}:
+            _fail("source observation typed raw state")
+    else:
+        _fail("source observation raw state")
+    if observation["adapter_exit"] not in {0, 10, 11, 12, 13}:
+        _fail("source observation adapter exit")
+    counts = {}
+    for key in ("executed", "passed", "failed", "skipped", "ignored", "todo", "not_run"):
+        value = observation[key]
+        if not _is_int(value) or not 0 <= value <= 1000000:
+            _fail("source observation count")
+        counts[key] = value
+    ids = {
+        key: _test_ids(observation[key], key)
+        for key in (
+            "discovered_test_ids", "executed_test_ids", "failed_test_ids",
+            "skipped_test_ids",
+            "ignored_test_ids", "todo_test_ids", "not_run_test_ids",
+        )
+    }
+    if len(ids["executed_test_ids"]) != counts["executed"]:
+        _fail("source observation executed identity count")
+    for key, count_key in (
+        ("failed_test_ids", "failed"), ("skipped_test_ids", "skipped"),
+        ("ignored_test_ids", "ignored"),
+        ("todo_test_ids", "todo"), ("not_run_test_ids", "not_run"),
+    ):
+        if len(ids[key]) != counts[count_key]:
+            _fail("source observation state identity count")
+    executed_ids = set(ids["executed_test_ids"])
+    state_id_sets = [
+        set(ids[key])
+        for key in (
+            "failed_test_ids", "skipped_test_ids", "ignored_test_ids",
+            "todo_test_ids",
+        )
+    ]
+    if (
+        any(not values <= executed_ids for values in state_id_sets)
+        or any(
+            left & right
+            for index, left in enumerate(state_id_sets)
+            for right in state_id_sets[index + 1:]
+        )
+        or set(ids["not_run_test_ids"]) & executed_ids
+    ):
+        _fail("source observation state identity partition")
+    if counts["passed"] + counts["failed"] + counts["skipped"] + counts["ignored"] + counts["todo"] != counts["executed"]:
+        _fail("source observation execution count")
+    for key in ("stdout", "stderr"):
+        output = _keys(observation[key], frozenset(("bytes", "sha256", "truncated")), "source output")
+        if (
+            not _is_int(output["bytes"]) or not 0 <= output["bytes"] <= 67108864
+            or not _sha(output["sha256"]) or not isinstance(output["truncated"], bool)
+        ):
+            _fail("source output binding")
+    derived = observation["derived_tool"]
+    if observation["suite_id"] == "SUITE-PY-LOOPBACK":
+        derived = _keys(
+            derived,
+            frozenset(("path", "mode", "size", "sha256")),
+            "source derived tool",
+        )
+        path = derived["path"]
+        if (
+            not isinstance(path, str)
+            or not path.startswith("/")
+            or path == "/"
+            or path.endswith("/")
+            or "//" in path
+            or len(path.encode("utf-8", "strict")) > 4096
+            or path != unicodedata.normalize("NFC", path)
+            or any(
+                part in {"", ".", ".."}
+                for part in path.split("/")[1:]
+            )
+            or any(ord(char) < 32 or ord(char) == 127 for char in path)
+            or derived["mode"] != "0755"
+            or not _is_int(derived["size"])
+            or not 0 < derived["size"] <= 134217728
+            or not _sha(derived["sha256"])
+        ):
+            _fail("source derived tool binding")
+    elif derived is not None:
+        _fail("unexpected source derived tool")
+    if (
+        observation["outcome_hint"] not in {"PASS", "FAIL", "BLOCKED"}
+        or observation["classification_hint"] not in {"NONE", "ENVIRONMENT", "REAL_MACHINE", "QUARANTINED", "INFRA"}
+        or not isinstance(observation["reason_code"], str)
+        or re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", observation["reason_code"]) is None
+    ):
+        _fail("source observation hints")
+
+
 def validate_source_snapshot(manifest: Any) -> None:
     manifest = _keys(manifest, SNAPSHOT_FIELDS, "source snapshot")
     if manifest["schema"] != "source-snapshot-manifest.v1" or not _sha(manifest["run_id"], 32) or not _sha(manifest["head_sha"], 40):
@@ -270,7 +420,13 @@ def validate_run_manifest(manifest: Any, artifacts: Mapping[str, bytes]) -> tupl
         item = _keys(item, frozenset(("suite_id", "entrypoint_id")), "expected suite")
         if not _matches(SUITE_RE, item["suite_id"]) or not _matches(ENTRY_RE, item["entrypoint_id"]):
             _fail("expected suite identity")
-    _ordered(expected, lambda item: item["suite_id"])
+    if profile == "source":
+        if len({
+            item["suite_id"] for item in expected
+        }) != len(expected):
+            _fail("expected source suites must be unique")
+    else:
+        _ordered(expected, lambda item: item["suite_id"])
     digests = _keys(manifest["input_digests"], frozenset(("schema_bundle", "catalog", "gates", "runner", "fixtures", "build_recipes", "sanitized_environment", "tools")), "input digests")
     if any(not _sha(value) for value in digests.values()):
         _fail("input digest")
@@ -281,7 +437,8 @@ def validate_run_manifest(manifest: Any, artifacts: Mapping[str, bytes]) -> tupl
 
 
 def validate_evidence_manifest(manifest: Any, run_manifest: Any, artifacts: Mapping[str, bytes]) -> None:
-    manifest = _keys(manifest, EVIDENCE_FIELDS, "evidence manifest")
+    if not isinstance(manifest, Mapping) or set(manifest) not in {EVIDENCE_FIELDS, SOURCE_EVIDENCE_FIELDS}:
+        _fail("invalid evidence manifest shape")
     run_manifest = _keys(run_manifest, RUN_FIELDS, "supplied run manifest")
     if manifest["schema"] != "evidence-manifest.v1" or manifest["run_id"] != run_manifest["run_id"]:
         _fail("evidence binding")
@@ -302,9 +459,46 @@ def validate_evidence_manifest(manifest: Any, run_manifest: Any, artifacts: Mapp
         if result.get("run_id") != manifest["run_id"] or result.get("suite_id") != ref["suite_id"] or result.get("entrypoint_id") != ref["entrypoint_id"]:
             _fail("result binding")
         actual.add((ref["suite_id"], ref["entrypoint_id"]))
-    _ordered(results, lambda item: item["suite_id"])
+    observations = manifest.get("source_observations")
+    if observations is None:
+        _ordered(results, lambda item: item["suite_id"])
+        if actual != expected:
+            _fail("evidence expected suites")
+        return
     if actual != expected:
         _fail("evidence expected suites")
+    if not isinstance(observations, list) or len(observations) != len(run_manifest["expected_suites"]):
+        _fail("source observation references")
+    expected_order = [
+        (item["suite_id"], item["entrypoint_id"])
+        for item in run_manifest["expected_suites"]
+    ]
+    actual_order = []
+    for ref in observations:
+        ref = _keys(ref, frozenset(("suite_id", "entrypoint_id", "path", "sha256")), "source observation reference")
+        expected_path = "results/{}.observation.json".format(
+            ref["suite_id"],
+        )
+        if (
+            not _matches(SUITE_RE, ref["suite_id"])
+            or not _matches(ENTRY_RE, ref["entrypoint_id"])
+            or ref["path"] != expected_path
+        ):
+            _fail("source observation reference binding")
+        observation = _ref({"path": ref["path"], "sha256": ref["sha256"]}, artifacts)
+        validate_source_observation(observation)
+        if (
+            observation.get("run_id") != manifest["run_id"]
+            or observation.get("suite_id") != ref["suite_id"]
+            or observation.get("entrypoint_id") != ref["entrypoint_id"]
+        ):
+            _fail("source observation binding")
+        actual_order.append((ref["suite_id"], ref["entrypoint_id"]))
+    if actual_order != expected_order or len(set(actual_order)) != len(actual_order):
+        _fail("source observation expected suites")
+    result_order = [(item["suite_id"], item["entrypoint_id"]) for item in results]
+    if result_order != expected_order:
+        _fail("source result expected order")
 
 
 def validate_completion_seal(seal: Any, run_manifest: Any, snapshot: Any, evidence: Any, artifacts: Mapping[str, bytes]) -> None:
@@ -500,6 +694,8 @@ def validate_complete_run(run_manifest: Any, evidence_manifest: Any, seal: Any |
     validate_evidence_manifest(evidence_manifest, run_manifest, artifacts)
     for ref in evidence_manifest["test_results"]:
         _schema_validate(schema_validator, "test-result.v1", _ref({"path": ref["path"], "sha256": ref["sha256"]}, artifacts))
+    for ref in evidence_manifest.get("source_observations", []):
+        _schema_validate(schema_validator, "source-observation.v1", _ref({"path": ref["path"], "sha256": ref["sha256"]}, artifacts))
     if seal is not None:
         _schema_validate(schema_validator, "completion-seal.v1", seal)
         validate_completion_seal(seal, run_manifest, snapshot, evidence_manifest, artifacts)

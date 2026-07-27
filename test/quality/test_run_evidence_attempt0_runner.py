@@ -3,8 +3,12 @@ from __future__ import annotations
 
 import hashlib
 import contextlib
+import errno
+import json
 import os
+import signal
 import shutil
+import stat
 import tempfile
 import time
 import unittest
@@ -15,6 +19,7 @@ import test.quality.run_evidence.atomic_store as store
 from test.quality.run_evidence.atomic_store import RunStoreError, create_run_layout
 import test.quality.run_evidence.attempt0_runner as runner
 from test.quality.run_evidence.attempt0_runner import _run_attempt0, run_attempt0
+from test.quality.run_evidence.manifest_contracts import canonical_json_bytes
 
 
 class Attempt0RunnerTests(unittest.TestCase):
@@ -246,6 +251,14 @@ class Attempt0RunnerTests(unittest.TestCase):
 
     def test_13_pre_reaper_failures_use_one_synchronous_wait_and_close_fds(self):
         real_spawn, real_waitpid = runner.os.posix_spawn, runner.os.waitpid
+        real_monotonic = runner.time.monotonic
+        clock_calls = []
+
+        def fail_first_clock():
+            clock_calls.append(True)
+            if len(clock_calls) == 1:
+                raise OSError("post-spawn clock")
+            return real_monotonic()
 
         class RegisterFailure:
             def __init__(self): self.inner = runner.select.kqueue()
@@ -256,9 +269,11 @@ class Attempt0RunnerTests(unittest.TestCase):
             ("create", True, lambda stack: stack.enter_context(mock.patch.object(runner.select, "kqueue", side_effect=OSError("create")))),
             ("register", False, lambda stack: stack.enter_context(mock.patch.object(runner.select, "kqueue", return_value=RegisterFailure()))),
             ("thread-start", False, lambda stack: stack.enter_context(mock.patch.object(runner.threading.Thread, "start", side_effect=RuntimeError("start")))),
+            ("post-spawn-clock", False, lambda stack: stack.enter_context(mock.patch.object(runner.time, "monotonic", side_effect=fail_first_clock))),
         )
         for label, inject_eintr, install in cases:
             with self.subTest(label=label):
+                clock_calls.clear()
                 layout = self._layout(); before = len(os.listdir("/dev/fd")); pids, attempts, successes = [], [], []
                 def capture_spawn(*args, **kwargs):
                     pid = real_spawn(*args, **kwargs); pids.append(pid); return pid
@@ -485,6 +500,427 @@ class Attempt0RunnerTests(unittest.TestCase):
                         / "attempts/attempt-0.json"
                     ).exists()
                 )
+
+    def test_18_raw_supervisor_preserves_real_exit_and_separate_output(self):
+        result = runner.supervise_raw_command(
+            argv=(
+                os.path.realpath(os.sys.executable), "-I", "-S", "-c",
+                "import sys;sys.stdout.write('out');sys.stderr.write('err');raise SystemExit(7)",
+            ),
+            environment={"PATH": os.defpath},
+            timeout_seconds=1.0,
+            output_limit_bytes=4096,
+        )
+        self.assertEqual(result.raw_process, {"state": "EXITED", "process_exit": 7})
+        self.assertEqual((result.stdout, result.stderr), (b"out", b"err"))
+        self.assertFalse(result.stdout_truncated)
+        self.assertFalse(result.stderr_truncated)
+
+    def test_19_raw_child_cannot_inherit_parent_authority_fd(self):
+        read_fd, write_fd = os.pipe()
+        authority_fd = runner._moved_child_fd(write_fd)
+        os.close(write_fd)
+        self.addCleanup(os.close, read_fd)
+        self.addCleanup(os.close, authority_fd)
+        result = runner.supervise_raw_command(
+            argv=(
+                os.path.realpath(os.sys.executable), "-I", "-S", "-c",
+                (
+                    "import errno,os,sys\n"
+                    f"fd={authority_fd}\n"
+                    "try: os.fstat(fd)\n"
+                    "except OSError as exc: raise SystemExit(0 if exc.errno == errno.EBADF else 91)\n"
+                    "raise SystemExit(92)\n"
+                ),
+            ),
+            environment={"PATH": os.defpath},
+            timeout_seconds=1.0,
+            output_limit_bytes=4096,
+            authority_fds=(authority_fd,),
+        )
+        self.assertEqual(result.raw_process, {"state": "EXITED", "process_exit": 0})
+        self.assertTrue(stat.S_ISFIFO(os.fstat(authority_fd).st_mode))
+
+    def test_20_raw_supervisor_normalizes_signal_and_output_limit(self):
+        signaled = runner.supervise_raw_command(
+            argv=(
+                os.path.realpath(os.sys.executable), "-I", "-S", "-c",
+                "import os,signal;os.kill(os.getpid(),signal.SIGTERM)",
+            ),
+            environment={"PATH": os.defpath},
+            timeout_seconds=1.0,
+            output_limit_bytes=4096,
+        )
+        self.assertEqual(
+            signaled.raw_process,
+            {"state": "SIGNALED", "process_signal": signal.SIGTERM},
+        )
+
+        limited = runner.supervise_raw_command(
+            argv=(
+                os.path.realpath(os.sys.executable), "-I", "-S", "-c",
+                "import sys;sys.stdout.buffer.write(b'x'*8192);sys.stdout.flush()",
+            ),
+            environment={"PATH": os.defpath},
+            timeout_seconds=1.0,
+            output_limit_bytes=1024,
+        )
+        self.assertEqual(limited.raw_process, {"state": "OUTPUT_LIMIT"})
+        self.assertEqual(len(limited.stdout) + len(limited.stderr), 1024)
+        self.assertTrue(limited.stdout_truncated)
+
+    def test_21_raw_timeout_kills_descendants_and_reaps_leader_once(self):
+        real_spawn, real_waitpid = runner.os.posix_spawn, runner.os.waitpid
+        pids, waits = [], []
+
+        def capture_spawn(*args, **kwargs):
+            pid = real_spawn(*args, **kwargs)
+            pids.append(pid)
+            return pid
+
+        def capture_wait(pid, options):
+            waits.append((pid, options))
+            return real_waitpid(pid, options)
+
+        program = (
+            "import os,time\n"
+            "if os.fork()==0:\n"
+            " while True: time.sleep(1)\n"
+            "while True: time.sleep(1)\n"
+        )
+        with mock.patch.object(
+            runner.os, "posix_spawn", side_effect=capture_spawn,
+        ), mock.patch.object(
+            runner.os, "waitpid", side_effect=capture_wait,
+        ):
+            result = runner.supervise_raw_command(
+                argv=(
+                    os.path.realpath(os.sys.executable), "-I", "-S", "-c",
+                    program,
+                ),
+                environment={"PATH": os.defpath},
+                timeout_seconds=0.10,
+                output_limit_bytes=4096,
+            )
+        self.assertEqual(result.raw_process, {"state": "HARD_TIMEOUT"})
+        self.assertEqual(waits, [(pids[0], 0)])
+        with self.assertRaises(ProcessLookupError):
+            os.killpg(pids[0], 0)
+
+    def test_22_framed_config_failures_share_timeout_group_and_reap_authority(self):
+        real_spawn = runner.os.posix_spawn
+        real_waitpid = runner.os.waitpid
+        frame = (2).to_bytes(4, "big") + b"{}"
+        child = (
+            os.path.realpath(os.sys.executable), "-I", "-S", "-c",
+            "import time\nwhile True: time.sleep(1)\n",
+        )
+
+        def exercise(label, injected, *, returns=False):
+            pids: list[int] = []
+            waits: list[tuple[int, int]] = []
+
+            def capture_spawn(*args, **kwargs):
+                pid = real_spawn(*args, **kwargs)
+                pids.append(pid)
+                return pid
+
+            def capture_wait(pid, options):
+                waits.append((pid, options))
+                return real_waitpid(pid, options)
+
+            with mock.patch.object(
+                runner.os, "posix_spawn", side_effect=capture_spawn,
+            ), mock.patch.object(
+                runner.os, "waitpid", side_effect=capture_wait,
+            ), mock.patch.object(
+                runner, "_write_framed_config", side_effect=injected,
+            ):
+                if returns:
+                    result = runner.supervise_raw_command(
+                        argv=child,
+                        environment={"PATH": os.defpath},
+                        timeout_seconds=0.10,
+                        output_limit_bytes=4096,
+                        framed_config=frame,
+                    )
+                    self.assertEqual(
+                        result.raw_process,
+                        {"state": "HARD_TIMEOUT"},
+                        label,
+                    )
+                    self.assertNotEqual(result.observation_error, None)
+                else:
+                    with self.assertRaises(
+                        runner.Attempt0RunnerError,
+                        msg=label,
+                    ) as raised:
+                        runner.supervise_raw_command(
+                            argv=child,
+                            environment={"PATH": os.defpath},
+                            timeout_seconds=0.50,
+                            output_limit_bytes=4096,
+                            framed_config=frame,
+                        )
+                    self.assertEqual(
+                        raised.exception.code,
+                        "CONFIG_WRITE_FAILED",
+                        label,
+                    )
+            self.assertEqual(waits, [(pids[0], 0)], label)
+            with self.assertRaises(ProcessLookupError, msg=label):
+                os.killpg(pids[0], 0)
+
+        exercise(
+            "blocked",
+            lambda fd, chunk: (_ for _ in ()).throw(BlockingIOError()),
+            returns=True,
+        )
+        exercise(
+            "epipe",
+            lambda fd, chunk: (_ for _ in ()).throw(
+                BrokenPipeError(errno.EPIPE, "closed"),
+            ),
+        )
+        exercise("short", lambda fd, chunk: max(0, len(chunk) - 1))
+        exercise(
+            "error",
+            lambda fd, chunk: (_ for _ in ()).throw(
+                OSError(errno.EIO, "write"),
+            ),
+        )
+
+        class RegisterFailure:
+            def __init__(self):
+                self.inner = runner.select.kqueue()
+
+            def control(self, *args, **kwargs):
+                raise OSError(errno.EIO, "register")
+
+            def close(self):
+                self.inner.close()
+
+        pids: list[int] = []
+        waits: list[tuple[int, int]] = []
+
+        def capture_spawn(*args, **kwargs):
+            pid = real_spawn(*args, **kwargs)
+            pids.append(pid)
+            return pid
+
+        def capture_wait(pid, options):
+            waits.append((pid, options))
+            return real_waitpid(pid, options)
+
+        with mock.patch.object(
+            runner.os, "posix_spawn", side_effect=capture_spawn,
+        ), mock.patch.object(
+            runner.os, "waitpid", side_effect=capture_wait,
+        ), mock.patch.object(
+            runner.select, "kqueue", return_value=RegisterFailure(),
+        ):
+            with self.assertRaises(runner.Attempt0RunnerError) as raised:
+                runner.supervise_raw_command(
+                    argv=child,
+                    environment={"PATH": os.defpath},
+                    timeout_seconds=0.50,
+                    output_limit_bytes=4096,
+                    framed_config=frame,
+                )
+        self.assertEqual(raised.exception.code, "SUPERVISOR_SETUP_FAILED")
+        self.assertEqual(waits, [(pids[0], 0)])
+        with self.assertRaises(ProcessLookupError):
+            os.killpg(pids[0], 0)
+
+        pids = []
+        waits = []
+        resistant_child = (
+            "import os,signal,time\n"
+            "ready_r,ready_w=os.pipe()\n"
+            "if os.fork()==0:\n"
+            " os.close(ready_r)\n"
+            " signal.signal(signal.SIGTERM,signal.SIG_IGN)\n"
+            " os.write(ready_w,b'R')\n"
+            " os.close(ready_w)\n"
+            " while True: time.sleep(1)\n"
+            "os.close(ready_w)\n"
+            "assert os.read(ready_r,1)==b'R'\n"
+            "os.close(ready_r)\n"
+            "os._exit(0)\n"
+        )
+
+        def delayed_config_failure(fd, chunk):
+            time.sleep(0.15)
+            raise OSError(errno.EIO, "post-leader config failure")
+
+        with mock.patch.object(
+            runner.os, "posix_spawn", side_effect=capture_spawn,
+        ), mock.patch.object(
+            runner.os, "waitpid", side_effect=capture_wait,
+        ), mock.patch.object(
+            runner, "_write_framed_config",
+            side_effect=delayed_config_failure,
+        ):
+            with self.assertRaises(runner.Attempt0RunnerError) as raised:
+                runner.supervise_raw_command(
+                    argv=(
+                        os.path.realpath(os.sys.executable),
+                        "-I", "-S", "-c", resistant_child,
+                    ),
+                    environment={"PATH": os.defpath},
+                    timeout_seconds=1.0,
+                    output_limit_bytes=4096,
+                    framed_config=frame,
+                )
+        self.assertEqual(raised.exception.code, "CONFIG_WRITE_FAILED")
+        self.assertEqual(waits, [(pids[0], 0)])
+        with self.assertRaises(ProcessLookupError):
+            os.killpg(pids[0], 0)
+
+    def test_23_source_observation_limit_is_explicit_and_rejects_quickly(self):
+        inventory = json.loads((
+            Path(__file__).parent
+            / "fixtures/source_gate/expected_test_ids.v1.json"
+        ).read_text("utf-8"))
+        record = inventory["suites"]["RUST-DESKTOP"]
+        expected = record["discovered_test_ids"]
+        skipped = record["approved_skipped_test_ids"]
+        ignored = record["approved_ignored_test_ids"]
+        value = {
+            "schema": "source-observation.v1",
+            "run_id": "f" * 32,
+            "suite_id": "SUITE-RUST-DESKTOP",
+            "entrypoint_id": "ENTRY-SOURCE-RUST-DESKTOP",
+            "attempt_index": 0,
+            "command_argv_sha256": "a" * 64,
+            "environment_sha256": "b" * 64,
+            "tool_identity_sha256": "c" * 64,
+            "raw_process": {"state": "EXITED", "process_exit": 0},
+            "adapter_exit": 0,
+            "executed": len(expected),
+            "passed": len(expected) - len(skipped) - len(ignored),
+            "failed": 0,
+            "skipped": len(skipped),
+            "ignored": len(ignored),
+            "todo": 0,
+            "not_run": 0,
+            "discovered_test_ids": expected,
+            "executed_test_ids": expected,
+            "failed_test_ids": [],
+            "skipped_test_ids": skipped,
+            "ignored_test_ids": ignored,
+            "todo_test_ids": [],
+            "not_run_test_ids": [],
+            "stdout": {
+                "bytes": 0,
+                "sha256": hashlib.sha256(b"").hexdigest(),
+                "truncated": False,
+            },
+            "stderr": {
+                "bytes": 0,
+                "sha256": hashlib.sha256(b"").hexdigest(),
+                "truncated": False,
+            },
+            "derived_tool": None,
+            "outcome_hint": "PASS",
+            "classification_hint": "NONE",
+            "reason_code": "NONE",
+        }
+        raw = canonical_json_bytes(value)
+        frame = len(raw).to_bytes(4, "big") + raw
+        self.assertEqual(len(expected), 385)
+        self.assertGreater(len(raw), 64 * 1024)
+        self.assertLess(len(raw), 4 * 1024 * 1024)
+        program = (
+            "import os,socket\n"
+            "header=os.read(197,4)\n"
+            "size=int.from_bytes(header,'big')\n"
+            "parts=[]\n"
+            "while size:\n"
+            " chunk=os.read(197,min(65536,size))\n"
+            " assert chunk\n"
+            " parts.append(chunk)\n"
+            " size-=len(chunk)\n"
+            "assert os.read(197,1)==b''\n"
+            "raw=b''.join(parts)\n"
+            "peer=socket.socket(fileno=199)\n"
+            "try:\n"
+            " peer.sendall(len(raw).to_bytes(4,'big')+raw)\n"
+            " ack=peer.recv(4)\n"
+            "except OSError:\n"
+            " raise SystemExit(12)\n"
+            "finally:\n"
+            " peer.close()\n"
+            "raise SystemExit(0 if ack==b'ACK!' else 12)\n"
+        )
+        argv = (
+            os.path.realpath(os.sys.executable), "-I", "-S", "-c", program,
+        )
+        started = time.monotonic()
+        rejected = runner.supervise_raw_command(
+            argv=argv,
+            environment={"PATH": os.defpath},
+            timeout_seconds=2.0,
+            output_limit_bytes=4096,
+            framed_config=frame,
+        )
+        elapsed = time.monotonic() - started
+        self.assertEqual(rejected.raw_process["state"], "EXITED")
+        self.assertEqual(rejected.observation_error, "ADAPTER_MALFORMED")
+        self.assertFalse(rejected.observation_acked)
+        self.assertLess(elapsed, 1.0)
+
+        accepted = runner.supervise_raw_command(
+            argv=argv,
+            environment={"PATH": os.defpath},
+            timeout_seconds=2.0,
+            output_limit_bytes=4096,
+            framed_config=frame,
+            observation_limit_bytes=4 * 1024 * 1024,
+        )
+        self.assertEqual(
+            accepted.raw_process,
+            {"state": "EXITED", "process_exit": 0},
+        )
+        self.assertEqual(accepted.observation, value)
+        self.assertEqual(
+            accepted.observation["discovered_test_ids"],
+            expected,
+        )
+        self.assertEqual(
+            accepted.observation["executed_test_ids"],
+            expected,
+        )
+        self.assertTrue(accepted.observation_acked)
+
+    def test_24_source_observation_and_outer_grace_limits_are_bounded(self):
+        argv = ("/usr/bin/true",)
+        result = runner.supervise_raw_command(
+            argv=argv,
+            environment={"PATH": os.defpath},
+            timeout_seconds=3605,
+            output_limit_bytes=4096,
+            observation_limit_bytes=4 * 1024 * 1024,
+        )
+        self.assertEqual(
+            result.raw_process,
+            {"state": "EXITED", "process_exit": 0},
+        )
+        for kwargs in (
+            {"timeout_seconds": 3605.01},
+            {"observation_limit_bytes": 4 * 1024 * 1024 + 1},
+            {"observation_limit_bytes": True},
+        ):
+            arguments = {
+                "argv": argv,
+                "environment": {"PATH": os.defpath},
+                "timeout_seconds": 1.0,
+                "output_limit_bytes": 4096,
+                **kwargs,
+            }
+            with self.assertRaises(runner.Attempt0RunnerError) as raised:
+                runner.supervise_raw_command(**arguments)
+            self.assertEqual(raised.exception.code, "RAW_COMMAND_UNSAFE")
 
 
 if __name__ == "__main__":

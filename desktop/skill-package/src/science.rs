@@ -20,7 +20,7 @@ use crate::{active_org, ScienceExecutableFingerprint, ScienceHostContext, AGENT_
 #[cfg(not(test))]
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(test)]
-const PROCESS_TIMEOUT: Duration = Duration::from_secs(2);
+const PROCESS_TIMEOUT: Duration = Duration::from_secs(10);
 const PROCESS_OUTPUT_LIMIT: usize = 64 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1038,7 +1038,7 @@ printf '%s\n' 'http://127.0.0.1:18990/?nonce=fresh-one'"#,
         let _guard = ENV_LOCK.lock().unwrap();
         let timeout = context_with_script(
             "timeout",
-            "sleep 5\nprintf '%s\\n' 'http://127.0.0.1:18995/?nonce=late'",
+            "sleep 30\nprintf '%s\\n' 'http://127.0.0.1:18995/?nonce=late'",
             18_995,
         );
         assert_eq!(

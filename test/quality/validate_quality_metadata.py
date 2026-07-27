@@ -85,6 +85,26 @@ RUE_SUITE_ID = "SUITE-RUE05A"
 RUE_RULE_NAME = "run-evidence-fixed-one-suite"
 RUE_SUITE_SHA256 = "05e4f38d179a36af2b2c0dcc5298881016b1cab12a014a40ab951ac9a415784c"
 RUE_RULE_SHA256 = "c87f2d0e751368d8b670a8f033a086969d258db229a7cc0920b364f9a5cde4d5"
+SOURCE_GATE_ID = "GATE-SOURCE"
+SOURCE_RULE_NAME = "source-gate"
+SOURCE_IDENTITY_PATH = "test/quality/fixtures/source_gate/expected_test_ids.v1.json"
+SOURCE_SUITE_ORDER = (
+    "SUITE-QUALITY-METADATA",
+    "SUITE-QUALITY-FOCUSED",
+    "SUITE-RUN-EVIDENCE-CONTRACT",
+    "SUITE-QUALITY-INVENTORY",
+    "SUITE-PY-OFFLINE",
+    "SUITE-RUST-GATEWAY",
+    "SUITE-PY-LOOPBACK",
+    "SUITE-SHELL-SCRIPTS",
+    "SUITE-RUST-DESKTOP",
+    "SUITE-RUST-CODEX-NETWORK",
+    "SUITE-RUST-SKILL-PACKAGE",
+    "SUITE-MJS-FRONTEND",
+    "SUITE-ORPHAN-SKILL-BRIDGE",
+    "SUITE-ORPHAN-SKILL-BOUNDARY",
+    "SUITE-SOURCE-GATE-CONTRACT",
+)
 
 
 class ValidationError(Exception):
@@ -424,6 +444,7 @@ class Validator:
         self.check_production_policy_shape()
         self.check_catalog_discovery()
         self.check_fixed_run_evidence_catalog()
+        self.check_source_gate_catalog()
 
     @staticmethod
     def canonical_record_sha256(value: Any) -> str:
@@ -472,7 +493,11 @@ class Validator:
                     suite_id,
                     "only SUITE-RUE05A may use the fixed readiness retry",
                 )
-            if suite_id != RUE_SUITE_ID and not record.get("gate_ids"):
+            if (
+                suite_id != RUE_SUITE_ID
+                and record.get("status") in {"active", "implemented"}
+                and not record.get("gate_ids")
+            ):
                 self.error(
                     suite_id,
                     "only SUITE-RUE05A may be explicitly gate-free",
@@ -483,6 +508,137 @@ class Validator:
                     gate_id,
                     "SUITE-RUE05A must not be promoted into a gate",
                 )
+
+    def check_source_gate_catalog(self) -> None:
+        expected_cargo_manifests = {
+            "desktop/codex-network/Cargo.toml",
+            "desktop/gateway/Cargo.toml",
+            "desktop/skill-package/Cargo.toml",
+            "desktop/src-tauri/Cargo.toml",
+        }
+        actual_cargo_manifests = {
+            path.relative_to(self.repo).as_posix()
+            for path in (self.repo / "desktop").glob("**/Cargo.toml")
+        }
+        if actual_cargo_manifests != expected_cargo_manifests:
+            self.error(
+                "quality/test-catalog.v1.json",
+                "trusted source Cargo manifest inventory drifted",
+            )
+        rules = [
+            rule for rule in self.catalog.get("selection_rules", [])
+            if isinstance(rule, dict) and rule.get("name") == SOURCE_RULE_NAME
+        ]
+        if (
+            len(rules) != 1
+            or rules[0].get("suite_ids") != list(SOURCE_SUITE_ORDER)
+            or rules[0].get("executor_implemented") is not True
+        ):
+            self.error("quality/test-catalog.v1.json", "trusted source selection drifted")
+            return
+        gate = self.gates.get(SOURCE_GATE_ID)
+        if (
+            not isinstance(gate, dict)
+            or gate.get("status") != "active"
+            or gate.get("profile") != "source"
+            or gate.get("required_suite_ids") != list(SOURCE_SUITE_ORDER)
+            or gate.get("requires_clean") is not True
+            or gate.get("requires_non_shallow") is not True
+            or gate.get("release_claim") != "source-green"
+        ):
+            self.error(SOURCE_GATE_ID, "trusted source gate drifted")
+        identity_path = self.repo / SOURCE_IDENTITY_PATH
+        try:
+            raw = identity_path.read_bytes()
+            identities = json.loads(raw.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            self.error(SOURCE_IDENTITY_PATH, "invalid source identity inventory: {}".format(exc))
+            return
+        if (
+            not isinstance(identities, dict)
+            or set(identities) != {"schema", "suites"}
+            or identities.get("schema") != "source-test-identities.v1"
+            or not isinstance(identities.get("suites"), dict)
+        ):
+            self.error(SOURCE_IDENTITY_PATH, "source identity inventory shape drifted")
+            return
+        digest = hashlib.sha256(raw).hexdigest()
+        inventory = identities["suites"]
+        seen_keys = set()
+        for suite_id in SOURCE_SUITE_ORDER:
+            suite = self.suites.get(suite_id)
+            if not isinstance(suite, dict):
+                self.error(suite_id, "trusted source suite is missing")
+                continue
+            identity = suite.get("test_identity")
+            if (
+                suite.get("adapter_protocol") != "source-observation.v1"
+                or suite.get("retry_policy") != "none"
+                or suite.get("status") != "implemented"
+                or suite.get("expected_status") != "PASS"
+                or suite.get("gate_ids") != [SOURCE_GATE_ID]
+                or not isinstance(suite.get("command_argv"), list)
+                or not suite["command_argv"]
+                or not isinstance(suite.get("timeout_seconds"), int)
+                or not isinstance(identity, dict)
+                or identity.get("path") != SOURCE_IDENTITY_PATH
+                or identity.get("sha256") != digest
+            ):
+                self.error(suite_id, "trusted source suite contract drifted")
+                continue
+            key = identity.get("suite_key")
+            if not isinstance(key, str) or key in seen_keys or key not in inventory:
+                self.error(suite_id, "source identity key is missing or duplicated")
+                continue
+            seen_keys.add(key)
+            item = inventory[key]
+            if not isinstance(item, dict) or set(item) != {
+                "discovered_test_ids", "approved_skipped_test_ids",
+                "approved_ignored_test_ids", "approved_ignored_tests",
+            }:
+                self.error(suite_id, "source identity record shape drifted")
+                continue
+            discovered = item["discovered_test_ids"]
+            if (
+                not isinstance(discovered, list)
+                or not discovered
+                or discovered != sorted(discovered, key=lambda value: value.encode("utf-8"))
+                or len(discovered) != len(set(discovered))
+            ):
+                self.error(suite_id, "expected test identities must be nonempty sorted unique")
+            for field in ("approved_skipped_test_ids", "approved_ignored_test_ids"):
+                values = item[field]
+                if (
+                    not isinstance(values, list)
+                    or values != sorted(values, key=lambda value: value.encode("utf-8"))
+                    or len(values) != len(set(values))
+                    or any(value not in discovered for value in values)
+                ):
+                    self.error(suite_id, "{} must be a sorted unique discovered subset".format(field))
+            ignored_tests = item["approved_ignored_tests"]
+            ignored_ids = item["approved_ignored_test_ids"]
+            if (
+                not isinstance(ignored_tests, dict)
+                or list(ignored_tests) != ignored_ids
+            ):
+                self.error(suite_id, "approved ignored reason keys must exactly match ignored IDs")
+                continue
+            for test_id, value in ignored_tests.items():
+                if (
+                    not isinstance(value, dict)
+                    or set(value) != {"boundary", "reason"}
+                    or value.get("boundary") not in {
+                        "real-machine", "installed", "public-network",
+                        "provider", "acceptance",
+                    }
+                    or not isinstance(value.get("reason"), str)
+                    or not value["reason"]
+                    or len(value["reason"]) > 512
+                    or any(ord(char) < 32 or ord(char) == 127 for char in value["reason"])
+                ):
+                    self.error(suite_id, "approved ignored reason contract drifted")
+        if set(inventory) != seen_keys:
+            self.error(SOURCE_IDENTITY_PATH, "source identity inventory has unknown or missing suites")
 
     def check_versions(self) -> None:
         for kind, records in (("requirement", self.requirements), ("change", self.changes), ("bug", self.bugs), ("gate", self.gates)):
@@ -604,6 +760,7 @@ class Validator:
                 "metadata": "none",
                 "impact-pr": "target-ref-merge-base",
                 "impact-release": "previous-release-peeled",
+                "source": "target-ref-merge-base",
                 "product": "none",
                 "legacy": "none",
             }.get(record.get("profile"))

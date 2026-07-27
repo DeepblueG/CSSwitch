@@ -10,6 +10,7 @@ import copy
 import pathlib
 import tempfile
 import unittest
+from unittest import mock
 
 try:
     from validate_quality_metadata import PRODUCT_BUG_IDS, Validator, ROOT
@@ -117,7 +118,26 @@ class QualityKernelFocused(unittest.TestCase):
             "SUITE-ORPHAN-SKILL-BOUNDARY",
         }
         self.assertTrue(orphan_ids.issubset(validator.suites))
-        self.assertTrue(all(validator.suites[item]["expected_status"] != "PASS" for item in orphan_ids))
+        self.assertEqual(
+            {
+                item: validator.suites[item]["status"]
+                for item in orphan_ids
+            },
+            {
+                "SUITE-ORPHAN-AGGREGATOR": "retired",
+                "SUITE-ORPHAN-RETRY": "retired",
+                "SUITE-ORPHAN-SKILL-BRIDGE": "implemented",
+                "SUITE-ORPHAN-SKILL-BOUNDARY": "implemented",
+            },
+        )
+        self.assertEqual(
+            validator.suites["SUITE-ORPHAN-SKILL-BRIDGE"]["gate_ids"],
+            ["GATE-SOURCE"],
+        )
+        self.assertEqual(
+            validator.suites["SUITE-ORPHAN-SKILL-BOUNDARY"]["gate_ids"],
+            ["GATE-SOURCE"],
+        )
         manifests = sorted((ROOT / "desktop").glob("**/Cargo.toml"))
         self.assertEqual(
             {path.relative_to(ROOT).as_posix() for path in manifests},
@@ -130,6 +150,63 @@ class QualityKernelFocused(unittest.TestCase):
         )
         catalog_paths = {path for suite in validator.suites.values() for path in suite["source_paths"]}
         self.assertTrue({path.relative_to(ROOT).as_posix() for path in manifests}.issubset(catalog_paths))
+
+    def test_trusted_source_gate_exact_selection_and_identity_inventory_fail_closed(self):
+        validator = self.fresh()
+        self.assertTrue(validator.run("metadata"), "\n".join(validator.errors))
+        source_rule = next(
+            rule for rule in validator.catalog["selection_rules"]
+            if rule["name"] == "source-gate"
+        )
+        self.assertEqual(source_rule["suite_ids"], list(validator.gates["GATE-SOURCE"]["required_suite_ids"]))
+        self.assertEqual(len(source_rule["suite_ids"]), 15)
+
+        validator = self.fresh()
+        rule = next(
+            rule for rule in validator.catalog["selection_rules"]
+            if rule["name"] == "source-gate"
+        )
+        rule["suite_ids"] = rule["suite_ids"][:-1]
+        errors = self.errors_after(validator, validator.check_source_gate_catalog)
+        self.assertIn("trusted source selection drifted", errors)
+
+        validator = self.fresh()
+        validator.suites["SUITE-PY-OFFLINE"]["retry_policy"] = "readiness-timeout-once"
+        errors = self.errors_after(validator, validator.check_source_gate_catalog)
+        self.assertIn("trusted source suite contract drifted", errors)
+
+        validator = self.fresh()
+        validator.suites["SUITE-RUST-DESKTOP"]["test_identity"]["sha256"] = "0" * 64
+        errors = self.errors_after(validator, validator.check_source_gate_catalog)
+        self.assertIn("trusted source suite contract drifted", errors)
+
+        validator = self.fresh()
+        manifests = list((ROOT / "desktop").glob("**/Cargo.toml"))
+        with mock.patch.object(
+            pathlib.Path,
+            "glob",
+            return_value=[
+                *manifests,
+                ROOT / "desktop/fifth/Cargo.toml",
+            ],
+        ):
+            errors = self.errors_after(
+                validator, validator.check_source_gate_catalog,
+            )
+        self.assertIn(
+            "trusted source Cargo manifest inventory drifted", errors,
+        )
+
+        validator = self.fresh()
+        rule = next(
+            rule for rule in validator.catalog["selection_rules"]
+            if rule["name"] == "source-gate"
+        )
+        rule["suite_ids"][-1] = "SUITE-QUALITY-ARTIFACT"
+        errors = self.errors_after(
+            validator, validator.check_source_gate_catalog,
+        )
+        self.assertIn("trusted source selection drifted", errors)
 
     def test_test_result_pass_marker_exit7_fails(self):
         validator = self.fresh()
@@ -263,6 +340,7 @@ class QualityKernelFocused(unittest.TestCase):
 
         validator = self.fresh()
         validator.changes["CHG-QUALITY-KERNEL"]["status"] = "retired"
+        validator.changes["CHG-SOURCE-GATE"]["status"] = "retired"
         errors = self.errors_after(
             validator,
             lambda: validator.check_changed_paths([("M", "quality/schema/test-result.v1.schema.json")], "impact-pr"),
