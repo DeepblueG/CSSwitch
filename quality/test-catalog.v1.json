@@ -105,7 +105,7 @@
       },
       "test_identity": {
         "path": "test/quality/fixtures/source_gate/expected_test_ids.v1.json",
-        "sha256": "e0907d1b00e2c772410006f5d84faf949068bb1f87b789e9ec833d921c422fc3",
+        "sha256": "bf68c6481321402f5657ab07cd5c3c3af5fde3d5ad8e089eeab23017687da38b",
         "suite_key": "QUALITY-METADATA"
       }
     },
@@ -188,7 +188,7 @@
       },
       "test_identity": {
         "path": "test/quality/fixtures/source_gate/expected_test_ids.v1.json",
-        "sha256": "e0907d1b00e2c772410006f5d84faf949068bb1f87b789e9ec833d921c422fc3",
+        "sha256": "bf68c6481321402f5657ab07cd5c3c3af5fde3d5ad8e089eeab23017687da38b",
         "suite_key": "QUALITY-FOCUSED"
       }
     },
@@ -342,7 +342,7 @@
       },
       "test_identity": {
         "path": "test/quality/fixtures/source_gate/expected_test_ids.v1.json",
-        "sha256": "e0907d1b00e2c772410006f5d84faf949068bb1f87b789e9ec833d921c422fc3",
+        "sha256": "bf68c6481321402f5657ab07cd5c3c3af5fde3d5ad8e089eeab23017687da38b",
         "suite_key": "RUN-EVIDENCE-CONTRACT"
       }
     },
@@ -547,7 +547,7 @@
       },
       "test_identity": {
         "path": "test/quality/fixtures/source_gate/expected_test_ids.v1.json",
-        "sha256": "e0907d1b00e2c772410006f5d84faf949068bb1f87b789e9ec833d921c422fc3",
+        "sha256": "bf68c6481321402f5657ab07cd5c3c3af5fde3d5ad8e089eeab23017687da38b",
         "suite_key": "QUALITY-INVENTORY"
       }
     },
@@ -620,7 +620,7 @@
       },
       "test_identity": {
         "path": "test/quality/fixtures/source_gate/expected_test_ids.v1.json",
-        "sha256": "e0907d1b00e2c772410006f5d84faf949068bb1f87b789e9ec833d921c422fc3",
+        "sha256": "bf68c6481321402f5657ab07cd5c3c3af5fde3d5ad8e089eeab23017687da38b",
         "suite_key": "PY-OFFLINE"
       }
     },
@@ -698,7 +698,7 @@
       },
       "test_identity": {
         "path": "test/quality/fixtures/source_gate/expected_test_ids.v1.json",
-        "sha256": "e0907d1b00e2c772410006f5d84faf949068bb1f87b789e9ec833d921c422fc3",
+        "sha256": "bf68c6481321402f5657ab07cd5c3c3af5fde3d5ad8e089eeab23017687da38b",
         "suite_key": "PY-LOOPBACK"
       }
     },
@@ -764,7 +764,7 @@
       },
       "test_identity": {
         "path": "test/quality/fixtures/source_gate/expected_test_ids.v1.json",
-        "sha256": "e0907d1b00e2c772410006f5d84faf949068bb1f87b789e9ec833d921c422fc3",
+        "sha256": "bf68c6481321402f5657ab07cd5c3c3af5fde3d5ad8e089eeab23017687da38b",
         "suite_key": "SHELL-SCRIPTS"
       }
     },
@@ -834,7 +834,7 @@
       },
       "test_identity": {
         "path": "test/quality/fixtures/source_gate/expected_test_ids.v1.json",
-        "sha256": "e0907d1b00e2c772410006f5d84faf949068bb1f87b789e9ec833d921c422fc3",
+        "sha256": "bf68c6481321402f5657ab07cd5c3c3af5fde3d5ad8e089eeab23017687da38b",
         "suite_key": "RUST-DESKTOP"
       }
     },
@@ -905,7 +905,7 @@
       },
       "test_identity": {
         "path": "test/quality/fixtures/source_gate/expected_test_ids.v1.json",
-        "sha256": "e0907d1b00e2c772410006f5d84faf949068bb1f87b789e9ec833d921c422fc3",
+        "sha256": "bf68c6481321402f5657ab07cd5c3c3af5fde3d5ad8e089eeab23017687da38b",
         "suite_key": "RUST-GATEWAY"
       }
     },
@@ -975,7 +975,7 @@
       },
       "test_identity": {
         "path": "test/quality/fixtures/source_gate/expected_test_ids.v1.json",
-        "sha256": "e0907d1b00e2c772410006f5d84faf949068bb1f87b789e9ec833d921c422fc3",
+        "sha256": "bf68c6481321402f5657ab07cd5c3c3af5fde3d5ad8e089eeab23017687da38b",
         "suite_key": "RUST-CODEX-NETWORK"
       }
     },
@@ -1047,7 +1047,7 @@
       },
       "test_identity": {
         "path": "test/quality/fixtures/source_gate/expected_test_ids.v1.json",
-        "sha256": "e0907d1b00e2c772410006f5d84faf949068bb1f87b789e9ec833d921c422fc3",
+        "sha256": "bf68c6481321402f5657ab07cd5c3c3af5fde3d5ad8e089eeab23017687da38b",
         "suite_key": "RUST-SKILL-PACKAGE"
       }
     },
@@ -1117,7 +1117,7 @@
       },
       "test_identity": {
         "path": "test/quality/fixtures/source_gate/expected_test_ids.v1.json",
-        "sha256": "e0907d1b00e2c772410006f5d84faf949068bb1f87b789e9ec833d921c422fc3",
+        "sha256": "bf68c6481321402f5657ab07cd5c3c3af5fde3d5ad8e089eeab23017687da38b",
         "suite_key": "MJS-FRONTEND"
       }
     },
@@ -1355,7 +1355,7 @@
       },
       "test_identity": {
         "path": "test/quality/fixtures/source_gate/expected_test_ids.v1.json",
-        "sha256": "e0907d1b00e2c772410006f5d84faf949068bb1f87b789e9ec833d921c422fc3",
+        "sha256": "bf68c6481321402f5657ab07cd5c3c3af5fde3d5ad8e089eeab23017687da38b",
         "suite_key": "ORPHAN-SKILL-BRIDGE"
       }
     },
@@ -1424,7 +1424,7 @@
       },
       "test_identity": {
         "path": "test/quality/fixtures/source_gate/expected_test_ids.v1.json",
-        "sha256": "e0907d1b00e2c772410006f5d84faf949068bb1f87b789e9ec833d921c422fc3",
+        "sha256": "bf68c6481321402f5657ab07cd5c3c3af5fde3d5ad8e089eeab23017687da38b",
         "suite_key": "ORPHAN-SKILL-BOUNDARY"
       }
     },
@@ -2016,7 +2016,7 @@
       "environment_allowlist": [],
       "test_identity": {
         "path": "test/quality/fixtures/source_gate/expected_test_ids.v1.json",
-        "sha256": "e0907d1b00e2c772410006f5d84faf949068bb1f87b789e9ec833d921c422fc3",
+        "sha256": "bf68c6481321402f5657ab07cd5c3c3af5fde3d5ad8e089eeab23017687da38b",
         "suite_key": "SOURCE-GATE-CONTRACT"
       },
       "status": "implemented",
