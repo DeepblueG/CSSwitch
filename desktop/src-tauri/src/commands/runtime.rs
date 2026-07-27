@@ -1370,6 +1370,7 @@ esac
         stop_test_sandbox(&handle, &state, sandbox_port);
         let mut cold_start_ms = Vec::new();
         for cycle in 0..5 {
+            let status_before_preflight = call_count(&science_call_log, "status");
             let (version_cache, confirmed_stopped) = {
                 let st = lock(&state);
                 (
@@ -1379,8 +1380,14 @@ esac
             };
             let preflight =
                 science::science_runtime_preflight(&version_cache, confirmed_stopped.as_ref())
-                    .expect("confirmed stop should make preflight ready without status CLI");
+                    .expect("explicit preflight should refresh the stopped runtime selection");
             assert_eq!(preflight["status"], "installed_ready");
+            assert_eq!(
+                call_count(&science_call_log, "status"),
+                status_before_preflight + 1,
+                "each explicit preflight should perform one bounded status probe"
+            );
+            let status_before_restart = call_count(&science_call_log, "status");
             let started_at = Instant::now();
             let restarted = sandbox_session::one_click_login(
                 handle.clone(),
@@ -1392,6 +1399,11 @@ esac
             .expect("normal cold start should not re-probe or reconfigure");
             cold_start_ms.push(started_at.elapsed().as_millis());
             assert_eq!(restarted["action"], "started");
+            assert_eq!(
+                call_count(&science_call_log, "status"),
+                status_before_restart,
+                "confirmed-stop one-click should not repeat the explicit preflight probe"
+            );
             if cycle < 4 {
                 stop_test_sandbox(&handle, &state, sandbox_port);
             }
@@ -1403,7 +1415,7 @@ esac
             sorted_cold_start_ms[2]
         );
         assert_eq!(call_count(&science_call_log, "--version"), 2);
-        assert_eq!(call_count(&science_call_log, "status"), 3);
+        assert_eq!(call_count(&science_call_log, "status"), 8);
         assert_eq!(call_count(&science_call_log, "url"), 13);
         assert_eq!(call_count(&route_config_log, "configure-third-party"), 2);
         assert_eq!(
@@ -1425,11 +1437,18 @@ esac
                 st.science_confirmed_stopped.clone(),
             )
         };
+        let status_before_upgrade_preflight = call_count(&science_call_log, "status");
         assert_eq!(
             science::science_runtime_preflight(&version_cache, confirmed_stopped.as_ref()).unwrap()
                 ["status"],
             "installed_ready"
         );
+        assert_eq!(
+            call_count(&science_call_log, "status"),
+            status_before_upgrade_preflight + 1,
+            "binary replacement preflight should perform one bounded status probe"
+        );
+        let status_before_upgraded_start = call_count(&science_call_log, "status");
         let upgraded = sandbox_session::one_click_login(
             handle.clone(),
             state.clone(),
@@ -1439,8 +1458,13 @@ esac
         )
         .expect("binary replacement should re-probe and reconcile once");
         assert_eq!(upgraded["action"], "started");
+        assert_eq!(
+            call_count(&science_call_log, "status"),
+            status_before_upgraded_start,
+            "confirmed-stop upgraded start should not repeat the explicit preflight probe"
+        );
         assert_eq!(call_count(&science_call_log, "--version"), 3);
-        assert_eq!(call_count(&science_call_log, "status"), 3);
+        assert_eq!(call_count(&science_call_log, "status"), 9);
         assert_eq!(call_count(&science_call_log, "url"), 15);
         assert_eq!(call_count(&route_config_log, "configure-third-party"), 3);
         assert_eq!(
