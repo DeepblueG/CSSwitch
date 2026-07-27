@@ -574,6 +574,146 @@
         ]
       },
       "retirement": null
+    },
+    {
+      "id": "REQ-083-TOOL-ARG-EXCLUSIVITY",
+      "version": "v0.8.3",
+      "title": "Tool arguments preserve the original input-schema contract",
+      "description": "CSSwitch must attribute mutually exclusive tool arguments to the exact schema, reducer, or upstream-output boundary and must not forward already-invalid arguments or guess which field to remove.",
+      "status": "active",
+      "owner": "gateway",
+      "depends_on": [
+        "REQ-083-EVIDENCE"
+      ],
+      "acceptance_conditions": [
+        "A fixed original schema and fixtures independently cover pre-upstream schema conversion, stream/done reduction, and already-invalid upstream output.",
+        "CSSwitch-originated corruption is repaired only at the responsible seam while the test schema and oracle remain unchanged.",
+        "Already-invalid upstream arguments are rejected before Science execution with a bounded typed protocol error and no heuristic field deletion.",
+        "A mutation that reintroduces the same seam defect produces the same declared failure identity."
+      ],
+      "evidence_boundary": {
+        "allowed_layers": [
+          "source-test"
+        ],
+        "excluded_layers": [
+          "isolated-test-app",
+          "final-dmg",
+          "installed-final",
+          "live",
+          "signing",
+          "public"
+        ],
+        "basis": [
+          "red-green-mutation source contract",
+          "provider/model-specific pass remains separate"
+        ]
+      },
+      "retirement": null
+    },
+    {
+      "id": "REQ-083-SCIENCE-REATTACH",
+      "version": "v0.8.3",
+      "title": "Science reattachment binds four runtime identities",
+      "description": "Desktop restart may adopt a running Science only when executable fingerprint, isolated data-dir, unique listener PID, and managed launch identity all still identify the same runtime.",
+      "status": "active",
+      "owner": "science-runtime",
+      "depends_on": [
+        "REQ-083-EVIDENCE"
+      ],
+      "acceptance_conditions": [
+        "An exact managed-runtime fixture reattaches without starting a duplicate Science process.",
+        "Unknown listener, executable replacement, duplicate listener, and PID race each fail closed.",
+        "Mismatch paths send no signal and preserve the foreign or changed process.",
+        "The same identity rules are exercised again by the final isolated production artifact runtime."
+      ],
+      "evidence_boundary": {
+        "allowed_layers": [
+          "source-test"
+        ],
+        "excluded_layers": [
+          "isolated-test-app",
+          "final-dmg",
+          "installed-final",
+          "live",
+          "signing",
+          "public"
+        ],
+        "basis": [
+          ".agents/rules/science-runtime.md",
+          "red-green-mutation source contract"
+        ]
+      },
+      "retirement": null
+    },
+    {
+      "id": "REQ-083-GATEWAY-RECOVERY",
+      "version": "v0.8.3",
+      "title": "Gateway external exit has accurate bounded recovery",
+      "description": "An externally terminated owned Gateway must become an accurate failed state and may be restarted at most once only while configuration generation and runtime identity remain unchanged.",
+      "status": "active",
+      "owner": "runtime-state",
+      "depends_on": [
+        "REQ-083-EVIDENCE"
+      ],
+      "acceptance_conditions": [
+        "Owned-child exit produces a Gateway-specific failure instead of an authentication or permission error.",
+        "Exactly one automatic recovery is allowed when generation, executable identity, ownership, and path-secret identity are unchanged.",
+        "Generation drift, identity drift, or a second exit produces an actionable manual recovery state and no retry loop.",
+        "Profile, transaction journal, persistent state, and path secret do not drift across failed or successful recovery."
+      ],
+      "evidence_boundary": {
+        "allowed_layers": [
+          "source-test"
+        ],
+        "excluded_layers": [
+          "isolated-test-app",
+          "final-dmg",
+          "installed-final",
+          "live",
+          "signing",
+          "public"
+        ],
+        "basis": [
+          "GitHub issue 12",
+          "isolated owned-child fixture only"
+        ]
+      },
+      "retirement": null
+    },
+    {
+      "id": "REQ-083-RESPONSES-CORE",
+      "version": "v0.8.3",
+      "title": "OpenAI Responses v0.8.3 core compatibility",
+      "description": "The blocking Responses scope is limited to basic text, two-turn continuity, and function call/result, with protocol conformance and provider/model compatibility recorded independently.",
+      "status": "active",
+      "owner": "gateway",
+      "depends_on": [
+        "REQ-083-EVIDENCE"
+      ],
+      "acceptance_conditions": [
+        "Fixed local protocol fixtures independently pass text, two-turn continuity, and function call/result.",
+        "Each provider/model row records its own adapter and model mapping and is not inferred from generic protocol conformance.",
+        "Images, proprietary reasoning, native streaming, and structured output neither block nor establish this gate.",
+        "A current-target row that cannot reproduce a defect receives no product modification."
+      ],
+      "evidence_boundary": {
+        "allowed_layers": [
+          "source-test"
+        ],
+        "excluded_layers": [
+          "isolated-test-app",
+          "final-dmg",
+          "installed-final",
+          "live",
+          "signing",
+          "public"
+        ],
+        "basis": [
+          "GitHub issue 56 split contract",
+          "v0.8.3 approved core scope"
+        ]
+      },
+      "retirement": null
     }
   ]
 }

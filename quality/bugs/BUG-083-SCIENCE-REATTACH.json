@@ -1,0 +1,87 @@
+{
+  "schema": "bug-record.v1",
+  "bug": {
+    "id": "BUG-083-SCIENCE-REATTACH",
+    "version": "v0.8.3",
+    "title": "Science runtime cannot be safely reattached from port ownership alone",
+    "summary": "Science startup has refused a listener whose runtime identity could not be confirmed. Safe reattachment requires executable fingerprint, data-dir, unique listener PID, and managed launch identity to match the same runtime.",
+    "status": "active",
+    "owner": "science-runtime",
+    "severity": "P0",
+    "claim_state": "confirmed",
+    "reproduction_state": "historical-observed",
+    "resolution_state": "open-not-fixed",
+    "affected_paths": [
+      "desktop/src-tauri/src/runtime/sandbox_session.rs",
+      "desktop/src-tauri/src/runtime/science.rs",
+      "desktop/src-tauri/src/runtime/process_ownership.rs",
+      "test/test_process_ownership_policy.py",
+      "test/test_scripts.sh"
+    ],
+    "requirement_ids": [
+      "REQ-083-SCIENCE-REATTACH",
+      "REQ-083-EVIDENCE"
+    ],
+    "change_ids": [
+      "CHG-SCIENCE-REATTACH"
+    ],
+    "expected_suite_ids": [
+      "SUITE-RUST-DESKTOP",
+      "SUITE-SHELL-SCRIPTS"
+    ],
+    "expected_gate_ids": [
+      "GATE-SCIENCE-REATTACH",
+      "GATE-SOURCE"
+    ],
+    "evidence_boundary": {
+      "allowed_layers": [
+        "source-test"
+      ],
+      "excluded_layers": [
+        "isolated-test-app",
+        "final-dmg",
+        "installed-final",
+        "live",
+        "signing",
+        "public"
+      ],
+      "basis": [
+        "user-reported managed Science port identity refusal",
+        ".agents/rules/science-runtime.md"
+      ]
+    },
+    "reproduction": {
+      "state": "historical-observed; deterministic current-target fixture pending",
+      "steps": [
+        "Create an isolated managed-runtime record bound to a fixed executable fingerprint, data-dir, listener PID, and launch identity.",
+        "Exercise exact reattach, unknown listener, executable replacement, duplicate listener, and PID-race fixtures.",
+        "Allow adoption only when all four identity dimensions still agree.",
+        "Assert all mismatch cases fail closed without sending a signal to the foreign or changed process."
+      ],
+      "observed": "The user observed a refusal stating that the Science port was in use but the current process had no confirmable runtime identity.",
+      "not_claimed": [
+        "isolated-test-app",
+        "final-dmg",
+        "installed-final",
+        "live",
+        "signing",
+        "public"
+      ]
+    },
+    "confirmed_facts": [
+      {
+        "statement": "A Science listener with unconfirmed runtime identity has been reported and current policy forbids port-only adoption.",
+        "evidence_ref": ".agents/rules/science-runtime.md",
+        "verification_status": "confirmed"
+      }
+    ],
+    "hypotheses": [
+      {
+        "statement": "The managed launch journal may not retain or revalidate enough identity to adopt the same runtime after Desktop restart.",
+        "evidence_ref": "current-target source red pending",
+        "verification_status": "NOT-RUN"
+      }
+    ],
+    "retirement": null
+  }
+}

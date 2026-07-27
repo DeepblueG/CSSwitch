@@ -352,6 +352,106 @@
       "requires_non_shallow": false,
       "release_claim": "product-open-not-run",
       "candidate_policy": "required"
+    },
+    {
+      "id": "GATE-TOOL-ARG-EXCLUSIVITY",
+      "version": "v0.8.3",
+      "name": "Tool argument exclusivity product gate",
+      "profile": "product",
+      "status": "active",
+      "owner": "gateway",
+      "reason": "Requires source red-green-mutation plus later isolated production-artifact tool execution; no live provider is authorized.",
+      "expiry": "2026-10-01",
+      "replacement_id": null,
+      "evidence_layer": "source-test",
+      "required_suite_ids": [
+        "SUITE-RUST-GATEWAY",
+        "SUITE-PY-LOOPBACK"
+      ],
+      "required_requirement_ids": [
+        "REQ-083-TOOL-ARG-EXCLUSIVITY",
+        "REQ-083-EVIDENCE"
+      ],
+      "base_policy": "none",
+      "requires_clean": false,
+      "requires_non_shallow": false,
+      "release_claim": "product-open-not-run",
+      "candidate_policy": "required"
+    },
+    {
+      "id": "GATE-SCIENCE-REATTACH",
+      "version": "v0.8.3",
+      "name": "Science identity-safe reattachment product gate",
+      "profile": "product",
+      "status": "active",
+      "owner": "science-runtime",
+      "reason": "Requires source identity fixtures and later isolated production-artifact restart/reattach evidence.",
+      "expiry": "2026-10-01",
+      "replacement_id": null,
+      "evidence_layer": "source-test",
+      "required_suite_ids": [
+        "SUITE-RUST-DESKTOP",
+        "SUITE-SHELL-SCRIPTS"
+      ],
+      "required_requirement_ids": [
+        "REQ-083-SCIENCE-REATTACH",
+        "REQ-083-EVIDENCE"
+      ],
+      "base_policy": "none",
+      "requires_clean": false,
+      "requires_non_shallow": false,
+      "release_claim": "product-open-not-run",
+      "candidate_policy": "required"
+    },
+    {
+      "id": "GATE-GATEWAY-RECOVERY",
+      "version": "v0.8.3",
+      "name": "Bounded Gateway recovery product gate",
+      "profile": "product",
+      "status": "active",
+      "owner": "runtime-state",
+      "reason": "Requires source owned-child failure injection and later isolated production-artifact recovery evidence.",
+      "expiry": "2026-10-01",
+      "replacement_id": null,
+      "evidence_layer": "source-test",
+      "required_suite_ids": [
+        "SUITE-RUST-DESKTOP",
+        "SUITE-PY-LOOPBACK"
+      ],
+      "required_requirement_ids": [
+        "REQ-083-GATEWAY-RECOVERY",
+        "REQ-083-EVIDENCE"
+      ],
+      "base_policy": "none",
+      "requires_clean": false,
+      "requires_non_shallow": false,
+      "release_claim": "product-open-not-run",
+      "candidate_policy": "required"
+    },
+    {
+      "id": "GATE-RESPONSES-CORE",
+      "version": "v0.8.3",
+      "name": "OpenAI Responses bounded core product gate",
+      "profile": "product",
+      "status": "active",
+      "owner": "gateway",
+      "reason": "Only text, two-turn, and function tools are blocking; provider compatibility and generic protocol conformance remain separate rows.",
+      "expiry": "2026-10-01",
+      "replacement_id": null,
+      "evidence_layer": "source-test",
+      "required_suite_ids": [
+        "SUITE-RUST-GATEWAY",
+        "SUITE-PY-LOOPBACK"
+      ],
+      "required_requirement_ids": [
+        "REQ-083-RESPONSES-CORE",
+        "REQ-083-EVIDENCE"
+      ],
+      "base_policy": "none",
+      "requires_clean": false,
+      "requires_non_shallow": false,
+      "release_claim": "product-open-not-run",
+      "candidate_policy": "required"
     }
   ]
 }
