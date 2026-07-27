@@ -16,8 +16,8 @@ use crate::runtime::proxy_lifecycle::{
 use crate::runtime::science::{
     probe_known_runtime, probe_sandbox_runtime_cached, runtime_identity_is_current,
     sandbox_data_dir, sandbox_home, sandbox_listener_matches_runtime, sandbox_url,
-    select_science_runtime_cached, stop_sandbox, SandboxScienceState, ScienceRuntimeIdentity,
-    ScienceRuntimeSource,
+    select_science_runtime_cached, stop_sandbox, stop_sandbox_with_launch_token,
+    SandboxScienceState, ScienceRuntimeIdentity, ScienceRuntimeSource,
 };
 use crate::runtime::skill_install_bridge::{
     configure_third_party_after_science_start, inspect_while_science_running,
@@ -854,14 +854,34 @@ fn one_click_login_with_options<R: Runtime>(
     if let Err(error) =
         crate::runtime::science::record_managed_science_launch(sport, &launch_runtime)
     {
-        {
+        let cleanup = {
             let mut st = lock(&state);
-            let _ = stop_sandbox_state(&app, &mut st);
-        }
+            let st = &mut *st;
+            let result = stop_sandbox_with_launch_token(
+                &app,
+                &mut st.sandbox,
+                &mut st.sandbox_url,
+                Some(&launch_runtime),
+                error.token(),
+            );
+            if result.is_ok() {
+                st.science_confirmed_stopped = Some(launch_runtime.clone());
+                st.science_runtime = None;
+            }
+            result
+        };
         trace.finish("error=sandbox_managed_launch_identity");
-        return Err(format!(
-            "Science 已启动但受管启动身份无法安全提交；已尝试停止本次进程：{error}"
-        ));
+        return Err(match cleanup {
+            Ok(()) => format!(
+                "Science 已启动但受管启动身份无法安全提交；本次进程已按内存启动身份停止：{}",
+                error.message()
+            ),
+            Err(cleanup_error) => format!(
+                "Science 已启动但受管启动身份无法安全提交；安全停止也未完成：{}；{}",
+                error.message(),
+                cleanup_error
+            ),
+        });
     }
     advance_runtime_transaction(
         &dir,

@@ -119,7 +119,7 @@ pub(crate) struct ScienceExecutableFingerprint {
     sha256: [u8; 32],
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ScienceManagedLaunchRecord {
     schema_version: u32,
@@ -138,6 +138,39 @@ struct ScienceManagedLaunchRecord {
     data_dir: PathBuf,
     data_dir_device: u64,
     data_dir_inode: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ManagedLaunchFileIdentity {
+    device: u64,
+    inode: u64,
+    size: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+    mode: u32,
+    uid: u32,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ScienceManagedLaunchToken {
+    record: ScienceManagedLaunchRecord,
+    receipt_file: Option<ManagedLaunchFileIdentity>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ScienceManagedLaunchCommitError {
+    message: String,
+    token: Option<ScienceManagedLaunchToken>,
+}
+
+impl ScienceManagedLaunchCommitError {
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub(crate) fn token(&self) -> Option<&ScienceManagedLaunchToken> {
+        self.token.as_ref()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1359,8 +1392,29 @@ fn record_matches_runtime(
         && record.data_dir_inode == data_dir_inode
 }
 
-fn read_managed_launch_record() -> Option<ScienceManagedLaunchRecord> {
-    let path = managed_launch_path();
+fn managed_launch_file_identity(metadata: &fs::Metadata) -> ManagedLaunchFileIdentity {
+    ManagedLaunchFileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        size: metadata.len(),
+        modified_seconds: metadata.mtime(),
+        modified_nanoseconds: metadata.mtime_nsec(),
+        mode: metadata.permissions().mode(),
+        uid: metadata.uid(),
+    }
+}
+
+fn private_managed_launch_file(metadata: &fs::Metadata) -> bool {
+    metadata.file_type().is_file()
+        && metadata.uid() == unsafe { libc::geteuid() }
+        && metadata.permissions().mode() & 0o077 == 0
+        && metadata.len() > 0
+        && metadata.len() <= MAX_MANAGED_LAUNCH_BYTES
+}
+
+fn read_managed_launch_snapshot_at(
+    path: &Path,
+) -> Option<(ScienceManagedLaunchRecord, ManagedLaunchFileIdentity)> {
     let parent = path.parent()?;
     let parent_metadata = parent.symlink_metadata().ok()?;
     if !parent_metadata.file_type().is_dir()
@@ -1370,23 +1424,17 @@ fn read_managed_launch_record() -> Option<ScienceManagedLaunchRecord> {
         return None;
     }
     let metadata = path.symlink_metadata().ok()?;
-    if !metadata.file_type().is_file()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.permissions().mode() & 0o077 != 0
-        || metadata.len() == 0
-        || metadata.len() > MAX_MANAGED_LAUNCH_BYTES
-    {
+    if !private_managed_launch_file(&metadata) {
         return None;
     }
+    let expected_file = managed_launch_file_identity(&metadata);
     let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)
         .ok()?;
     let after = file.metadata().ok()?;
-    if after.dev() != metadata.dev()
-        || after.ino() != metadata.ino()
-        || after.len() != metadata.len()
+    if !private_managed_launch_file(&after) || managed_launch_file_identity(&after) != expected_file
     {
         return None;
     }
@@ -1406,14 +1454,35 @@ fn read_managed_launch_record() -> Option<ScienceManagedLaunchRecord> {
             return None;
         }
     }
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.read_to_end(&mut bytes).ok()?;
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(expected_file.size.min(MAX_MANAGED_LAUNCH_BYTES + 1)).ok()?,
+    );
+    (&mut file)
+        .take(MAX_MANAGED_LAUNCH_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
     #[cfg(test)]
     MANAGED_LAUNCH_LAST_READ_BYTES.store(bytes.len() as u64, Ordering::SeqCst);
-    if bytes.len() as u64 != metadata.len() {
+    let final_metadata = file.metadata().ok()?;
+    if !private_managed_launch_file(&final_metadata)
+        || managed_launch_file_identity(&final_metadata) != expected_file
+        || bytes.len() as u64 != expected_file.size
+        || bytes.len() as u64 > MAX_MANAGED_LAUNCH_BYTES
+    {
         return None;
     }
-    serde_json::from_slice(&bytes).ok()
+    let record = serde_json::from_slice(&bytes).ok()?;
+    Some((record, expected_file))
+}
+
+fn read_managed_launch_snapshot() -> Option<(ScienceManagedLaunchRecord, ManagedLaunchFileIdentity)>
+{
+    read_managed_launch_snapshot_at(&managed_launch_path())
+}
+
+#[cfg(test)]
+fn read_managed_launch_record() -> Option<ScienceManagedLaunchRecord> {
+    read_managed_launch_snapshot().map(|(record, _)| record)
 }
 
 fn write_managed_launch_record(record: &ScienceManagedLaunchRecord) -> Result<(), String> {
@@ -1470,32 +1539,52 @@ fn write_managed_launch_record(record: &ScienceManagedLaunchRecord) -> Result<()
 pub(crate) fn record_managed_science_launch(
     port: u16,
     runtime: &ScienceRuntimeIdentity,
-) -> Result<(), String> {
-    let listener_pid = listener_runtime_pid(port, runtime)
-        .ok_or("Science listener 身份在 managed launch 提交前无法确认")?;
-    let record = managed_launch_record_for(port, listener_pid, runtime)
-        .ok_or("Science managed launch 身份无法建立")?;
+) -> Result<ScienceManagedLaunchToken, ScienceManagedLaunchCommitError> {
+    let listener_pid =
+        listener_runtime_pid(port, runtime).ok_or_else(|| ScienceManagedLaunchCommitError {
+            message: "Science listener 身份在 managed launch 提交前无法确认".into(),
+            token: None,
+        })?;
+    let record = managed_launch_record_for(port, listener_pid, runtime).ok_or_else(|| {
+        ScienceManagedLaunchCommitError {
+            message: "Science managed launch 身份无法建立".into(),
+            token: None,
+        }
+    })?;
+    let uncommitted_token = ScienceManagedLaunchToken {
+        record: record.clone(),
+        receipt_file: None,
+    };
     if unique_listener_pid(port) != Some(listener_pid)
         || process_start_identity(listener_pid).as_deref() != Some(record.process_start.as_str())
     {
-        return Err("Science listener 在 managed launch 提交前发生变化".into());
+        return Err(ScienceManagedLaunchCommitError {
+            message: "Science listener 在 managed launch 提交前发生变化".into(),
+            token: Some(uncommitted_token),
+        });
     }
-    write_managed_launch_record(&record)?;
-    if !managed_launch_identity_matches(port, runtime) {
-        return Err("Science managed launch 记录提交后回读不一致".into());
+    if let Err(message) = write_managed_launch_record(&record) {
+        return Err(ScienceManagedLaunchCommitError {
+            message,
+            token: Some(uncommitted_token),
+        });
     }
-    Ok(())
+    managed_launch_token(port, runtime).ok_or_else(|| ScienceManagedLaunchCommitError {
+        message: "Science managed launch 记录提交后回读不一致".into(),
+        token: Some(uncommitted_token),
+    })
 }
 
-fn managed_launch_identity_matches(port: u16, runtime: &ScienceRuntimeIdentity) -> bool {
+fn managed_launch_token(
+    port: u16,
+    runtime: &ScienceRuntimeIdentity,
+) -> Option<ScienceManagedLaunchToken> {
     if !runtime.is_current() {
-        return false;
+        return None;
     }
-    let Some(record) = read_managed_launch_record() else {
-        return false;
-    };
+    let (record, receipt_file) = read_managed_launch_snapshot()?;
     if !record_matches_runtime(&record, port, runtime) {
-        return false;
+        return None;
     }
     let pid_before = unique_listener_pid(port);
     if pid_before != Some(record.listener_pid)
@@ -1503,30 +1592,109 @@ fn managed_launch_identity_matches(port: u16, runtime: &ScienceRuntimeIdentity) 
             != Some(record.process_start.as_str())
         || listener_runtime_pid(port, runtime) != Some(record.listener_pid)
     {
+        return None;
+    }
+    if unique_listener_pid(port) != Some(record.listener_pid)
+        || process_start_identity(record.listener_pid).as_deref()
+            != Some(record.process_start.as_str())
+    {
+        return None;
+    }
+    Some(ScienceManagedLaunchToken {
+        record,
+        receipt_file: Some(receipt_file),
+    })
+}
+
+fn managed_launch_identity_matches(port: u16, runtime: &ScienceRuntimeIdentity) -> bool {
+    managed_launch_token(port, runtime).is_some()
+}
+
+fn managed_launch_token_is_current(
+    token: &ScienceManagedLaunchToken,
+    runtime: &ScienceRuntimeIdentity,
+) -> bool {
+    let record = &token.record;
+    if !runtime.is_current()
+        || !record_matches_runtime(record, record.port, runtime)
+        || unique_listener_pid(record.port) != Some(record.listener_pid)
+        || process_start_identity(record.listener_pid).as_deref()
+            != Some(record.process_start.as_str())
+        || listener_runtime_pid(record.port, runtime) != Some(record.listener_pid)
+    {
         return false;
     }
-    unique_listener_pid(port) == Some(record.listener_pid)
+    if let Some(expected_file) = token.receipt_file.as_ref() {
+        let Some((current_record, current_file)) = read_managed_launch_snapshot() else {
+            return false;
+        };
+        if current_record != *record || current_file != *expected_file {
+            return false;
+        }
+    }
+    unique_listener_pid(record.port) == Some(record.listener_pid)
         && process_start_identity(record.listener_pid).as_deref()
             == Some(record.process_start.as_str())
 }
 
+fn restore_unmatched_managed_launch_tombstone(tombstone: &Path, path: &Path) -> Result<(), String> {
+    match path.symlink_metadata() {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => fs::rename(tombstone, path)
+            .map_err(|_| "Science managed launch 记录变化且无法原位恢复".to_string()),
+        Ok(_) => {
+            Err("Science managed launch 记录变化且新记录已出现；旧记录保留在 tombstone".into())
+        }
+        Err(_) => Err("Science managed launch 记录变化且无法确认恢复目标".into()),
+    }
+}
+
 fn clear_managed_launch_identity(
-    port: u16,
+    token: &ScienceManagedLaunchToken,
     runtime: &ScienceRuntimeIdentity,
 ) -> Result<(), String> {
     let path = managed_launch_path();
-    let Some(record) = read_managed_launch_record() else {
+    let Some((record, receipt_file)) = read_managed_launch_snapshot() else {
         return match path.symlink_metadata() {
             Ok(_) => Err("Science managed launch 记录无效，未删除".into()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound && token.receipt_file.is_none() =>
+            {
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Err("Science managed launch 已提交记录在停止清理前消失".into())
+            }
             Err(_) => Err("无法确认 Science managed launch 记录".into()),
         };
     };
-    if !record_matches_runtime(&record, port, runtime) {
+    if record != token.record
+        || token
+            .receipt_file
+            .as_ref()
+            .is_some_and(|expected| expected != &receipt_file)
+        || !record_matches_runtime(&record, token.record.port, runtime)
+    {
         return Err("Science managed launch 记录与停止目标不匹配，未删除".into());
     }
-    fs::remove_file(&path).map_err(|_| "无法清理 Science managed launch 记录")?;
-    File::open(path.parent().ok_or("Science managed launch 路径无父目录")?)
+    let parent = path.parent().ok_or("Science managed launch 路径无父目录")?;
+    let tombstone = parent.join(format!(
+        ".{MANAGED_LAUNCH_FILE}.{}.stopped",
+        token.record.launch_id
+    ));
+    if tombstone.symlink_metadata().is_ok() {
+        return Err("Science managed launch 清理 tombstone 已存在".into());
+    }
+    fs::rename(&path, &tombstone).map_err(|_| "无法冻结待清理 Science managed launch 记录")?;
+    let moved = read_managed_launch_snapshot_at(&tombstone);
+    if moved.as_ref() != Some(&(record, receipt_file)) {
+        let restore = restore_unmatched_managed_launch_tombstone(&tombstone, &path);
+        return Err(match restore {
+            Ok(()) => "Science managed launch 记录在清理前变化；已恢复且拒绝删除".into(),
+            Err(error) => error,
+        });
+    }
+    fs::remove_file(&tombstone).map_err(|_| "无法清理 Science managed launch 记录")?;
+    File::open(parent)
         .and_then(|directory| directory.sync_all())
         .map_err(|_| "无法持久化 Science managed launch 清理")?;
     Ok(())
@@ -1734,6 +1902,16 @@ pub(crate) fn stop_sandbox<R: Runtime>(
     sandbox_url: &mut Option<String>,
     runtime: Option<&ScienceRuntimeIdentity>,
 ) -> Result<(), String> {
+    stop_sandbox_with_launch_token(app, sandbox, sandbox_url, runtime, None)
+}
+
+pub(crate) fn stop_sandbox_with_launch_token<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    sandbox: &mut Option<Child>,
+    sandbox_url: &mut Option<String>,
+    runtime: Option<&ScienceRuntimeIdentity>,
+    launch_token: Option<&ScienceManagedLaunchToken>,
+) -> Result<(), String> {
     if !sandbox_data_dir().exists() {
         kill_child(sandbox);
         *sandbox_url = None;
@@ -1762,7 +1940,16 @@ pub(crate) fn stop_sandbox<R: Runtime>(
     let sandbox_port = config::load_from(&config::default_dir())
         .map_err(|error| format!("读取 Science 端口配置失败：{error}"))?
         .sandbox_port;
-    let listener_before_stop = listener_runtime_pid(sandbox_port, runtime);
+    let stop_token = match launch_token {
+        Some(token) => token.clone(),
+        None => managed_launch_token(sandbox_port, runtime)
+            .ok_or("Science managed launch 身份无法确认；已拒绝调用 stop 或发送信号")?,
+    };
+    if stop_token.record.port != sandbox_port
+        || !managed_launch_token_is_current(&stop_token, runtime)
+    {
+        return Err("Science managed launch 身份在停止前发生变化；未调用 stop 或发送信号".into());
+    }
     let mut err = None;
     match asset_root(app) {
         Some(root) => {
@@ -1794,54 +1981,52 @@ pub(crate) fn stop_sandbox<R: Runtime>(
         }
     }
     if err.is_none() && loopback_port_accepts_tcp(sandbox_port) {
-        match listener_before_stop {
-            Some(pid) if listener_runtime_pid(sandbox_port, runtime) == Some(pid) => {
-                // Some upstream Science builds return success and remove their
-                // lockfile without terminating the daemon. The user requested
-                // stop, so signal only the exact PID whose listener and
-                // canonical executable were proved both before and after CLI.
-                // SAFETY: kill does not dereference pointers. PID > 1 and exact
-                // listener identity were checked immediately above.
-                if unsafe { libc::kill(pid as i32, libc::SIGTERM) } != 0 {
-                    err = Some("Science stop 返回成功但精确 daemon 无法接收 TERM。".into());
-                } else {
-                    for _ in 0..50 {
+        let pid = stop_token.record.listener_pid;
+        if managed_launch_token_is_current(&stop_token, runtime) {
+            // Some upstream Science builds return success and remove their
+            // lockfile without terminating the daemon. The user requested
+            // stop, so signal only the exact launch token whose listener,
+            // process start, receipt, and canonical executable were proved
+            // both before and after CLI.
+            // SAFETY: kill does not dereference pointers. PID > 1 and exact
+            // listener identity were checked immediately above.
+            if unsafe { libc::kill(pid as i32, libc::SIGTERM) } != 0 {
+                err = Some("Science stop 返回成功但精确 daemon 无法接收 TERM。".into());
+            } else {
+                for _ in 0..50 {
+                    if !loopback_port_accepts_tcp(sandbox_port) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                if managed_launch_token_is_current(&stop_token, runtime) {
+                    // SAFETY: the same launch token, including process-start
+                    // identity, is revalidated after the TERM wait.
+                    let _ = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+                    for _ in 0..20 {
                         if !loopback_port_accepts_tcp(sandbox_port) {
                             break;
                         }
                         std::thread::sleep(Duration::from_millis(100));
                     }
-                    if listener_runtime_pid(sandbox_port, runtime) == Some(pid) {
-                        // SAFETY: the same exact listener/runtime identity is
-                        // revalidated after the TERM wait.
-                        let _ = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
-                        for _ in 0..20 {
-                            if !loopback_port_accepts_tcp(sandbox_port) {
-                                break;
-                            }
-                            std::thread::sleep(Duration::from_millis(100));
-                        }
-                    }
-                    if loopback_port_accepts_tcp(sandbox_port) {
-                        err = Some(
-                            "Science stop 返回成功，但端口仍被占用；已拒绝把未知监听者当作停止成功。"
-                                .into(),
-                        );
-                    }
+                }
+                if loopback_port_accepts_tcp(sandbox_port) {
+                    err = Some(
+                        "Science stop 返回成功，但端口仍被占用；已拒绝把未知监听者当作停止成功。"
+                            .into(),
+                    );
                 }
             }
-            _ => {
-                err = Some(
-                    "Science stop 返回成功，但停止后的监听身份与启动记录不一致；未发送信号。"
-                        .into(),
-                );
-            }
+        } else {
+            err = Some(
+                "Science stop 返回成功，但停止后的监听身份与启动记录不一致；未发送信号。".into(),
+            );
         }
     }
     kill_child(sandbox);
     *sandbox_url = None;
     if err.is_none() && !loopback_port_accepts_tcp(sandbox_port) {
-        if let Err(error) = clear_managed_launch_identity(sandbox_port, runtime) {
+        if let Err(error) = clear_managed_launch_identity(&stop_token, runtime) {
             err = Some(error);
         }
     }
