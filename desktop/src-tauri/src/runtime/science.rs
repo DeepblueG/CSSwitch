@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tauri::Runtime;
@@ -29,6 +30,8 @@ const MIN_SCIENCE_BINARY_SIZE: u64 = 1024 * 1024;
 const MAX_SCIENCE_BINARY_SIZE: u64 = 512 * 1024 * 1024;
 const OFFICIAL_UPDATED_SNAPSHOT_DIR: &str = "runtime-snapshots/science";
 const SCIENCE_VERSION_TIMEOUT: Duration = Duration::from_secs(15);
+const MANAGED_LAUNCH_FILE: &str = "science-managed-launch.v1.json";
+const MAX_MANAGED_LAUNCH_BYTES: u64 = 16 * 1024;
 static SCIENCE_VERSION_OUTPUT_NONCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,6 +115,27 @@ pub(crate) struct ScienceExecutableFingerprint {
     modified_nanoseconds: i64,
     mode: u32,
     sha256: [u8; 32],
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ScienceManagedLaunchRecord {
+    schema_version: u32,
+    launch_id: String,
+    port: u16,
+    listener_pid: u32,
+    process_start: String,
+    runtime_path: PathBuf,
+    runtime_device: u64,
+    runtime_inode: u64,
+    runtime_size: u64,
+    runtime_modified_seconds: i64,
+    runtime_modified_nanoseconds: i64,
+    runtime_mode: u32,
+    runtime_sha256: String,
+    data_dir: PathBuf,
+    data_dir_device: u64,
+    data_dir_inode: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -1218,6 +1242,267 @@ fn unique_listener_pid(port: u16) -> Option<u32> {
     parse_unique_listener_pid(&String::from_utf8(listener.stdout).ok()?)
 }
 
+fn managed_launch_path() -> PathBuf {
+    config::default_dir().join(MANAGED_LAUNCH_FILE)
+}
+
+fn process_start_identity(pid: u32) -> Option<String> {
+    if pid <= 1 {
+        return None;
+    }
+    let output = Command::new("/bin/ps")
+        .args(["-p", &pid.to_string(), "-o", "lstart="])
+        .env_clear()
+        .output()
+        .ok()?;
+    if !output.status.success() || output.stdout.len() > 256 || !output.stderr.is_empty() {
+        return None;
+    }
+    let identity = String::from_utf8(output.stdout).ok()?;
+    let identity = identity.trim();
+    if identity.is_empty()
+        || identity.len() > 128
+        || !identity.is_ascii()
+        || identity.lines().count() != 1
+    {
+        return None;
+    }
+    Some(identity.to_string())
+}
+
+fn data_dir_identity() -> Option<(PathBuf, u64, u64)> {
+    let data_dir = sandbox_data_dir().canonicalize().ok()?;
+    let metadata = data_dir.symlink_metadata().ok()?;
+    if !metadata.file_type().is_dir()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.permissions().mode() & 0o022 != 0
+    {
+        return None;
+    }
+    Some((data_dir, metadata.dev(), metadata.ino()))
+}
+
+fn managed_launch_record_for(
+    port: u16,
+    listener_pid: u32,
+    runtime: &ScienceRuntimeIdentity,
+) -> Option<ScienceManagedLaunchRecord> {
+    if !runtime.is_current() {
+        return None;
+    }
+    let runtime_path = runtime.path.canonicalize().ok()?;
+    if runtime_path != runtime.path {
+        return None;
+    }
+    let process_start = process_start_identity(listener_pid)?;
+    let (data_dir, data_dir_device, data_dir_inode) = data_dir_identity()?;
+    let fingerprint = &runtime.fingerprint;
+    Some(ScienceManagedLaunchRecord {
+        schema_version: 1,
+        launch_id: config::new_id(),
+        port,
+        listener_pid,
+        process_start,
+        runtime_path,
+        runtime_device: fingerprint.device,
+        runtime_inode: fingerprint.inode,
+        runtime_size: fingerprint.size,
+        runtime_modified_seconds: fingerprint.modified_seconds,
+        runtime_modified_nanoseconds: fingerprint.modified_nanoseconds,
+        runtime_mode: fingerprint.mode,
+        runtime_sha256: fingerprint_sha256_hex(fingerprint),
+        data_dir,
+        data_dir_device,
+        data_dir_inode,
+    })
+}
+
+fn record_matches_runtime(
+    record: &ScienceManagedLaunchRecord,
+    port: u16,
+    runtime: &ScienceRuntimeIdentity,
+) -> bool {
+    let Some((data_dir, data_dir_device, data_dir_inode)) = data_dir_identity() else {
+        return false;
+    };
+    let fingerprint = &runtime.fingerprint;
+    record.schema_version == 1
+        && record.launch_id.len() >= 16
+        && record.launch_id.len() <= 128
+        && record
+            .launch_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        && record.port == port
+        && record.listener_pid > 1
+        && record.runtime_path == runtime.path
+        && record.runtime_device == fingerprint.device
+        && record.runtime_inode == fingerprint.inode
+        && record.runtime_size == fingerprint.size
+        && record.runtime_modified_seconds == fingerprint.modified_seconds
+        && record.runtime_modified_nanoseconds == fingerprint.modified_nanoseconds
+        && record.runtime_mode == fingerprint.mode
+        && record.runtime_sha256 == fingerprint_sha256_hex(fingerprint)
+        && record.data_dir == data_dir
+        && record.data_dir_device == data_dir_device
+        && record.data_dir_inode == data_dir_inode
+}
+
+fn read_managed_launch_record() -> Option<ScienceManagedLaunchRecord> {
+    let path = managed_launch_path();
+    let parent = path.parent()?;
+    let parent_metadata = parent.symlink_metadata().ok()?;
+    if !parent_metadata.file_type().is_dir()
+        || parent_metadata.uid() != unsafe { libc::geteuid() }
+        || parent_metadata.permissions().mode() & 0o022 != 0
+    {
+        return None;
+    }
+    let metadata = path.symlink_metadata().ok()?;
+    if !metadata.file_type().is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.permissions().mode() & 0o077 != 0
+        || metadata.len() == 0
+        || metadata.len() > MAX_MANAGED_LAUNCH_BYTES
+    {
+        return None;
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .ok()?;
+    let after = file.metadata().ok()?;
+    if after.dev() != metadata.dev()
+        || after.ino() != metadata.ino()
+        || after.len() != metadata.len()
+    {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 != metadata.len() {
+        return None;
+    }
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn write_managed_launch_record(record: &ScienceManagedLaunchRecord) -> Result<(), String> {
+    let path = managed_launch_path();
+    let parent = path
+        .parent()
+        .ok_or("Science managed launch 记录路径无父目录")?;
+    let parent_metadata = parent
+        .symlink_metadata()
+        .map_err(|_| "Science managed launch 记录目录不可用")?;
+    if !parent_metadata.file_type().is_dir()
+        || parent_metadata.uid() != unsafe { libc::geteuid() }
+        || parent_metadata.permissions().mode() & 0o022 != 0
+    {
+        return Err("Science managed launch 记录目录不安全".into());
+    }
+    if let Ok(metadata) = path.symlink_metadata() {
+        if !metadata.file_type().is_file()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.permissions().mode() & 0o077 != 0
+        {
+            return Err("Science managed launch 记录不是安全私有普通文件".into());
+        }
+    }
+    let bytes = serde_json::to_vec(record).map_err(|_| "Science managed launch 记录无法序列化")?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_MANAGED_LAUNCH_BYTES {
+        return Err("Science managed launch 记录大小非法".into());
+    }
+    let temp = parent.join(format!(".{MANAGED_LAUNCH_FILE}.{}.tmp", record.launch_id));
+    let write_result = (|| -> Result<(), String> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&temp)
+            .map_err(|_| "无法创建 Science managed launch 临时记录")?;
+        file.write_all(&bytes)
+            .map_err(|_| "无法写入 Science managed launch 临时记录")?;
+        file.sync_all()
+            .map_err(|_| "无法持久化 Science managed launch 临时记录")?;
+        fs::rename(&temp, &path).map_err(|_| "无法提交 Science managed launch 记录")?;
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|_| "无法持久化 Science managed launch 记录目录")?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    write_result
+}
+
+pub(crate) fn record_managed_science_launch(
+    port: u16,
+    runtime: &ScienceRuntimeIdentity,
+) -> Result<(), String> {
+    let listener_pid = listener_runtime_pid(port, runtime)
+        .ok_or("Science listener 身份在 managed launch 提交前无法确认")?;
+    let record = managed_launch_record_for(port, listener_pid, runtime)
+        .ok_or("Science managed launch 身份无法建立")?;
+    if unique_listener_pid(port) != Some(listener_pid)
+        || process_start_identity(listener_pid).as_deref() != Some(record.process_start.as_str())
+    {
+        return Err("Science listener 在 managed launch 提交前发生变化".into());
+    }
+    write_managed_launch_record(&record)?;
+    if !managed_launch_identity_matches(port, runtime) {
+        return Err("Science managed launch 记录提交后回读不一致".into());
+    }
+    Ok(())
+}
+
+fn managed_launch_identity_matches(port: u16, runtime: &ScienceRuntimeIdentity) -> bool {
+    if !runtime.is_current() {
+        return false;
+    }
+    let Some(record) = read_managed_launch_record() else {
+        return false;
+    };
+    if !record_matches_runtime(&record, port, runtime) {
+        return false;
+    }
+    let pid_before = unique_listener_pid(port);
+    if pid_before != Some(record.listener_pid)
+        || process_start_identity(record.listener_pid).as_deref()
+            != Some(record.process_start.as_str())
+        || listener_runtime_pid(port, runtime) != Some(record.listener_pid)
+    {
+        return false;
+    }
+    unique_listener_pid(port) == Some(record.listener_pid)
+        && process_start_identity(record.listener_pid).as_deref()
+            == Some(record.process_start.as_str())
+}
+
+fn clear_managed_launch_identity(
+    port: u16,
+    runtime: &ScienceRuntimeIdentity,
+) -> Result<(), String> {
+    let path = managed_launch_path();
+    let Some(record) = read_managed_launch_record() else {
+        return match path.symlink_metadata() {
+            Ok(_) => Err("Science managed launch 记录无效，未删除".into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err("无法确认 Science managed launch 记录".into()),
+        };
+    };
+    if !record_matches_runtime(&record, port, runtime) {
+        return Err("Science managed launch 记录与停止目标不匹配，未删除".into());
+    }
+    fs::remove_file(&path).map_err(|_| "无法清理 Science managed launch 记录")?;
+    File::open(path.parent().ok_or("Science managed launch 路径无父目录")?)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| "无法持久化 Science managed launch 清理")?;
+    Ok(())
+}
+
 fn process_text_paths(pid: u32) -> Option<Vec<PathBuf>> {
     let pid_text = pid.to_string();
     let text_files = Command::new("/usr/sbin/lsof")
@@ -1324,8 +1609,10 @@ pub(crate) fn probe_known_runtime(
     let status = runtime_status(runtime);
     let health_ready = proc::http_health(port, None, 400);
     let port_accepts_tcp = health_ready || loopback_port_accepts_tcp(port);
-    let listener_matches_runtime =
-        status == Some(true) && health_ready && listener_uses_runtime(port, runtime);
+    let listener_matches_runtime = status == Some(true)
+        && health_ready
+        && listener_uses_runtime(port, runtime)
+        && managed_launch_identity_matches(port, runtime);
     classify_known_runtime_state(
         status,
         health_ready,
@@ -1352,7 +1639,11 @@ pub(crate) fn probe_sandbox_runtime_cached(
     let mut saw_running_unconfirmed = false;
     for runtime in candidates {
         match runtime_status(&runtime) {
-            Some(true) if health_ready && listener_uses_runtime(port, &runtime) => {
+            Some(true)
+                if health_ready
+                    && listener_uses_runtime(port, &runtime)
+                    && managed_launch_identity_matches(port, &runtime) =>
+            {
                 return Ok((SandboxScienceState::RunningHealthy, Some(runtime)))
             }
             Some(true) => saw_running_unconfirmed = true,
@@ -1520,6 +1811,11 @@ pub(crate) fn stop_sandbox<R: Runtime>(
     }
     kill_child(sandbox);
     *sandbox_url = None;
+    if err.is_none() && !loopback_port_accepts_tcp(sandbox_port) {
+        if let Err(error) = clear_managed_launch_identity(sandbox_port, runtime) {
+            err = Some(error);
+        }
+    }
     match err {
         Some(e) => Err(e),
         None => Ok(()),

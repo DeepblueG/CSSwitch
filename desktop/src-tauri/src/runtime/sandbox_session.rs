@@ -851,6 +851,18 @@ fn one_click_login_with_options<R: Runtime>(
             "端口 {sport} 有服务响应，但按 data-dir 确认不是本沙箱 Science（疑似被其它服务占用）。已尝试停掉刚起的沙箱。"
         ));
     }
+    if let Err(error) =
+        crate::runtime::science::record_managed_science_launch(sport, &launch_runtime)
+    {
+        {
+            let mut st = lock(&state);
+            let _ = stop_sandbox_state(&app, &mut st);
+        }
+        trace.finish("error=sandbox_managed_launch_identity");
+        return Err(format!(
+            "Science 已启动但受管启动身份无法安全提交；已尝试停止本次进程：{error}"
+        ));
+    }
     advance_runtime_transaction(
         &dir,
         &active_profile.id,
