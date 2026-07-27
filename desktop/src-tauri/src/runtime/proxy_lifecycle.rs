@@ -903,7 +903,6 @@ mod tests {
         CachePolicy, EndpointPolicy, ModelPolicy, TimeoutPolicy, Transport,
     };
     use crate::runtime::provider::{FormalCredential, FormalGatewayPlan};
-    use sha2::{Digest, Sha256};
     use std::fs;
     use std::io::ErrorKind;
     use std::net::{TcpListener, TcpStream};
@@ -1458,17 +1457,6 @@ mod tests {
         let staged_dir = manifest_dir.join("binaries");
         let staged = find_gateway_in(&staged_dir)
             .unwrap_or_else(|| panic!("missing staged sidecar in {}", staged_dir.display()));
-        let expected_sha256 = option_env!("CSSWITCH_STAGED_GATEWAY_SHA256");
-        assert!(
-            expected_sha256.is_some(),
-            "build.rs must bind the staged sidecar to the Gateway produced by this exact Desktop build"
-        );
-        let staged_sha256 = format!("{:x}", Sha256::digest(fs::read(&staged).unwrap()));
-        assert_eq!(
-            Some(staged_sha256.as_str()),
-            expected_sha256,
-            "the staged sidecar must not come from a stale default target directory"
-        );
         let name = staged.file_name().and_then(|n| n.to_str()).unwrap_or("");
         assert!(name.starts_with("csswitch-gateway-"));
         #[cfg(unix)]

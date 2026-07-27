@@ -193,6 +193,7 @@
       "approved_ignored_tests": {},
       "approved_skipped_test_ids": [],
       "discovered_test_ids": [
+        "test.test_build_sidecar_identity.BuildSidecarIdentityTest.test_external_target_dir_cannot_stage_stale_default_gateway",
         "test.test_capability.TestCapability.test_force_no_loopback_env",
         "test.test_capability.TestCapability.test_matches_actual_bind",
         "test.test_capability.TestCapability.test_reserved_port_is_held_through_argv_callback_then_released_for_popen",
