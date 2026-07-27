@@ -854,9 +854,12 @@ mod tests {
         env, fs,
         io::{Read, Write},
         net::{TcpListener, TcpStream},
-        os::unix::fs::PermissionsExt,
+        os::unix::fs::{symlink, MetadataExt, PermissionsExt},
         path::{Path, PathBuf},
-        sync::{Arc, Mutex},
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc, Mutex,
+        },
         thread,
         time::{Instant, SystemTime, UNIX_EPOCH},
     };
@@ -1108,18 +1111,129 @@ esac
         science_bin
     }
 
-    fn start_mock_upstream() -> u16 {
+    struct MockUpstream {
+        port: u16,
+        stop: Arc<AtomicBool>,
+        worker: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Drop for MockUpstream {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            let _ = TcpStream::connect(("127.0.0.1", self.port));
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+        }
+    }
+
+    struct RuntimeSmokeCleanup<R: tauri::Runtime> {
+        handle: tauri::AppHandle<R>,
+        state: SharedAppState,
+        temp: PathBuf,
+        sandbox_port: u16,
+        proxy_port: u16,
+        armed: bool,
+    }
+
+    impl<R: tauri::Runtime> RuntimeSmokeCleanup<R> {
+        fn new(
+            handle: tauri::AppHandle<R>,
+            state: SharedAppState,
+            temp: PathBuf,
+            sandbox_port: u16,
+            proxy_port: u16,
+        ) -> Self {
+            Self {
+                handle,
+                state,
+                temp,
+                sandbox_port,
+                proxy_port,
+                armed: true,
+            }
+        }
+
+        fn cleanup(&mut self) -> Result<(), String> {
+            if !self.armed {
+                return Ok(());
+            }
+            self.armed = false;
+            let stop_result = {
+                let mut st = lock(&self.state);
+                let AppState {
+                    sandbox,
+                    sandbox_url,
+                    science_runtime,
+                    ..
+                } = &mut *st;
+                let runtime = science_runtime.clone();
+                let result =
+                    science::stop_sandbox(&self.handle, sandbox, sandbox_url, runtime.as_ref());
+                st.stop_proxy();
+                result
+            };
+            stop_result?;
+            for (label, port) in [("Science", self.sandbox_port), ("Gateway", self.proxy_port)] {
+                let mut closed = false;
+                for _ in 0..50 {
+                    if TcpStream::connect(("127.0.0.1", port)).is_err() {
+                        closed = true;
+                        break;
+                    }
+                    thread::sleep(std::time::Duration::from_millis(100));
+                }
+                if !closed {
+                    return Err(format!(
+                        "{label} fixture port {port} remained reachable; preserved {}",
+                        self.temp.display()
+                    ));
+                }
+            }
+            fs::remove_dir_all(&self.temp)
+                .map_err(|error| format!("failed to remove {}: {error}", self.temp.display()))
+        }
+
+        fn finish(mut self) -> Result<(), String> {
+            self.cleanup()
+        }
+    }
+
+    impl<R: tauri::Runtime> Drop for RuntimeSmokeCleanup<R> {
+        fn drop(&mut self) {
+            if let Err(error) = self.cleanup() {
+                eprintln!("isolated runtime cleanup failed: {error}");
+            }
+        }
+    }
+
+    fn start_mock_upstream() -> MockUpstream {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         assert_ne!(port, 8765);
-        thread::spawn(move || {
-            for mut s in listener.incoming().flatten() {
-                let mut buf = [0; 512];
-                let _ = s.read(&mut buf);
-                let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK");
+        listener.set_nonblocking(true).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = stop.clone();
+        let worker = thread::spawn(move || {
+            while !worker_stop.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut buf = [0; 512];
+                        let _ = stream.read(&mut buf);
+                        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK");
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
             }
         });
-        port
+        MockUpstream {
+            port,
+            stop,
+            worker: Some(worker),
+        }
     }
 
     fn wait_http_health(port: u16) {
@@ -1148,6 +1262,46 @@ esac
             .lines()
             .filter(|line| *line == command)
             .count()
+    }
+
+    fn unique_listener_pid(port: u16) -> u32 {
+        let output = std::process::Command::new("/usr/sbin/lsof")
+            .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-t"])
+            .output()
+            .expect("lsof should inspect the isolated listener");
+        assert!(output.status.success());
+        let pids: Vec<u32> = String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(str::trim)
+            .filter(|pid| !pid.is_empty())
+            .map(|pid| pid.parse().unwrap())
+            .collect();
+        assert_eq!(pids.len(), 1, "isolated port must have one listener");
+        pids[0]
+    }
+
+    fn process_start_identity(pid: u32) -> String {
+        let output = std::process::Command::new("/bin/ps")
+            .args(["-p", &pid.to_string(), "-o", "lstart="])
+            .env_clear()
+            .output()
+            .expect("ps should inspect the isolated process");
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        let identity = String::from_utf8(output.stdout).unwrap();
+        let identity = identity.trim();
+        assert!(!identity.is_empty());
+        identity.to_string()
+    }
+
+    struct TestChild(std::process::Child);
+
+    impl Drop for TestChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
     }
 
     fn stop_test_sandbox<R: tauri::Runtime>(
@@ -1201,7 +1355,8 @@ esac
         let open_log = tmp.join("open.log");
         let science_call_log = tmp.join("science-call.log");
         let route_config_log = tmp.join("route-config.log");
-        let mock_upstream_port = start_mock_upstream();
+        let mock_upstream = start_mock_upstream();
+        let mock_upstream_port = mock_upstream.port;
         let proxy_port = free_port();
         let sandbox_port = free_port();
         assert_ne!(proxy_port, sandbox_port);
@@ -1270,6 +1425,13 @@ esac
             .unwrap();
         let handle = app.handle().clone();
 
+        let cleanup = RuntimeSmokeCleanup::new(
+            handle.clone(),
+            state.clone(),
+            tmp.clone(),
+            sandbox_port,
+            proxy_port,
+        );
         let first = sandbox_session::one_click_login(
             handle.clone(),
             state.clone(),
@@ -1326,6 +1488,45 @@ esac
         assert_eq!(call_count(&science_call_log, "url"), 3);
         assert_eq!(call_count(&route_config_log, "configure-third-party"), 1);
 
+        let managed_launch_path = config_dir.join("science-managed-launch.v1.json");
+        let managed_launch_metadata = managed_launch_path
+            .symlink_metadata()
+            .expect("managed launch receipt should be committed after a verified start");
+        assert!(managed_launch_metadata.file_type().is_file());
+        assert_eq!(managed_launch_metadata.permissions().mode() & 0o077, 0);
+        assert!(managed_launch_metadata.len() > 0);
+        assert!(managed_launch_metadata.len() <= 16 * 1024);
+
+        let version_before_fresh_probe = call_count(&science_call_log, "--version");
+        let fresh_probe = science::probe_sandbox_runtime_cached(
+            sandbox_port,
+            &science::ScienceVersionCache::default(),
+        )
+        .expect("fresh Science probe should inspect only the isolated runtime candidates");
+        assert_eq!(fresh_probe.0, science::SandboxScienceState::RunningHealthy);
+        let reattached_runtime = fresh_probe
+            .1
+            .expect("managed receipt should recover the exact Science runtime");
+        assert_eq!(reattached_runtime.path, fake_science);
+        assert!(science::runtime_identity_is_current(&reattached_runtime));
+        assert_eq!(
+            fs::read_to_string(fake_state_dir.join("pid")).unwrap(),
+            first_pid
+        );
+        assert_eq!(
+            fs::read_to_string(fake_state_dir.join("serve-count")).unwrap(),
+            "1"
+        );
+        assert_eq!(
+            call_count(&science_call_log, "--version"),
+            version_before_fresh_probe + 1,
+            "fresh Science cache must revalidate the executable version exactly once"
+        );
+        assert_eq!(call_count(&science_call_log, "--version"), 2);
+        assert_eq!(call_count(&science_call_log, "status"), 3);
+        assert_eq!(call_count(&science_call_log, "url"), 3);
+        assert_eq!(call_count(&route_config_log, "configure-third-party"), 1);
+
         super::open_url_inner(&state)
             .expect("first manual open should refresh the one-time Science URL");
         super::open_url_inner(&state)
@@ -1362,8 +1563,8 @@ esac
         let route_check = lifecycle
             .with_serialized(|| sandbox_session::force_third_party_reconcile(&handle, &state));
         assert_eq!(route_check.as_deref(), Ok("Skill 路由已强制核验并同步。"));
-        assert_eq!(call_count(&science_call_log, "--version"), 2);
-        assert_eq!(call_count(&science_call_log, "status"), 3);
+        assert_eq!(call_count(&science_call_log, "--version"), 3);
+        assert_eq!(call_count(&science_call_log, "status"), 4);
         assert_eq!(call_count(&science_call_log, "url"), 8);
         assert_eq!(call_count(&route_config_log, "configure-third-party"), 2);
 
@@ -1414,8 +1615,8 @@ esac
             "focused cold starts ms={cold_start_ms:?} median_ms={}",
             sorted_cold_start_ms[2]
         );
-        assert_eq!(call_count(&science_call_log, "--version"), 2);
-        assert_eq!(call_count(&science_call_log, "status"), 8);
+        assert_eq!(call_count(&science_call_log, "--version"), 3);
+        assert_eq!(call_count(&science_call_log, "status"), 9);
         assert_eq!(call_count(&science_call_log, "url"), 13);
         assert_eq!(call_count(&route_config_log, "configure-third-party"), 2);
         assert_eq!(
@@ -1463,8 +1664,8 @@ esac
             status_before_upgraded_start,
             "confirmed-stop upgraded start should not repeat the explicit preflight probe"
         );
-        assert_eq!(call_count(&science_call_log, "--version"), 3);
-        assert_eq!(call_count(&science_call_log, "status"), 9);
+        assert_eq!(call_count(&science_call_log, "--version"), 4);
+        assert_eq!(call_count(&science_call_log, "status"), 10);
         assert_eq!(call_count(&science_call_log, "url"), 15);
         assert_eq!(call_count(&route_config_log, "configure-third-party"), 3);
         assert_eq!(
@@ -1516,19 +1717,183 @@ esac
             assert!(!body.contains(&secret), "{name} leaked path secret");
         }
 
-        {
-            let mut st = lock(&state);
-            let AppState {
-                sandbox,
-                sandbox_url,
-                science_runtime,
-                ..
-            } = &mut *st;
-            let runtime = science_runtime.clone();
-            let _ = science::stop_sandbox(&handle, sandbox, sandbox_url, runtime.as_ref());
-            st.stop_proxy();
+        let valid_receipt_bytes = fs::read(&managed_launch_path).unwrap();
+        let valid_receipt: serde_json::Value =
+            serde_json::from_slice(&valid_receipt_bytes).unwrap();
+        let valid_receipt_metadata = managed_launch_path.symlink_metadata().unwrap();
+        assert_eq!(
+            valid_receipt_metadata.uid(),
+            unsafe { libc::geteuid() },
+            "managed launch receipt must be owned by the current user"
+        );
+        let listener_pid_before_rejection = fs::read_to_string(fake_state_dir.join("pid")).unwrap();
+        let actual_listener_pid = unique_listener_pid(sandbox_port);
+        assert_eq!(
+            valid_receipt["listener_pid"].as_u64(),
+            Some(actual_listener_pid as u64)
+        );
+        let actual_process_start = process_start_identity(actual_listener_pid);
+        assert_eq!(
+            valid_receipt["process_start"].as_str(),
+            Some(actual_process_start.as_str())
+        );
+        let helper_process = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("controlled non-listener helper should start");
+        let helper_pid = helper_process.id();
+        let helper_process_start = process_start_identity(helper_pid);
+        let _helper_process = TestChild(helper_process);
+        let assert_receipt_rejected = |case: &str| {
+            let version_before = call_count(&science_call_log, "--version");
+            let status_before = call_count(&science_call_log, "status");
+            let observed = science::probe_sandbox_runtime_cached(
+                sandbox_port,
+                &science::ScienceVersionCache::default(),
+            )
+            .unwrap_or_else(|error| panic!("{case} probe should classify safely: {error}"));
+            assert_eq!(
+                observed,
+                (science::SandboxScienceState::Unknown, None),
+                "{case} must reject the managed launch receipt"
+            );
+            assert_eq!(
+                call_count(&science_call_log, "--version"),
+                version_before + 1,
+                "{case} must use a fresh executable identity"
+            );
+            assert_eq!(
+                call_count(&science_call_log, "status"),
+                status_before + 1,
+                "{case} must use one bounded status probe"
+            );
+            assert_eq!(
+                fs::read_to_string(fake_state_dir.join("pid")).unwrap(),
+                listener_pid_before_rejection,
+                "{case} must not signal the listener"
+            );
+            assert!(
+                TcpStream::connect(("127.0.0.1", sandbox_port)).is_ok(),
+                "{case} must leave the listener reachable"
+            );
+            assert_eq!(
+                unique_listener_pid(sandbox_port),
+                actual_listener_pid,
+                "{case} must leave the same kernel listener PID"
+            );
+            assert_eq!(
+                process_start_identity(actual_listener_pid),
+                actual_process_start,
+                "{case} must not replace or recycle the listener process"
+            );
+        };
+
+        let mut receipt_mutants = Vec::new();
+        for field in ["port", "runtime_size", "data_dir_inode"] {
+            let mut mutant = valid_receipt.clone();
+            let value = mutant[field]
+                .as_u64()
+                .unwrap_or_else(|| panic!("{field} must be numeric"));
+            mutant[field] = serde_json::Value::from(value.saturating_add(1));
+            receipt_mutants.push((field, mutant));
         }
-        let _ = fs::remove_dir_all(&tmp);
+        let mut listener_pid_mutant = valid_receipt.clone();
+        listener_pid_mutant["listener_pid"] = serde_json::Value::from(helper_pid);
+        listener_pid_mutant["process_start"] = serde_json::Value::from(helper_process_start);
+        receipt_mutants.push(("non_listener_pid", listener_pid_mutant));
+        let mut process_start_mutant = valid_receipt.clone();
+        process_start_mutant["process_start"] = serde_json::Value::from(format!(
+            "{} tampered",
+            valid_receipt["process_start"].as_str().unwrap()
+        ));
+        receipt_mutants.push(("process_start", process_start_mutant));
+        let mut fingerprint_mutant = valid_receipt.clone();
+        fingerprint_mutant["runtime_sha256"] = serde_json::Value::from("00".repeat(32));
+        receipt_mutants.push(("runtime_sha256", fingerprint_mutant));
+        let mut unknown_field_mutant = valid_receipt.clone();
+        unknown_field_mutant
+            .as_object_mut()
+            .unwrap()
+            .insert("unexpected_field".into(), serde_json::Value::Bool(true));
+        receipt_mutants.push(("unknown_field", unknown_field_mutant));
+
+        for (case, mutant) in receipt_mutants {
+            fs::write(&managed_launch_path, serde_json::to_vec(&mutant).unwrap()).unwrap();
+            fs::set_permissions(&managed_launch_path, fs::Permissions::from_mode(0o600)).unwrap();
+            assert_receipt_rejected(case);
+            fs::write(&managed_launch_path, &valid_receipt_bytes).unwrap();
+        }
+
+        fs::set_permissions(&managed_launch_path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_receipt_rejected("widened_mode");
+        fs::set_permissions(&managed_launch_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let mut oversized_receipt = valid_receipt_bytes.clone();
+        oversized_receipt.resize(16 * 1024 + 1, b' ');
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(&oversized_receipt).is_ok(),
+            "oversized receipt mutant must remain valid JSON"
+        );
+        fs::write(&managed_launch_path, oversized_receipt).unwrap();
+        assert_receipt_rejected("oversized_receipt");
+        fs::write(&managed_launch_path, &valid_receipt_bytes).unwrap();
+
+        let symlink_target = config_dir.join("science-managed-launch-target.json");
+        fs::write(&symlink_target, &valid_receipt_bytes).unwrap();
+        fs::set_permissions(&symlink_target, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::remove_file(&managed_launch_path).unwrap();
+        symlink(&symlink_target, &managed_launch_path).unwrap();
+        assert_receipt_rejected("symlink_receipt");
+        fs::remove_file(&managed_launch_path).unwrap();
+        fs::remove_file(&symlink_target).unwrap();
+        fs::write(&managed_launch_path, &valid_receipt_bytes).unwrap();
+        fs::set_permissions(&managed_launch_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        fs::remove_file(&managed_launch_path)
+            .expect("isolated managed launch receipt should be removable for rejection injection");
+        let version_before_rejected_reattach = call_count(&science_call_log, "--version");
+        let status_before_rejected_reattach = call_count(&science_call_log, "status");
+        let rejected = science::probe_sandbox_runtime_cached(
+            sandbox_port,
+            &science::ScienceVersionCache::default(),
+        )
+        .expect("missing receipt should be a classified Science state");
+        assert_eq!(
+            rejected,
+            (science::SandboxScienceState::Unknown, None),
+            "fresh Science probe must reject a listener after its receipt is removed"
+        );
+        assert_eq!(
+            call_count(&science_call_log, "--version"),
+            version_before_rejected_reattach + 1,
+            "receipt rejection must still revalidate the executable through a fresh cache"
+        );
+        assert_eq!(
+            call_count(&science_call_log, "status"),
+            status_before_rejected_reattach + 1
+        );
+        assert_eq!(
+            fs::read_to_string(fake_state_dir.join("pid")).unwrap(),
+            listener_pid_before_rejection,
+            "rejected adoption must not signal the unproven listener"
+        );
+        assert!(
+            TcpStream::connect(("127.0.0.1", sandbox_port)).is_ok(),
+            "rejected adoption must leave the unproven listener untouched"
+        );
+        assert_eq!(
+            unique_listener_pid(sandbox_port),
+            actual_listener_pid,
+            "missing receipt rejection must leave the same kernel listener PID"
+        );
+        assert_eq!(
+            process_start_identity(actual_listener_pid),
+            actual_process_start,
+            "missing receipt rejection must not recycle the listener process"
+        );
+        cleanup
+            .finish()
+            .expect("isolated Science and Gateway fixtures must cleanly stop");
     }
 
     #[test]
@@ -1546,7 +1911,8 @@ esac
         fs::create_dir_all(&home).unwrap();
         let fake_science = write_test_bins(&bin_dir).canonicalize().unwrap();
         let open_log = tmp.join("open.log");
-        let mock_upstream_port = start_mock_upstream();
+        let mock_upstream = start_mock_upstream();
+        let mock_upstream_port = mock_upstream.port;
         let proxy_port = free_port();
         let sandbox_port = free_port();
         assert_ne!(proxy_port, sandbox_port);
@@ -1612,6 +1978,13 @@ esac
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .unwrap();
         let handle = app.handle().clone();
+        let cleanup = RuntimeSmokeCleanup::new(
+            handle.clone(),
+            state.clone(),
+            tmp.clone(),
+            sandbox_port,
+            proxy_port,
+        );
 
         let first = sandbox_session::one_click_login(
             handle.clone(),
@@ -1675,10 +2048,9 @@ esac
         )
         .expect("one-click should manually recover a dead proxy");
         assert_eq!(recovered["action"], "reopened");
-        assert!(recovered["msg"]
-            .as_str()
-            .unwrap()
-            .starts_with("已用新配置重启代理，Science 沿用不变，已重新打开 Science。"));
+        assert_eq!(recovered["stage"], "complete");
+        assert_eq!(recovered["status"], "ok");
+        assert_eq!(recovered["recovery_status"], "not_needed");
         assert_eq!(recovered["external_skill_installer"]["status"], "WARNING");
         assert!(
             recovered.get("url").is_none(),
@@ -1716,18 +2088,8 @@ esac
             assert!(!body.contains(&secret), "{name} leaked path secret");
         }
 
-        {
-            let mut st = lock(&state);
-            let AppState {
-                sandbox,
-                sandbox_url,
-                science_runtime,
-                ..
-            } = &mut *st;
-            let runtime = science_runtime.clone();
-            let _ = science::stop_sandbox(&handle, sandbox, sandbox_url, runtime.as_ref());
-            st.stop_proxy();
-        }
-        let _ = fs::remove_dir_all(&tmp);
+        cleanup
+            .finish()
+            .expect("isolated recovery fixtures must cleanly stop");
     }
 }
