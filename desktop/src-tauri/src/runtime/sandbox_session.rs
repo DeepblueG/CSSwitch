@@ -177,6 +177,7 @@ struct SandboxSessionTestSeams {
     authority_completion_sync_failure: Option<std::thread::ThreadId>,
     authority_cleanup_parent_sync_failure: Option<std::thread::ThreadId>,
     directory_barrier: Option<(PathBuf, PathBuf)>,
+    snapshot_parent_barrier: Option<(PathBuf, PathBuf)>,
     one_click_capture: Option<(PathBuf, PathBuf, bool, u32, PathBuf)>,
     catalog_failure_port: Option<u16>,
     prior_restart_post_spawn_failure_port: Option<u16>,
@@ -273,6 +274,18 @@ pub(crate) fn test_arm_authority_snapshot_directory_barrier(
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .directory_barrier = Some((source, barrier));
+    SandboxSessionTestSeamGuard
+}
+
+#[cfg(test)]
+fn test_arm_authority_snapshot_parent_barrier(
+    target: PathBuf,
+    barrier: PathBuf,
+) -> SandboxSessionTestSeamGuard {
+    SANDBOX_SESSION_TEST_SEAMS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .snapshot_parent_barrier = Some((target, barrier));
     SandboxSessionTestSeamGuard
 }
 
@@ -1306,6 +1319,196 @@ impl AuthorityTreeSnapshot {
             }
         }
         Ok(directory)
+    }
+
+    fn open_or_create_authority_snapshot_parent(
+        config_dir: &Path,
+        sandbox_home: &Path,
+    ) -> Result<std::fs::File, String> {
+        let expected_parent = sandbox_home
+            .parent()
+            .ok_or("code=authority_snapshot_root_parent_missing")?;
+        if sandbox_home != config_dir.join("sandbox").join("home") {
+            return Err("code=authority_snapshot_root_parent_contract_failed".into());
+        }
+        let config_parent = Self::open_absolute_directory(config_dir).map_err(|error| {
+            format!(
+                "code=authority_snapshot_config_parent_open_failed os_error={}",
+                Self::os_error_code(&error)
+            )
+        })?;
+        let initial_config_parent_metadata = config_parent.metadata().map_err(|error| {
+            format!(
+                "code=authority_snapshot_config_parent_validate_failed os_error={}",
+                Self::os_error_code(&error)
+            )
+        })?;
+        if !initial_config_parent_metadata.is_dir()
+            || initial_config_parent_metadata.uid() != unsafe { libc::geteuid() }
+        {
+            return Err("code=authority_snapshot_config_parent_identity_failed".into());
+        }
+        config_parent
+            .set_permissions(std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| {
+                format!(
+                    "code=authority_snapshot_config_parent_chmod_failed os_error={}",
+                    Self::os_error_code(&error)
+                )
+            })?;
+        let config_parent_metadata = config_parent.metadata().map_err(|error| {
+            format!(
+                "code=authority_snapshot_config_parent_validate_failed os_error={}",
+                Self::os_error_code(&error)
+            )
+        })?;
+        if !config_parent_metadata.is_dir()
+            || config_parent_metadata.uid() != unsafe { libc::geteuid() }
+            || config_parent_metadata.permissions().mode() & 0o777 != 0o700
+        {
+            return Err("code=authority_snapshot_config_parent_identity_failed".into());
+        }
+
+        let parent_name = Self::destination_name(expected_parent)?;
+        match Self::stat_destination_at(&config_parent, &parent_name) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match Self::mkdir_destination_at(
+                    config_parent.as_raw_fd(),
+                    &parent_name,
+                    0o700,
+                ) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(error) => {
+                        return Err(format!(
+                            "code=authority_snapshot_root_parent_create_failed os_error={}",
+                            Self::os_error_code(&error)
+                        ))
+                    }
+                }
+            }
+            Err(error) => {
+                return Err(format!(
+                    "code=authority_snapshot_root_parent_entry_validate_failed os_error={}",
+                    Self::os_error_code(&error)
+                ))
+            }
+        }
+        let parent_entry = Self::stat_destination_at(&config_parent, &parent_name).map_err(
+            |error| {
+                format!(
+                    "code=authority_snapshot_root_parent_entry_validate_failed os_error={}",
+                    Self::os_error_code(&error)
+                )
+            },
+        )?;
+        #[cfg(test)]
+        if let Some(barrier) = SANDBOX_SESSION_TEST_SEAMS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .snapshot_parent_barrier
+            .as_ref()
+            .filter(|(target, _)| target == expected_parent)
+            .map(|(_, barrier)| barrier.clone())
+        {
+            std::fs::create_dir_all(&barrier)
+                .map_err(|error| format!("test-only snapshot parent barrier create failed: {error}"))?;
+            std::fs::write(barrier.join("ready"), b"ready\n")
+                .map_err(|error| format!("test-only snapshot parent barrier arm failed: {error}"))?;
+            let mut released = false;
+            for _ in 0..200 {
+                if barrier.join("release").is_file() {
+                    released = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            if !released {
+                return Err("test-only snapshot parent barrier timed out".into());
+            }
+        }
+        let snapshot_parent =
+            Self::open_directory_at(config_parent.as_raw_fd(), &parent_name).map_err(|error| {
+                format!(
+                    "code=authority_snapshot_root_parent_open_failed os_error={}",
+                    Self::os_error_code(&error)
+                )
+            })?;
+        let initial_snapshot_parent_metadata = snapshot_parent.metadata().map_err(|error| {
+            format!(
+                "code=authority_snapshot_root_parent_validate_failed os_error={}",
+                Self::os_error_code(&error)
+            )
+        })?;
+        if !initial_snapshot_parent_metadata.is_dir()
+            || initial_snapshot_parent_metadata.uid() != unsafe { libc::geteuid() }
+            || !Self::destination_entry_matches_file(
+                &parent_entry,
+                &initial_snapshot_parent_metadata,
+                libc::S_IFDIR,
+            )
+        {
+            return Err("code=authority_snapshot_root_parent_identity_failed".into());
+        }
+        snapshot_parent
+            .set_permissions(std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| {
+                format!(
+                    "code=authority_snapshot_root_parent_chmod_failed os_error={}",
+                    Self::os_error_code(&error)
+                )
+            })?;
+        let snapshot_parent_metadata = snapshot_parent.metadata().map_err(|error| {
+            format!(
+                "code=authority_snapshot_root_parent_validate_failed os_error={}",
+                Self::os_error_code(&error)
+            )
+        })?;
+        if !snapshot_parent_metadata.is_dir()
+            || snapshot_parent_metadata.uid() != unsafe { libc::geteuid() }
+            || snapshot_parent_metadata.permissions().mode() & 0o777 != 0o700
+            || !Self::destination_entry_matches_file(
+                &parent_entry,
+                &snapshot_parent_metadata,
+                libc::S_IFDIR,
+            )
+        {
+            return Err("code=authority_snapshot_root_parent_identity_failed".into());
+        }
+        if !Self::absolute_directory_binding_matches(config_dir, &config_parent).map_err(
+            |error| {
+                format!(
+                    "code=authority_snapshot_config_parent_revalidate_failed os_error={}",
+                    Self::os_error_code(&error)
+                )
+            },
+        )? {
+            return Err("code=authority_snapshot_config_parent_rebound".into());
+        }
+        if !Self::absolute_directory_binding_matches(expected_parent, &snapshot_parent).map_err(
+            |error| {
+                format!(
+                    "code=authority_snapshot_root_parent_revalidate_failed os_error={}",
+                    Self::os_error_code(&error)
+                )
+            },
+        )? {
+            return Err("code=authority_snapshot_root_parent_rebound".into());
+        }
+        snapshot_parent.sync_all().map_err(|error| {
+            format!(
+                "code=authority_snapshot_root_parent_sync_failed os_error={}",
+                Self::os_error_code(&error)
+            )
+        })?;
+        config_parent.sync_all().map_err(|error| {
+            format!(
+                "code=authority_snapshot_config_parent_sync_failed os_error={}",
+                Self::os_error_code(&error)
+            )
+        })?;
+        Ok(snapshot_parent)
     }
 
     fn absolute_directory_binding_matches(
@@ -2846,13 +3049,21 @@ impl AuthorityTreeSnapshot {
     fn restore(&mut self) -> Result<(), String> {
         self.validate_backup_identity()?;
         let parent_path = self.source.parent().ok_or("隔离 authority 没有父目录")?;
-        let parent = Self::open_absolute_directory(parent_path).map_err(|error| {
-            format!(
-                "code=authority_restore_parent_open_failed scope={} os_error={}",
-                self.scope.code(),
-                Self::os_error_code(&error)
-            )
-        })?;
+        let parent = match Self::open_absolute_directory(parent_path) {
+            Ok(parent) => parent,
+            Err(error)
+                if !self.existed && error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                return Ok(())
+            }
+            Err(error) => {
+                return Err(format!(
+                    "code=authority_restore_parent_open_failed scope={} os_error={}",
+                    self.scope.code(),
+                    Self::os_error_code(&error)
+                ))
+            }
+        };
         let source_name = Self::destination_name(&self.source)?;
         Self::remove_current_at(self.scope, &parent, &source_name)?;
         if self.existed {
@@ -3102,27 +3313,11 @@ impl OneClickAuthoritySnapshot {
         let mut cleanup_context =
             AuthorityCleanupContext::new(config_dir, sandbox_home, state)?;
         let backup_root = cleanup_context.root.clone();
-        let snapshot_parent = AuthorityTreeSnapshot::open_absolute_directory(
-            &cleanup_context.expected_snapshot_parent,
-        )
-            .map_err(|error| {
-                format!(
-                    "code=authority_snapshot_root_parent_open_failed os_error={}",
-                    AuthorityTreeSnapshot::os_error_code(&error)
-                )
-            })?;
-        let snapshot_parent_metadata = snapshot_parent.metadata().map_err(|error| {
-            format!(
-                "code=authority_snapshot_root_parent_validate_failed os_error={}",
-                AuthorityTreeSnapshot::os_error_code(&error)
-            )
-        })?;
-        if !snapshot_parent_metadata.is_dir()
-            || snapshot_parent_metadata.file_type().is_symlink()
-            || snapshot_parent_metadata.uid() != unsafe { libc::geteuid() }
-        {
-            return Err("code=authority_snapshot_root_parent_identity_failed".into());
-        }
+        let snapshot_parent =
+            AuthorityTreeSnapshot::open_or_create_authority_snapshot_parent(
+                config_dir,
+                sandbox_home,
+            )?;
         let backup_root_name =
             AuthorityTreeSnapshot::destination_name(&backup_root)?;
         AuthorityTreeSnapshot::mkdir_destination_at(
@@ -5046,7 +5241,8 @@ mod transaction_tests {
         test_arm_authority_snapshot_clone_errno,
         test_arm_authority_snapshot_completion_sync_failure,
         test_arm_authority_snapshot_directory_barrier,
-        test_arm_authority_snapshot_fallback_create_failure, verify_gateway_model_catalog,
+        test_arm_authority_snapshot_fallback_create_failure,
+        test_arm_authority_snapshot_parent_barrier, verify_gateway_model_catalog,
         AuthorityCopyBudget, AuthoritySnapshotCategory, AuthoritySnapshotScope,
         AuthorityTreeSnapshot, OneClickAuthoritySnapshot, PendingCleanupEntry,
         RegisteredAuthorityCleanup, PENDING_CLEANUP_MARKER_FILE,
@@ -5840,11 +6036,200 @@ mod transaction_tests {
     }
 
     #[test]
+    fn fresh_authority_snapshot_parent_is_private_and_cleanup_safe() {
+        let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let tmp = isolated_tmpdir("fresh-authority-parent");
+        let config_dir = tmp.join("config");
+        let sandbox_home = config_dir.join("sandbox/home");
+        let auth_dir = sandbox_home.join(".claude-science");
+        let config = Config::default();
+        config::save_to(&config_dir, &config).unwrap();
+        assert!(
+            !sandbox_home.parent().unwrap().exists(),
+            "fixture must begin before the managed sandbox directory exists"
+        );
+        let state: SharedAppState = Arc::new(Mutex::new(AppState::default()));
+        let mut snapshot = OneClickAuthoritySnapshot::capture(
+            &config_dir,
+            &sandbox_home,
+            &auth_dir,
+            &config,
+            &state,
+        )
+        .expect("fresh config must create a safe private snapshot parent");
+        let parent = sandbox_home.parent().unwrap();
+        let parent_metadata = fs::symlink_metadata(parent).unwrap();
+        assert!(
+            parent_metadata.is_dir()
+                && !parent_metadata.file_type().is_symlink()
+                && parent_metadata.uid() == unsafe { libc::geteuid() }
+                && parent_metadata.permissions().mode() & 0o777 == 0o700,
+            "fresh snapshot parent must be an owned private directory"
+        );
+        let backup_root = snapshot.backup_root.clone();
+        snapshot
+            .restore(&config_dir, &state, ProxyAction::Reused)
+            .expect("fresh missing authority parents must already satisfy prior absence");
+        let manifest = config::read_pending_authority_cleanup_manifest(&config_dir)
+            .unwrap()
+            .unwrap();
+        let manifest: serde_json::Value = serde_json::from_slice(&manifest).unwrap();
+        assert!(
+            parent.is_dir()
+                && !sandbox_home.exists()
+                && !backup_root.exists()
+                && manifest["entries"].as_array().is_some_and(Vec::is_empty),
+            "restore must retain the private sandbox parent, preserve prior HOME absence, and durably clear rollback state"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn fresh_authority_snapshot_parent_refuses_symlink_without_touching_target() {
+        let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let tmp = isolated_tmpdir("fresh-authority-parent-symlink");
+        let config_dir = tmp.join("config");
+        let sandbox_home = config_dir.join("sandbox/home");
+        let auth_dir = sandbox_home.join(".claude-science");
+        let foreign = tmp.join("foreign");
+        let config = Config::default();
+        config::save_to(&config_dir, &config).unwrap();
+        fs::create_dir(&foreign).unwrap();
+        fs::write(foreign.join("canary"), b"must-not-change\n").unwrap();
+        symlink(&foreign, config_dir.join("sandbox")).unwrap();
+        let foreign_before = tree(&foreign);
+        let state: SharedAppState = Arc::new(Mutex::new(AppState::default()));
+        let error = OneClickAuthoritySnapshot::capture(
+            &config_dir,
+            &sandbox_home,
+            &auth_dir,
+            &config,
+            &state,
+        )
+        .err()
+        .expect("a symlinked snapshot parent must fail closed");
+        assert!(
+            error.contains("code=authority_snapshot_root_parent_open_failed"),
+            "unexpected symlink refusal: {error}"
+        );
+        assert_eq!(
+            tree(&foreign),
+            foreign_before,
+            "snapshot parent setup must not follow or mutate the symlink target"
+        );
+        assert!(
+            fs::symlink_metadata(config_dir.join("sandbox"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the rejected symlink must remain untouched"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn fresh_authority_snapshot_parent_refuses_non_sandbox_contract() {
+        let tmp = isolated_tmpdir("fresh-authority-parent-contract");
+        let config_dir = tmp.join("config");
+        let sandbox_home = config_dir.join("foreign-child/home");
+        let auth_dir = sandbox_home.join(".claude-science");
+        let config = Config::default();
+        config::save_to(&config_dir, &config).unwrap();
+        let state: SharedAppState = Arc::new(Mutex::new(AppState::default()));
+        let error = OneClickAuthoritySnapshot::capture(
+            &config_dir,
+            &sandbox_home,
+            &auth_dir,
+            &config,
+            &state,
+        )
+        .err()
+        .expect("only the exact config/sandbox/home layout may create a snapshot parent");
+        assert_eq!(
+            error, "code=authority_snapshot_root_parent_contract_failed",
+            "unexpected non-sandbox contract refusal"
+        );
+        assert!(
+            !config_dir.join("foreign-child").exists(),
+            "contract refusal must not create or mutate an arbitrary config child"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn fresh_authority_snapshot_parent_rebind_fails_before_mutating_replacement() {
+        let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let tmp = isolated_tmpdir("fresh-authority-parent-rebind");
+        let config_dir = tmp.join("config");
+        let sandbox_home = config_dir.join("sandbox/home");
+        let auth_dir = sandbox_home.join(".claude-science");
+        let sandbox_parent = sandbox_home.parent().unwrap().to_path_buf();
+        let displaced = tmp.join("displaced-sandbox");
+        let replacement = tmp.join("replacement");
+        let barrier = tmp.join("barrier");
+        let config = Config::default();
+        config::save_to(&config_dir, &config).unwrap();
+        fs::create_dir(&sandbox_parent).unwrap();
+        fs::set_permissions(&sandbox_parent, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::create_dir(&replacement).unwrap();
+        fs::set_permissions(&replacement, fs::Permissions::from_mode(0o750)).unwrap();
+        fs::write(replacement.join("canary"), b"must-not-change\n").unwrap();
+        let replacement_before = tree(&replacement);
+        let seam =
+            test_arm_authority_snapshot_parent_barrier(sandbox_parent.clone(), barrier.clone());
+        let worker = {
+            let config_dir = config_dir.clone();
+            let sandbox_home = sandbox_home.clone();
+            let auth_dir = auth_dir.clone();
+            let state: SharedAppState = Arc::new(Mutex::new(AppState::default()));
+            thread::spawn(move || {
+                OneClickAuthoritySnapshot::capture(
+                    &config_dir,
+                    &sandbox_home,
+                    &auth_dir,
+                    &config,
+                    &state,
+                )
+            })
+        };
+        for _ in 0..200 {
+            if barrier.join("ready").is_file() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(barrier.join("ready").is_file());
+        fs::rename(&sandbox_parent, &displaced).unwrap();
+        fs::rename(&replacement, &sandbox_parent).unwrap();
+        fs::write(barrier.join("release"), b"release\n").unwrap();
+        let error = worker
+            .join()
+            .unwrap()
+            .err()
+            .expect("snapshot parent replacement must fail closed");
+        drop(seam);
+        assert_eq!(
+            error, "code=authority_snapshot_root_parent_identity_failed",
+            "unexpected snapshot parent rebind failure"
+        );
+        assert_eq!(
+            tree(&sandbox_parent),
+            replacement_before,
+            "identity refusal must occur before chmod or writes reach the replacement directory"
+        );
+        assert!(
+            displaced.is_dir(),
+            "the originally pinned sandbox directory must remain recoverable"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn one_shot_commit_cleanup_fault_is_retried_before_success() {
         let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let tmp = isolated_tmpdir("commit-cleanup-once");
         let config_dir = tmp.join("config");
-        let sandbox_home = tmp.join("sandbox/home");
+        let sandbox_home = config_dir.join("sandbox/home");
         let auth_dir = sandbox_home.join(".claude-science");
         let cleanup_log = tmp.join("cleanup.log");
         fs::create_dir_all(&auth_dir).unwrap();
@@ -6132,7 +6517,7 @@ mod transaction_tests {
         let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let tmp = isolated_tmpdir("partial-capture-cleanup");
         let config_dir = tmp.join("config");
-        let sandbox_home = tmp.join("sandbox/home");
+        let sandbox_home = config_dir.join("sandbox/home");
         let auth_dir = sandbox_home.join(".claude-science");
         let cleanup_log = tmp.join("cleanup.log");
         fs::create_dir_all(&auth_dir).unwrap();
@@ -6193,7 +6578,7 @@ mod transaction_tests {
     fn rollback_refusal_restores_independent_authorities_and_preserves_recovery_snapshot() {
         let tmp = isolated_tmpdir("rollback-refusal");
         let config_dir = tmp.join("config");
-        let sandbox_home = tmp.join("sandbox/home");
+        let sandbox_home = config_dir.join("sandbox/home");
         let auth_dir = sandbox_home.join(".claude-science");
         let private_state = sandbox_home.parent().unwrap().join("state");
         let runtime_dir = config_dir.join("runtime");
