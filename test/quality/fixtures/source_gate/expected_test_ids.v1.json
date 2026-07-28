@@ -586,11 +586,11 @@
         },
         "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::real_installed_app_seed_is_selected_without_mutating_data_dir": {
           "boundary": "installed",
-          "reason": "requires CSSWITCH_REAL_SCIENCE_APP_BIN plus expected version and SHA-256; temporary data-dir and read-only official DMG mount only"
+          "reason": "requires CSSWITCH_REAL_SCIENCE_APP_BIN plus expected version and SHA-256"
         },
         "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::real_updated_runtime_candidate_is_eligible_without_reading_real_science_data": {
           "boundary": "installed",
-          "reason": "requires CSSWITCH_REAL_SCIENCE_BIN plus expected version and SHA-256; fixed updater executable is copied into a temporary HOME"
+          "reason": "requires CSSWITCH_REAL_SCIENCE_BIN plus expected version and SHA-256"
         },
         "desktop/src-tauri/Cargo.toml::lib::runtime::skill_install_bridge::real_science_e2e::isolated_science_accepts_many_csswitch_aliases_and_refreshes_after_restart": {
           "boundary": "installed",
