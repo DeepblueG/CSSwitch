@@ -101,7 +101,7 @@ struct AuthorityTreeSnapshot {
 }
 
 const MAX_AUTHORITY_SNAPSHOT_ENTRIES: usize = 16_384;
-const MAX_AUTHORITY_SNAPSHOT_FILE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_AUTHORITY_SNAPSHOT_FILE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_AUTHORITY_SNAPSHOT_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
 
 #[cfg(test)]
@@ -3051,7 +3051,8 @@ mod transaction_tests {
         advance_runtime_transaction, gateway_model_catalog_timeout_ms,
         prevalidate_one_click_system_ssh, test_arm_authority_snapshot_capture_failure,
         test_arm_authority_snapshot_cleanup_fault, test_arm_authority_snapshot_directory_barrier,
-        verify_gateway_model_catalog, AuthorityTreeSnapshot, OneClickAuthoritySnapshot,
+        verify_gateway_model_catalog, AuthorityCopyBudget, AuthorityTreeSnapshot,
+        OneClickAuthoritySnapshot, MAX_AUTHORITY_SNAPSHOT_FILE_BYTES,
     };
     use crate::config::{self, Config, RuntimeBindingCommit};
     use crate::provider_contracts::ModelPolicy;
@@ -3179,6 +3180,17 @@ mod transaction_tests {
 
     #[test]
     fn authority_snapshot_uses_independent_inodes_and_restores_in_place_mutation() {
+        let mut science_0125_budget = AuthorityCopyBudget::default();
+        AuthorityTreeSnapshot::charge_entry(&mut science_0125_budget, 85_323_776)
+            .expect("Science 0.1.25 Conda cache files below 128 MiB must remain snapshotable");
+        let mut oversized_budget = AuthorityCopyBudget::default();
+        let oversized = AuthorityTreeSnapshot::charge_entry(
+            &mut oversized_budget,
+            MAX_AUTHORITY_SNAPSHOT_FILE_BYTES + 1,
+        )
+        .expect_err("authority files above 128 MiB must remain fail-closed");
+        assert!(oversized.contains("134217728"));
+
         let tmp = isolated_tmpdir("independent-inodes");
         let source = tmp.join("authority");
         let backup = tmp.join("rollback/authority");

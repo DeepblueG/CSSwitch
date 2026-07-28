@@ -4,14 +4,17 @@
     "id": "BUG-083-SCIENCE-UPDATER",
     "version": "v0.8.3",
     "title": "Science standalone updater identity was confused with the DMG seed identity",
-    "summary": "The official 0.1.25 standalone updater reproduced a source failure because CSSwitch required the DMG-seed identifier at the fixed updater path. Source now distinguishes the two official tracks and passes exact 0.1.20/0.1.25 updater and DMG-seed oracles; production artifact/runtime and public release remain pending.",
+    "summary": "The official 0.1.25 standalone updater reproduced a source failure because CSSwitch required the DMG-seed identifier at the fixed updater path. Installed restart then exposed a second 0.1.25 compatibility defect: an 85,323,776-byte Science Conda cache file exceeded the 64 MiB authority snapshot cap. Source now distinguishes the two official tracks and raises only that per-file cap to 128 MiB while retaining the 512 MiB total fail-closed boundary; production artifact/runtime and public release remain pending.",
     "status": "active",
     "owner": "science-runtime",
     "severity": "P1",
     "claim_state": "confirmed",
     "reproduction_state": "source-reproduced",
     "resolution_state": "source-fixed-product-pending",
-    "affected_paths": ["desktop/src-tauri/src/runtime/science.rs"],
+    "affected_paths": [
+      "desktop/src-tauri/src/runtime/science.rs",
+      "desktop/src-tauri/src/runtime/sandbox_session.rs"
+    ],
     "requirement_ids": ["REQ-083-SCIENCE-UPDATER", "REQ-083-EVIDENCE"],
     "change_ids": ["CHG-SCIENCE-UPDATER"],
     "expected_suite_ids": ["SUITE-PRODUCT-SCIENCE-UPDATER", "SUITE-RUST-DESKTOP"],
@@ -31,9 +34,11 @@
       "steps": [
         "Supply the manifest-matched 0.1.25 standalone updater to the exact ignored real-updater test.",
         "Observe the fixed updater candidate rejected because its identifier is com.anthropic.operon rather than the DMG seed's com.anthropic.operon.cli.",
-        "Repair only the standalone updater identity guard, retain the fixed-path and SHA-256 snapshot boundary, and rerun both official versions on both tracks."
+        "Repair only the standalone updater identity guard, retain the fixed-path and SHA-256 snapshot boundary, and rerun both official versions on both tracks.",
+        "Install the first candidate, start and stop Science 0.1.25 through CSSwitch in an isolated HOME, then observe restart fail while snapshotting an 85,323,776-byte Science Conda cache file.",
+        "Raise only the authority per-file cap to 128 MiB, retain the entry and 512 MiB total caps, and prove the observed size passes while 128 MiB plus one byte remains fail-closed."
       ],
-      "observed": "Old source failed the official 0.1.25 updater oracle at candidate eligibility. Repaired source passed official 0.1.20 and 0.1.25 updater snapshots, official 0.1.20 and 0.1.25 DMG-seed installed_app selection, the exact identity parser, and local fail-closed/replacement units.",
+      "observed": "Old source failed the official 0.1.25 updater oracle at candidate eligibility. The first installed candidate later failed a legal Stop All then One-click Start because Science 0.1.25 created an 85,323,776-byte Conda cache file above the 64 MiB authority snapshot cap. Repaired source passes both updater/seed tracks and the 128 MiB authority budget regression while retaining the 512 MiB total fail-closed limit.",
       "not_claimed": ["isolated-test-app", "final-dmg", "installed-final", "live", "signing", "public"]
     },
     "confirmed_facts": [
@@ -50,6 +55,11 @@
       {
         "statement": "Unsafe or mismatched updater candidates remain fail-closed and do not silently fall back to the installed App.",
         "evidence_ref": "desktop/src-tauri/src/runtime/science.rs::runtime::science::tests::locally_validated_updated_runtime_wins_over_app_and_is_fingerprint_bound",
+        "verification_status": "confirmed"
+      },
+      {
+        "statement": "The observed 85,323,776-byte Science 0.1.25 Conda cache file is accepted by the authority snapshot budget, while files above 128 MiB remain fail-closed and the 512 MiB total cap is unchanged.",
+        "evidence_ref": "desktop/src-tauri/src/runtime/sandbox_session.rs::runtime::sandbox_session::transaction_tests::authority_snapshot_uses_independent_inodes_and_restores_in_place_mutation",
         "verification_status": "confirmed"
       }
     ],

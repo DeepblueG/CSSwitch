@@ -140,3 +140,34 @@ the four official executables. It does not yet prove:
 `BUG-083-SCIENCE-UPDATER` is therefore only
 `source-fixed-product-pending`. Any post-commit source fix invalidates later
 artifact, installed, and live evidence and requires a full rerun.
+
+## Installed restart defect found after the first candidate
+
+The first installed `0.8.3` candidate started official Science `0.1.25`
+successfully in an isolated HOME and stopped it through CSSwitch's own
+**Stop All** action. A subsequent **One-click Start** failed during the
+transaction snapshot prepare stage:
+
+```text
+隔离 authority 单文件超过安全上限 67108864 bytes（阶段：prepare）
+```
+
+The exact isolated file was
+`.claude-science/conda/pkgs/cache/mambafm8uj7td3z6`, an `85,323,776`-byte
+Science-created Conda cache file. The failure was classified
+`PRODUCT_DEFECT`: the 64 MiB per-file authority snapshot budget was below a
+normal Science `0.1.25` managed-state file.
+
+The repair raises only the per-file authority snapshot limit to 128 MiB. The
+16,384-entry limit, 512 MiB total limit, symlink rejection, regular-file
+checks, independent-inode copy, streaming I/O, mode preservation, and
+device/inode/size/mtime stability checks remain unchanged. The cache is not
+excluded because late-failure rollback promises the exact prior authority
+object set and bytes. The existing exact-restore regression now additionally
+proves that the observed `85,323,776`-byte size passes and 128 MiB plus one
+byte remains fail-closed.
+
+This post-candidate source repair invalidates the earlier source-gate,
+artifact, installed, and local-mock evidence. A new clean commit and complete
+rerun are required before the installed restart defect can move beyond
+`source-fixed-product-pending`.
