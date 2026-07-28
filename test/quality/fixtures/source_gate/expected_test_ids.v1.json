@@ -973,6 +973,7 @@
         "desktop/src-tauri/Cargo.toml::lib::runtime::skill_install_bridge::real_science_e2e::keeps_signed_host_access_payload_across_pruned_model_rounds",
         "desktop/src-tauri/Cargo.toml::lib::runtime::skill_install_bridge::real_science_e2e::matches_only_tools_declared_by_the_request",
         "desktop/src-tauri/Cargo.toml::lib::runtime::skill_install_bridge::real_science_e2e::recognizes_attached_skill_metadata_without_human_description",
+        "desktop/src-tauri/Cargo.toml::lib::runtime::skill_install_bridge::real_science_e2e::snapshot_button_ref_accepts_unlabelled_button_with_child_text",
         "desktop/src-tauri/Cargo.toml::lib::runtime::skill_install_bridge::tests::corrupt_or_unsafe_route_state_never_counts_as_configured",
         "desktop/src-tauri/Cargo.toml::lib::runtime::skill_install_bridge::tests::failed_route_state_write_does_not_create_success_marker",
         "desktop/src-tauri/Cargo.toml::lib::runtime::skill_install_bridge::tests::merge_is_idempotent_and_updates_only_managed_entry",

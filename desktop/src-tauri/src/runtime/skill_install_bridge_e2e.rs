@@ -1508,6 +1508,85 @@ fn snapshot_line_ref(line: &str) -> Option<String> {
     Some(line[start..end].to_string())
 }
 
+fn snapshot_button_ref_by_child_text(snapshot: &str, text: &str) -> Option<String> {
+    let plain_text = format!("- text: {text}");
+    let quoted_text = format!("- text: \"{text}\"");
+    let lines: Vec<&str> = snapshot.lines().collect();
+    let mut matches = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with("- button [ref=") {
+            continue;
+        }
+        let Some(button_ref) = snapshot_line_ref(line) else {
+            continue;
+        };
+        let button_indent = line.len() - trimmed.len();
+        let mut contains_nested_button = false;
+        let mut contains_target_text = false;
+        for child in &lines[index + 1..] {
+            let child_trimmed = child.trim_start();
+            let child_indent = child.len() - child_trimmed.len();
+            if !child_trimmed.is_empty() && child_indent <= button_indent {
+                break;
+            }
+            if child_trimmed.starts_with("- button") {
+                contains_nested_button = true;
+            }
+            if child_trimmed == plain_text || child_trimmed == quoted_text {
+                contains_target_text = true;
+            }
+        }
+        if contains_target_text && !contains_nested_button {
+            matches.push(button_ref);
+        }
+    }
+    if matches.len() == 1 {
+        matches.pop()
+    } else {
+        None
+    }
+}
+
+#[test]
+fn snapshot_button_ref_accepts_unlabelled_button_with_child_text() {
+    let snapshot = r#"
+- navigation "Sessions" [ref=e1]:
+  - button:
+    - text: Ignored
+  - button "Not New" [ref=e5]:
+    - text: New
+  - button [ref=e2] [cursor=pointer]:
+    - generic [ref=e3]:
+      - text: New
+  - button "Search" [ref=e4]
+"#;
+    assert_eq!(
+        snapshot_button_ref_by_child_text(snapshot, "New").as_deref(),
+        Some("e2")
+    );
+    assert_eq!(snapshot_button_ref_by_child_text(snapshot, "Search"), None);
+
+    let duplicate = r#"
+- button [ref=e1]:
+  - text: New
+- button [ref=e2]:
+  - text: "New"
+"#;
+    assert_eq!(snapshot_button_ref_by_child_text(duplicate, "New"), None);
+
+    let nested = r#"
+- button [ref=outer]:
+  - generic:
+    - button [ref=inner]:
+      - text: New
+"#;
+    assert_eq!(
+        snapshot_button_ref_by_child_text(nested, "New").as_deref(),
+        Some("inner")
+    );
+}
+
 fn wait_control(guard: &ScienceGuard, needle: &str, attempts: usize) -> Result<String, String> {
     for _ in 0..attempts {
         let current = snapshot(guard)?;
@@ -1621,8 +1700,19 @@ fn open_chat(guard: &mut ScienceGuard) -> Result<String, String> {
     }
     let home = wait_control(guard, "button \"Open project Example project\"", 30)?;
     click(guard, &home, "button \"Open project Example project\"")?;
-    let project = wait_control(guard, "button \"New\"", 30)?;
-    click(guard, &project, "button \"New\"")?;
+    let mut new_button = None;
+    for _ in 0..30 {
+        let project = snapshot(guard)?;
+        if let Some(reference) = snapshot_ref(&project, "button \"New\"")
+            .or_else(|| snapshot_button_ref_by_child_text(&project, "New"))
+        {
+            new_button = Some(reference);
+            break;
+        }
+        thread::sleep(Duration::from_millis(300));
+    }
+    let new_button = new_button.ok_or("New 控件未出现")?;
+    playwright_output(guard, &["click", &new_button])?;
     wait_chat_idle(guard, 80)
 }
 
