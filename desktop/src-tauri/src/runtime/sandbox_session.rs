@@ -116,9 +116,9 @@ impl Drop for AuthorityDirectoryStream {
     }
 }
 
-const MAX_AUTHORITY_SNAPSHOT_ENTRIES: usize = 32_768;
+const MAX_AUTHORITY_SNAPSHOT_ENTRIES: usize = 65_536;
 const MAX_AUTHORITY_SNAPSHOT_FILE_BYTES: u64 = 512 * 1024 * 1024;
-const MAX_AUTHORITY_SNAPSHOT_TOTAL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_AUTHORITY_SNAPSHOT_TOTAL_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_AUTHORITY_FULL_COPY_FILE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_AUTHORITY_FULL_COPY_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
 
@@ -5120,14 +5120,14 @@ mod transaction_tests {
         assert!(!oversized.contains('/'));
 
         let mut total_budget = AuthorityCopyBudget::default();
-        for _ in 0..4 {
+        for _ in 0..8 {
             AuthorityTreeSnapshot::charge_entry(
                 &mut total_budget,
                 MAX_AUTHORITY_SNAPSHOT_FILE_BYTES,
                 AuthoritySnapshotScope::ScienceData,
                 AuthoritySnapshotCategory::ScienceRuntime,
             )
-            .expect("exact 2 GiB logical authority boundary must pass");
+            .expect("exact 4 GiB logical authority boundary must pass");
         }
         assert_eq!(total_budget.bytes, MAX_AUTHORITY_SNAPSHOT_TOTAL_BYTES);
         let total_error = AuthorityTreeSnapshot::charge_entry(
@@ -5136,7 +5136,7 @@ mod transaction_tests {
             AuthoritySnapshotScope::ScienceData,
             AuthoritySnapshotCategory::Other,
         )
-        .expect_err("logical authority above 2 GiB must fail closed");
+        .expect_err("logical authority above 4 GiB must fail closed");
         assert!(total_error.contains("code=authority_snapshot_total_limit"));
 
         let mut entry_budget = AuthorityCopyBudget::default();
@@ -5536,12 +5536,35 @@ mod transaction_tests {
 
     #[test]
     fn authority_snapshot_accepts_observed_science_0125_tree_via_independent_clones() {
-        // Installed 0.1.25 metadata-only observation: 1,004,263,008 logical
-        // bytes total and a 187,050,734-byte largest regular file. Keep this
-        // fixture sparse: the regression is about bounded logical authority
-        // and independent snapshot objects, not allocating a GiB in the test.
-        const OBSERVED_TOTAL_BYTES: u64 = 1_004_263_008;
-        const OBSERVED_MAX_FILE_BYTES: u64 = 187_050_734;
+        // Installed 0.1.25 normal-HOME metadata-only observation after Conda
+        // cache growth: 32,519 entries, 2,388,270,307 logical bytes total, and
+        // a 189,776,400-byte largest regular file. Keep this fixture sparse:
+        // the regression is about bounded logical authority and independent
+        // snapshot objects, not allocating GiBs in the test.
+        const OBSERVED_ENTRIES: usize = 32_519;
+        const OBSERVED_TOTAL_BYTES: u64 = 2_388_270_307;
+        const OBSERVED_MAX_FILE_BYTES: u64 = 189_776_400;
+
+        let mut observed_budget = AuthorityCopyBudget::default();
+        let mut observed_remaining = OBSERVED_TOTAL_BYTES;
+        for _ in 0..OBSERVED_ENTRIES {
+            let bytes = if observed_remaining == 0 {
+                0
+            } else {
+                OBSERVED_MAX_FILE_BYTES.min(observed_remaining)
+            };
+            observed_remaining -= bytes;
+            AuthorityTreeSnapshot::charge_entry(
+                &mut observed_budget,
+                bytes,
+                AuthoritySnapshotScope::ScienceData,
+                AuthoritySnapshotCategory::CondaCache,
+            )
+            .expect("observed normal Science 0.1.25 authority budget must pass");
+        }
+        assert_eq!(observed_remaining, 0);
+        assert_eq!(observed_budget.entries, OBSERVED_ENTRIES);
+        assert_eq!(observed_budget.bytes, OBSERVED_TOTAL_BYTES);
 
         let tmp = isolated_tmpdir("science-0125-observed-authority");
         let source = tmp.join("authority");

@@ -4,7 +4,7 @@
     "id": "BUG-083-SCIENCE-UPDATER",
     "version": "v0.8.3",
     "title": "Science 0.1.25 updater and installed authority were incompatible with CSSwitch",
-    "summary": "The official 0.1.25 standalone updater reproduced a source failure because CSSwitch required the DMG-seed identifier at the fixed updater path. Installed restart then exposed three managed-state compatibility defects: an 85,323,776-byte Conda cache file exceeded the first 64 MiB cap, an official runtime Skill symlink was rejected, and the normal 1,004,263,008-byte Science tree exceeded the later 128 MiB per-file and 512 MiB aggregate full-copy bounds. Source now distinguishes the executable tracks, snapshots internal symlinks without following them, and uses bounded APFS copy-on-write clones with a fail-closed byte-copy fallback; production artifact/runtime and public release remain pending.",
+    "summary": "The official 0.1.25 standalone updater reproduced a source failure because CSSwitch required the DMG-seed identifier at the fixed updater path. Installed restart then exposed four managed-state compatibility defects: an 85,323,776-byte Conda cache file exceeded the first 64 MiB cap, an official runtime Skill symlink was rejected, the normal 1,004,263,008-byte Science tree exceeded the later 128 MiB per-file and 512 MiB aggregate full-copy bounds, and subsequent Conda growth crossed the 2 GiB logical-total cap while leaving only 249 entries below the 32,768-entry cap. Source now distinguishes the executable tracks, snapshots internal symlinks without following them, and uses bounded APFS copy-on-write clones with 65,536-entry / 4 GiB logical limits plus a fail-closed 128 MiB-per-file / 512 MiB-per-scope byte-copy fallback; production artifact/runtime and public release remain pending.",
     "status": "active",
     "owner": "science-runtime",
     "severity": "P1",
@@ -27,7 +27,7 @@
         "official 0.1.20 and 0.1.25 manifests and executables",
         "old-source red and repaired-source dual-track green",
         "temporary HOME/data-dir",
-        "normal-HOME metadata-only counts and sizes; no filenames or file contents"
+        "normal-HOME metadata-only aggregate counts and sizes; no filenames or file contents recorded"
       ]
     },
     "reproduction": {
@@ -42,9 +42,11 @@
         "Snapshot internal symlinks as link objects without following them, retain root-symlink rejection, and prove exact link-target restoration.",
         "Install the next candidate, stop it cleanly in the normal HOME, and observe One-click Start fail at the 128 MiB per-file authority limit.",
         "Use a metadata-only probe to measure 14,826 entries, 1,004,263,008 logical regular-file bytes, a 187,050,734-byte maximum file, and two files above 128 MiB.",
-        "Use descriptor-bound APFS clones for independent rollback objects, retain 128 MiB per-file and 512 MiB per-scope limits only for ENOTSUP/EXDEV byte-copy fallback, and prove all safety and restore branches deterministically."
+        "Use descriptor-bound APFS clones for independent rollback objects, retain 128 MiB per-file and 512 MiB per-scope limits only for ENOTSUP/EXDEV byte-copy fallback, and prove all safety and restore branches deterministically.",
+        "Install the candidate and activate Qwen after DeepSeek: scratch passes, but Science restart fails at 2,147,791,174 bytes / 24,974 partial entries before rollback. The complete tree then measures 32,519 entries, 2,388,270,307 bytes, a 189,776,400-byte maximum file, and zero files above 512 MiB.",
+        "Raise the APFS-clone logical limits to 65,536 entries and 4 GiB while retaining the 512 MiB per-file logical limit and the unchanged 128 MiB-per-file / 512 MiB-per-scope byte-copy fallback limits; separately prove the observed entry/byte budget pair and sparse clone/restore byte total."
       ],
-      "observed": "Old source failed the official 0.1.25 updater oracle. Installed candidates then failed legal restart sequences on an 85,323,776-byte Conda cache file, an official runtime Skill symlink, and the normal tree's 187,050,734-byte largest file. Repaired source passes both updater/seed tracks, accepts the observed 1,004,263,008-byte logical tree through independent clones, preserves internal-link exact restoration, and retains bounded fail-closed limits.",
+      "observed": "Old source failed the 0.1.25 updater oracle; installed candidates then failed on an 85,323,776-byte cache file, a runtime symlink, and a 187,050,734-byte file. Later Qwen scratch passed but Science restart crossed 2 GiB at 24,974 partial entries and rolled back. The complete tree measured 32,519 entries, 2,388,270,307 bytes, and a 189,776,400-byte maximum file. Source now uses 65,536-entry / 4 GiB / 512 MiB logical limits while retaining the narrower byte-copy fallback.",
       "not_claimed": ["isolated-test-app", "final-dmg", "installed-final", "live", "signing", "public"]
     },
     "confirmed_facts": [
@@ -64,12 +66,17 @@
         "verification_status": "confirmed"
       },
       {
-        "statement": "The observed normal Science 0.1.25 tree has 14,826 entries, 1,004,263,008 logical regular-file bytes, a 187,050,734-byte maximum file, and two files above 128 MiB; no filenames or file contents were read by the metadata-only probe.",
+        "statement": "An earlier observed normal Science 0.1.25 tree had 14,826 entries, 1,004,263,008 logical regular-file bytes, a 187,050,734-byte maximum file, and two files above 128 MiB; no filenames or file contents were emitted by the metadata-only probe.",
         "evidence_ref": "docs/evidence/investigations/2026-07-28-claude-science-0.1.25-compatibility.md",
         "verification_status": "confirmed"
       },
       {
-        "statement": "Capture and restore traversal are descriptor-bound on both source and destination sides, rollback cleanup registration requires the root identity captured at creation, regular files use APFS clones, and only ENOTSUP or EXDEV may use a byte-copy fallback bounded at 128 MiB per file and 512 MiB per scope; logical trees remain bounded at 32,768 entries, 512 MiB per file, and 2 GiB per scope.",
+        "statement": "After later Conda growth, the 2 GiB failure occurred at 24,974 partially traversed entries and 2,147,791,174 logical bytes; a complete metadata-only follow-up measured 32,519 entries, 26,784 regular files, 2,388,270,307 logical regular-file bytes, a 189,776,400-byte maximum regular file, and zero files above 512 MiB.",
+        "evidence_ref": "docs/evidence/investigations/2026-07-28-claude-science-0.1.25-compatibility.md",
+        "verification_status": "confirmed"
+      },
+      {
+        "statement": "Capture and restore traversal are descriptor-bound on both source and destination sides, rollback cleanup registration requires the root identity captured at creation, regular files use APFS clones, and only ENOTSUP or EXDEV may use a byte-copy fallback bounded at 128 MiB per file and 512 MiB per scope; logical trees remain bounded at 65,536 entries, 512 MiB per file, and 4 GiB per scope.",
         "evidence_ref": "desktop/src-tauri/src/runtime/sandbox_session.rs::runtime::sandbox_session::transaction_tests::authority_snapshot_uses_independent_inodes_and_restores_in_place_mutation",
         "verification_status": "confirmed"
       },

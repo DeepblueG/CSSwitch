@@ -183,7 +183,7 @@ root `lstat`.
 
 The next installed candidate passed the isolated-HOME restart sequence but
 failed during a normal-HOME **One-click Start** with the 128 MiB limit. A
-metadata-only probe (no filenames or file contents) measured the normal
+metadata-only aggregate probe (no filenames or file contents recorded) measured the normal
 Science data tree at 14,826 entries and 1,004,263,008 logical regular-file
 bytes, with a 187,050,734-byte largest file and two files above 128 MiB. Merely
 raising the per-file limit would not be sufficient because the same normal
@@ -204,8 +204,32 @@ authority mutation may begin. Only
 per-file and 512 MiB per-scope full-copy limits. Other clone errors fail closed,
 and a failed fallback unlinks the pinned destination entry.
 
-Logical authority remains bounded per scope at 32,768 entries, 512 MiB per
-regular file, and 2 GiB total. Internal symlinks remain copied as link objects;
+The next normal-HOME live profile switch crossed the 2 GiB logical-total
+boundary after Science's Conda cache grew. A metadata-only diagnostic reported
+24,974 entries and 2,147,791,174 logical bytes, only 307,526 bytes above the
+old cap, when the bounded walker stopped at the first total-limit violation.
+The switch's provider scratch request passed, but the subsequent Science
+model-binding restart failed closed with
+`authority_snapshot_total_limit` and rolled back to the prior profile. This is
+classified `PRODUCT_DEFECT`, not an upstream provider failure.
+
+A complete follow-up metadata probe measured 32,519 entries, 26,784 regular
+files, 2,388,270,307 logical regular-file bytes, and a 189,776,400-byte maximum
+regular file; zero files exceeded the independent 512 MiB per-file bound. The
+old 32,768-entry limit consequently had only 249 entries of headroom.
+
+The logical per-scope limits are therefore raised to 65,536 entries and 4 GiB,
+while the independent 512 MiB per-regular-file limit remains. The APFS clone
+path does not duplicate those logical bytes physically. More importantly, the
+non-clone fallback remains limited to 128 MiB per file and 512 MiB per scope,
+so this compatibility change does not authorize a multi-GiB byte-copy fallback.
+The budget regression covers the observed 32,519-entry / 2,388,270,307-byte
+pair. A separate sparse clone-and-restore regression covers the observed
+logical byte total without allocating the payload physically. Boundary tests
+prove exactly 65,536 entries and 4 GiB pass while either limit plus one still
+fails closed.
+
+Internal symlinks remain copied as link objects;
 authority-root symlinks and special files remain rejected. User-visible walker
 diagnostics report stable code, scope, category, numeric bounds, and errno only,
 without absolute paths or entry names. Focused tests cover the observed 0.1.25
