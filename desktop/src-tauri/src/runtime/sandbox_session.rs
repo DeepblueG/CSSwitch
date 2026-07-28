@@ -952,9 +952,15 @@ impl AuthorityTreeSnapshot {
             ));
         }
         let existed = match std::fs::symlink_metadata(&source) {
-            Ok(_) => {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    return Err(format!(
+                        "隔离 authority 根 {} 是符号链接，拒绝建立事务快照",
+                        source.display()
+                    ));
+                }
                 let mut budget = AuthorityCopyBudget::default();
-                Self::copy_tree(&source, &backup, &mut budget)?;
+                Self::copy_tree(&source, &backup, &mut budget, false)?;
                 true
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
@@ -1012,14 +1018,41 @@ impl AuthorityTreeSnapshot {
         source: &Path,
         backup: &Path,
         budget: &mut AuthorityCopyBudget,
+        allow_symlink: bool,
     ) -> Result<(), String> {
         let metadata = std::fs::symlink_metadata(source)
             .map_err(|error| format!("无法检查隔离 authority {}：{error}", source.display()))?;
         if metadata.file_type().is_symlink() {
-            return Err(format!(
-                "隔离 authority {} 包含符号链接，拒绝建立事务快照",
-                source.display()
-            ));
+            if !allow_symlink {
+                return Err(format!(
+                    "隔离 authority 根 {} 是符号链接，拒绝建立事务快照",
+                    source.display()
+                ));
+            }
+            let target = std::fs::read_link(source)
+                .map_err(|error| format!("无法读取隔离 authority 符号链接：{error}"))?;
+            let target_bytes = target.as_os_str().as_encoded_bytes();
+            Self::charge_entry(budget, target_bytes.len() as u64)?;
+            let parent = backup.parent().ok_or("隔离 authority 备份路径没有父目录")?;
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("无法创建隔离 authority 备份目录：{error}"))?;
+            std::os::unix::fs::symlink(&target, backup)
+                .map_err(|error| format!("无法创建隔离 authority 符号链接快照：{error}"))?;
+            let final_metadata = std::fs::symlink_metadata(source)
+                .map_err(|error| format!("无法复核隔离 authority 符号链接：{error}"))?;
+            let final_target = std::fs::read_link(source)
+                .map_err(|error| format!("无法复核隔离 authority 符号链接目标：{error}"))?;
+            if !final_metadata.file_type().is_symlink()
+                || final_metadata.dev() != metadata.dev()
+                || final_metadata.ino() != metadata.ino()
+                || final_metadata.len() != metadata.len()
+                || final_metadata.mtime() != metadata.mtime()
+                || final_metadata.mtime_nsec() != metadata.mtime_nsec()
+                || final_target != target
+            {
+                return Err("隔离 authority 符号链接在快照期间发生变化".into());
+            }
+            return Ok(());
         }
         if metadata.is_file() {
             Self::charge_entry(budget, metadata.len())?;
@@ -1115,7 +1148,12 @@ impl AuthorityTreeSnapshot {
             }
         }
         for child in children {
-            Self::copy_tree(&child.path(), &backup.join(child.file_name()), budget)?;
+            Self::copy_tree(
+                &child.path(),
+                &backup.join(child.file_name()),
+                budget,
+                true,
+            )?;
         }
         let mut final_children = std::fs::read_dir(source)
             .map_err(|error| format!("无法复核隔离 authority 目录：{error}"))?
@@ -1179,7 +1217,7 @@ impl AuthorityTreeSnapshot {
             std::fs::create_dir_all(parent)
                 .map_err(|error| format!("无法创建隔离 authority 恢复目录：{error}"))?;
             let mut budget = AuthorityCopyBudget::default();
-            Self::copy_tree(&self.backup, &self.source, &mut budget)
+            Self::copy_tree(&self.backup, &self.source, &mut budget, false)
                 .map_err(|error| format!("无法恢复隔离 authority：{error}"))?;
             Self::sync_directory(parent)?;
         }
@@ -3198,6 +3236,7 @@ mod transaction_tests {
         fs::create_dir(tmp.join("rollback")).unwrap();
         fs::write(source.join("database.db"), b"prior-database-bytes\n").unwrap();
         fs::write(source.join("nested/state.json"), br#"{"prior":true}"#).unwrap();
+        symlink("state.json", source.join("nested/state-link")).unwrap();
         fs::set_permissions(&source, fs::Permissions::from_mode(0o700)).unwrap();
         fs::set_permissions(
             source.join("database.db"),
@@ -3242,6 +3281,8 @@ mod transaction_tests {
         )
         .unwrap();
         fs::remove_file(source.join("nested/state.json")).unwrap();
+        fs::remove_file(source.join("nested/state-link")).unwrap();
+        symlink("new-authority", source.join("nested/state-link")).unwrap();
         fs::write(source.join("nested/new-authority"), b"must disappear\n").unwrap();
         fs::create_dir(source.join("new-directory")).unwrap();
 
@@ -3251,6 +3292,30 @@ mod transaction_tests {
             before,
             "restore must recover exact bytes, modes, empty directories, and object set"
         );
+        let linked_target = tmp.join("linked-authority-target");
+        let linked_source = tmp.join("linked-authority-root");
+        fs::create_dir(&linked_target).unwrap();
+        symlink(&linked_target, &linked_source).unwrap();
+        let linked_error = AuthorityTreeSnapshot::capture(
+            linked_source,
+            tmp.join("rollback/linked-authority-root"),
+        )
+        .err()
+        .expect("authority root symlinks must remain fail-closed");
+        assert!(linked_error.contains("authority 根"));
+
+        let restore_source = tmp.join("restore-authority");
+        let restore_backup = tmp.join("rollback/restore-authority");
+        fs::create_dir(&restore_source).unwrap();
+        fs::write(restore_source.join("state.json"), b"prior\n").unwrap();
+        let mut restore_snapshot =
+            AuthorityTreeSnapshot::capture(restore_source, restore_backup.clone()).unwrap();
+        fs::remove_dir_all(&restore_backup).unwrap();
+        symlink(&linked_target, &restore_backup).unwrap();
+        let restore_error = restore_snapshot
+            .restore()
+            .expect_err("restore backup roots that become symlinks must remain fail-closed");
+        assert!(restore_error.contains("authority 根"));
         let _ = fs::remove_dir_all(tmp);
     }
 

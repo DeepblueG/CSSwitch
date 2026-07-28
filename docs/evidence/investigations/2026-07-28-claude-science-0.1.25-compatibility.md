@@ -159,13 +159,27 @@ Science-created Conda cache file. The failure was classified
 normal Science `0.1.25` managed-state file.
 
 The repair raises only the per-file authority snapshot limit to 128 MiB. The
-16,384-entry limit, 512 MiB total limit, symlink rejection, regular-file
-checks, independent-inode copy, streaming I/O, mode preservation, and
+16,384-entry limit, 512 MiB total limit, authority-root symlink rejection,
+regular-file checks, independent-inode copy, streaming I/O, mode preservation, and
 device/inode/size/mtime stability checks remain unchanged. The cache is not
 excluded because late-failure rollback promises the exact prior authority
 object set and bytes. The existing exact-restore regression now additionally
 proves that the observed `85,323,776`-byte size passes and 128 MiB plus one
 byte remains fail-closed.
+
+The next installed retry crossed that limit and exposed a second normal
+Science runtime object:
+`.claude-science/runtime/0.1.25-release/agents/operon/.claude/skills/alphafold2`
+is a relative symlink to `../../../../skills/alphafold2`. The old snapshot
+walker rejected every symlink, including this package-owned runtime link.
+The repair keeps authority *root* symlinks fail-closed and never follows an
+internal link. It snapshots an internal symlink as an object using `lstat` and
+`read_link`, charges its target bytes to the existing budgets, recreates the
+link in the private backup, and rechecks device, inode, size, timestamps, and
+target stability. The exact-restore regression now covers a mutated relative
+link and separately proves that both a symlinked live authority root and a
+private backup root replaced by a symlink are still rejected at the walker's
+root `lstat`.
 
 This post-candidate source repair invalidates the earlier source-gate,
 artifact, installed, and local-mock evidence. A new clean commit and complete
