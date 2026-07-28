@@ -488,6 +488,7 @@
         "desktop/src-tauri/Cargo.toml::lib::commands::runtime::tests::isolated_ssh_prevalidation_precedes_oauth_mutation",
         "desktop/src-tauri/Cargo.toml::lib::runtime::sandbox_session::transaction_tests::enabled_ssh_prevalidation_rejects_unwritable_science_authority",
         "desktop/src-tauri/Cargo.toml::lib::runtime::sandbox_session::transaction_tests::reuse_system_ssh_false_does_not_require_packaged_wrapper_or_system_home",
+        "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::real_installed_app_seed_is_selected_without_mutating_data_dir",
         "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::real_updated_runtime_candidate_is_eligible_without_reading_real_science_data",
         "desktop/src-tauri/Cargo.toml::lib::runtime::skill_install_bridge::real_science_e2e::isolated_science_accepts_many_csswitch_aliases_and_refreshes_after_restart",
         "desktop/src-tauri/Cargo.toml::lib::runtime::skill_install_bridge::real_science_e2e::isolated_science_installs_attaches_and_persists_external_skill",
@@ -583,9 +584,13 @@
           "boundary": "acceptance",
           "reason": "explicit Acceptance-boundary optional SSH feature-off smoke; temp HOME only"
         },
+        "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::real_installed_app_seed_is_selected_without_mutating_data_dir": {
+          "boundary": "installed",
+          "reason": "requires CSSWITCH_REAL_SCIENCE_APP_BIN plus expected version and SHA-256; temporary data-dir and read-only official DMG mount only"
+        },
         "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::real_updated_runtime_candidate_is_eligible_without_reading_real_science_data": {
           "boundary": "installed",
-          "reason": "requires CSSWITCH_REAL_SCIENCE_BIN pointing to an installed updater executable"
+          "reason": "requires CSSWITCH_REAL_SCIENCE_BIN plus expected version and SHA-256; fixed updater executable is copied into a temporary HOME"
         },
         "desktop/src-tauri/Cargo.toml::lib::runtime::skill_install_bridge::real_science_e2e::isolated_science_accepts_many_csswitch_aliases_and_refreshes_after_restart": {
           "boundary": "installed",
@@ -935,6 +940,8 @@
         "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::managed_launch_receipt_growth_read_is_hard_bounded",
         "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::managed_launch_tombstone_restore_is_atomic_no_clobber",
         "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::managed_launch_tombstone_restore_uses_no_clobber_primitive",
+        "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::official_updater_identity_parser_distinguishes_standalone_from_dmg_seed",
+        "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::real_installed_app_seed_is_selected_without_mutating_data_dir",
         "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::real_updated_runtime_candidate_is_eligible_without_reading_real_science_data",
         "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::replacing_installed_app_uses_new_version_without_mutating_cache_or_data_dir",
         "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::runtime_selection_requires_explicit_one_shot_cache_choice",

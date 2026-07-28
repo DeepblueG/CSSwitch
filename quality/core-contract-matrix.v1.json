@@ -382,15 +382,18 @@
       "user_entry": "Start using the installed Science application",
       "preconditions": ["fixed installed executable candidate", "isolated CSSwitch data-dir"],
       "fixture": "safe local selection with no credential reads",
-      "registered_test_ids": [],
-      "planned_test_ids": ["installed_science_selection_core"],
+      "registered_test_ids": [
+        "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::real_installed_app_seed_is_selected_without_mutating_data_dir",
+        "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::replacing_installed_app_uses_new_version_without_mutating_cache_or_data_dir"
+      ],
+      "planned_test_ids": [],
       "suite_ids": ["SUITE-RUST-DESKTOP"],
       "gate_ids": ["GATE-SCIENCE-MACHO", "GATE-SCIENCE-REATTACH", "GATE-SOURCE"],
       "positive_oracle": "owner, mode, Mach-O, identifier, fingerprint, and data-dir checks bind the chosen executable",
       "negative_oracle": "unsafe or replaced candidate fails closed",
       "required_evidence_layers": ["source", "artifact", "runtime"],
-      "current_coverage": "strong isolated selection units; real candidate test ignored",
-      "current_gap": "production-artifact installed-branch evidence pending",
+      "current_coverage": "official 0.1.20 and 0.1.25 DMG-seed executables passed the exact installed_app source oracle without data-dir mutation; local replacement and fingerprint units pass",
+      "current_gap": "fixed exact-HEAD artifact and installed production runtime evidence pending",
       "blocking_condition": "candidate identity is missing, contradictory, or inferred from path alone"
     },
     {
@@ -398,15 +401,20 @@
       "user_entry": "Start when an official-updater executable already exists",
       "preconditions": ["candidate exists before test", "no download or update"],
       "fixture": "same-open content-addressed snapshot selection",
-      "registered_test_ids": [],
-      "planned_test_ids": ["existing_official_updater_snapshot_selection"],
+      "registered_test_ids": [
+        "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::official_updater_identity_parser_distinguishes_standalone_from_dmg_seed",
+        "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::real_updated_runtime_candidate_is_eligible_without_reading_real_science_data",
+        "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::historical_updated_snapshots_remain_recoverable_after_source_replacement",
+        "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::locally_validated_updated_runtime_wins_over_app_and_is_fingerprint_bound"
+      ],
+      "planned_test_ids": [],
       "suite_ids": ["SUITE-RUST-DESKTOP"],
       "gate_ids": ["GATE-SCIENCE-UPDATER", "GATE-SCIENCE-MACHO", "GATE-SOURCE"],
       "positive_oracle": "safe updater candidate becomes a private read-only SHA-256 snapshot and that exact snapshot executes",
       "negative_oracle": "detected but unsafe candidate does not silently fall back",
       "required_evidence_layers": ["source", "artifact", "runtime"],
-      "current_coverage": "source selection units",
-      "current_gap": "host candidate is conditional and current real test is ignored",
+      "current_coverage": "old source failed the official 0.1.25 updater identity oracle; repaired source passed manifest-matched 0.1.20 and 0.1.25 standalone updater snapshots plus fail-closed and replacement units",
+      "current_gap": "fixed exact-HEAD artifact and installed official_updated runtime evidence pending",
       "blocking_condition": "existing candidate is NOT-RUN or unsafe candidate falls back"
     },
     {
@@ -414,15 +422,18 @@
       "user_entry": "Start when no updater candidate exists",
       "preconditions": ["candidate absence established without scanning other state"],
       "fixture": "installed App branch",
-      "registered_test_ids": [],
-      "planned_test_ids": ["updater_absent_uses_installed_science"],
+      "registered_test_ids": [
+        "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::real_installed_app_seed_is_selected_without_mutating_data_dir",
+        "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::runtime_selection_requires_explicit_one_shot_cache_choice"
+      ],
+      "planned_test_ids": [],
       "suite_ids": ["SUITE-RUST-DESKTOP"],
       "gate_ids": ["GATE-SCIENCE-UPDATER", "GATE-SOURCE"],
       "positive_oracle": "records NOT-APPLICABLE candidate absent and completely validates the installed branch",
       "negative_oracle": "no fake updater snapshot is manufactured",
       "required_evidence_layers": ["source", "artifact", "runtime"],
-      "current_coverage": "selection fallback units",
-      "current_gap": "final artifact evidence pending",
+      "current_coverage": "both official DMG seeds passed installed_app selection and local absent-updater selection units pass without manufacturing a snapshot",
+      "current_gap": "fixed final artifact and installed runtime evidence pending",
       "blocking_condition": "absence is confused with PASS or installed branch is incomplete"
     },
     {

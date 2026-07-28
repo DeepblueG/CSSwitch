@@ -26,11 +26,15 @@
       "kind": "add",
       "required_suite_ids": [
         "SUITE-QUALITY-METADATA",
+        "SUITE-QUALITY-FOCUSED",
+        "SUITE-QUALITY-INVENTORY",
         "SUITE-RUST-GATEWAY",
         "SUITE-PY-LOOPBACK"
       ],
       "required_gate_ids": [
         "GATE-QUALITY-META",
+        "GATE-QUALITY-PR",
+        "GATE-QUALITY-RELEASE",
         "GATE-SOURCE",
         "GATE-TOOL-ARG-EXCLUSIVITY"
       ],

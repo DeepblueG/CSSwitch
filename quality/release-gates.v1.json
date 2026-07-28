@@ -168,7 +168,7 @@
       "profile": "product",
       "status": "active",
       "owner": "science-runtime",
-      "reason": "Future isolated product gate; not executed by the quality kernel node.",
+      "reason": "The standalone updater identity defect is source-reproduced and source-fixed against official 0.1.20/0.1.25 updater and DMG-seed executables. The product gate remains open until the fixed exact-HEAD artifact and installed/live runtime layers pass.",
       "expiry": "2026-10-01",
       "replacement_id": null,
       "evidence_layer": "source-test",

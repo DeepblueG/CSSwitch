@@ -309,15 +309,17 @@
       "id": "REQ-083-SCIENCE-UPDATER",
       "version": "v0.8.3",
       "title": "Science check-only and CSSwitch updater boundary",
-      "description": "The Science check-only path and CSSwitch updater selection must remain distinct, fail closed on invalid candidates, and never be recorded as an already-fixed update contract.",
+      "description": "Science check-only behavior, the standalone updater executable, and the DMG-seeded installed App must remain distinct. The fixed updater path must validate the standalone identity, fail closed on invalid candidates, and commit only the exact same-open SHA-256 snapshot.",
       "status": "active",
       "owner": "science-runtime",
       "depends_on": [
         "REQ-083-EVIDENCE"
       ],
       "acceptance_conditions": [
-        "Record check-only versus updater behavior separately.",
-        "Keep executable identity, selection, and update evidence distinct.",
+        "Record check-only, standalone updater, and DMG-seed behavior separately.",
+        "Require exact standalone updater identifier and Team ID without treating embedded metadata as cryptographic provenance.",
+        "Bind official_updated selection to a stable same-open SHA-256 content-addressed snapshot and reject unsafe candidates without installed-App fallback.",
+        "Prove installed_app selection separately against the DMG seed without mutating the Science data-dir.",
         "Do not promote source checks to installed or live Science proof."
       ],
       "evidence_boundary": {
@@ -334,7 +336,7 @@
         ],
         "basis": [
           ".agents/rules/science-runtime.md",
-          "product issue registration only"
+          "official 0.1.20 and 0.1.25 updater and DMG-seed dual-track source oracles"
         ]
       },
       "retirement": null

@@ -24,7 +24,7 @@ pub(crate) const SCIENCE_BIN: &str =
 pub(crate) const SCIENCE_DOWNLOAD_URL: &str = "https://claude.com/download";
 pub(crate) const CACHED_ONCE_CHOICE: &str = "cached_once";
 const OFFICIAL_UPDATED_RUNTIME_RELATIVE: &str = ".claude-science/bin/claude-science";
-const OFFICIAL_SCIENCE_IDENTIFIER: &str = "com.anthropic.operon.cli";
+const OFFICIAL_UPDATED_SCIENCE_IDENTIFIER: &str = "com.anthropic.operon";
 const OFFICIAL_SCIENCE_TEAM_ID: &str = "Q6L2SF6YDW";
 const MIN_SCIENCE_BINARY_SIZE: u64 = 1024 * 1024;
 const MAX_SCIENCE_BINARY_SIZE: u64 = 512 * 1024 * 1024;
@@ -311,12 +311,22 @@ fn is_explicit_executable_file(path: &Path) -> bool {
     is_executable_file(path)
 }
 
+fn embedded_identity_metadata_matches(details: &str, identifier: &str, team_id: &str) -> bool {
+    details
+        .lines()
+        .any(|line| line == format!("Identifier={identifier}"))
+        && details
+            .lines()
+            .any(|line| line == format!("TeamIdentifier={team_id}"))
+}
+
 fn official_updated_identity_metadata_matches(path: &Path) -> bool {
-    // Current upstream Science updater binaries expose the same embedded
-    // identifier and Team ID as the App seed, but fail strict cryptographic
-    // `codesign --verify`. Treat these fields only as format/identity guards;
-    // the local trust boundary is the fixed user-owned path plus SHA-256-bound
-    // runtime identity below, not a claim of verified official provenance.
+    // The standalone updater executable uses `com.anthropic.operon`, while the
+    // executable seeded inside the DMG App uses `com.anthropic.operon.cli`.
+    // Both currently fail strict cryptographic `codesign --verify`. Treat the
+    // standalone fields only as format/identity guards; the local trust
+    // boundary is the fixed user-owned path plus SHA-256-bound runtime identity
+    // below, not a claim of verified official provenance.
     let output = Command::new("/usr/bin/codesign")
         .args(["-d", "--verbose=4"])
         .arg(path)
@@ -329,12 +339,11 @@ fn official_updated_identity_metadata_matches(path: &Path) -> bool {
         return false;
     }
     let details = String::from_utf8_lossy(&output.stderr);
-    details
-        .lines()
-        .any(|line| line == format!("Identifier={OFFICIAL_SCIENCE_IDENTIFIER}"))
-        && details
-            .lines()
-            .any(|line| line == format!("TeamIdentifier={OFFICIAL_SCIENCE_TEAM_ID}"))
+    embedded_identity_metadata_matches(
+        &details,
+        OFFICIAL_UPDATED_SCIENCE_IDENTIFIER,
+        OFFICIAL_SCIENCE_TEAM_ID,
+    )
 }
 
 fn file_is_macho(path: &Path) -> bool {
@@ -2243,7 +2252,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        classify_known_runtime_state, classify_sandbox_state, first_http_url, managed_launch_path,
+        classify_known_runtime_state, classify_sandbox_state, embedded_identity_metadata_matches,
+        fingerprint_sha256_hex, first_http_url, managed_launch_path,
         official_updated_science_bin_for_home, official_updated_snapshot_for_home,
         official_updated_snapshot_from_process_paths, parse_unique_listener_pid,
         probe_sandbox_runtime_cached, read_managed_launch_record,
@@ -2257,7 +2267,35 @@ mod tests {
         settings_change_needs_teardown, stop_runtime_from_probe, trusted_science_status,
         SandboxScienceState, ScienceRuntimeIdentity, ScienceRuntimeSource, ScienceVersionCache,
         CACHED_ONCE_CHOICE, MANAGED_LAUNCH_LAST_READ_BYTES, MAX_MANAGED_LAUNCH_BYTES,
+        OFFICIAL_SCIENCE_TEAM_ID, OFFICIAL_UPDATED_SCIENCE_IDENTIFIER,
     };
+
+    #[test]
+    fn official_updater_identity_parser_distinguishes_standalone_from_dmg_seed() {
+        let standalone = "Identifier=com.anthropic.operon\nTeamIdentifier=Q6L2SF6YDW\n";
+        assert!(embedded_identity_metadata_matches(
+            standalone,
+            OFFICIAL_UPDATED_SCIENCE_IDENTIFIER,
+            OFFICIAL_SCIENCE_TEAM_ID,
+        ));
+
+        let dmg_seed = "Identifier=com.anthropic.operon.cli\nTeamIdentifier=Q6L2SF6YDW\n";
+        assert!(!embedded_identity_metadata_matches(
+            dmg_seed,
+            OFFICIAL_UPDATED_SCIENCE_IDENTIFIER,
+            OFFICIAL_SCIENCE_TEAM_ID,
+        ));
+        assert!(!embedded_identity_metadata_matches(
+            "Identifier=com.anthropic.operon\nTeamIdentifier=WRONG\n",
+            OFFICIAL_UPDATED_SCIENCE_IDENTIFIER,
+            OFFICIAL_SCIENCE_TEAM_ID,
+        ));
+        assert!(!embedded_identity_metadata_matches(
+            "prefix-Identifier=com.anthropic.operon\nTeamIdentifier=Q6L2SF6YDW-suffix\n",
+            OFFICIAL_UPDATED_SCIENCE_IDENTIFIER,
+            OFFICIAL_SCIENCE_TEAM_ID,
+        ));
+    }
 
     #[test]
     fn managed_launch_tombstone_restore_uses_no_clobber_primitive() {
@@ -3115,12 +3153,14 @@ esac
     }
 
     #[test]
-    #[ignore = "requires CSSWITCH_REAL_SCIENCE_BIN pointing to an installed updater executable"]
+    #[ignore = "requires CSSWITCH_REAL_SCIENCE_BIN plus expected version and SHA-256"]
     fn real_updated_runtime_candidate_is_eligible_without_reading_real_science_data(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let source = std::env::var_os("CSSWITCH_REAL_SCIENCE_BIN")
             .map(std::path::PathBuf::from)
             .ok_or("CSSWITCH_REAL_SCIENCE_BIN is required")?;
+        let expected_version = std::env::var("CSSWITCH_EXPECTED_SCIENCE_VERSION")?;
+        let expected_sha256 = std::env::var("CSSWITCH_EXPECTED_SCIENCE_SHA256")?;
         let root = unique_temp_dir("science-real-updated")?;
         let home = root.join("home");
         let candidate = home.join(".claude-science/bin/claude-science");
@@ -3141,6 +3181,11 @@ esac
         .expect("real updater snapshot");
         assert_ne!(snapshot, candidate);
         assert_eq!(fs::read(&snapshot)?, fs::read(&candidate)?);
+        let expected_snapshot_name = format!("claude-science-{expected_sha256}");
+        assert_eq!(
+            snapshot.file_name().and_then(|name| name.to_str()),
+            Some(expected_snapshot_name.as_str())
+        );
         let isolated_home = root.join("isolated-home");
         fs::create_dir_all(&isolated_home)?;
         let output = std::process::Command::new(&snapshot)
@@ -3148,7 +3193,45 @@ esac
             .env("HOME", &isolated_home)
             .output()?;
         assert!(output.status.success());
-        assert!(String::from_utf8(output.stdout)?.starts_with("claude-science "));
+        assert_eq!(
+            String::from_utf8(output.stdout)?.trim(),
+            format!("claude-science {expected_version} (release, public)")
+        );
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires CSSWITCH_REAL_SCIENCE_APP_BIN plus expected version and SHA-256"]
+    fn real_installed_app_seed_is_selected_without_mutating_data_dir(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let app_bin = std::env::var_os("CSSWITCH_REAL_SCIENCE_APP_BIN")
+            .map(std::path::PathBuf::from)
+            .ok_or("CSSWITCH_REAL_SCIENCE_APP_BIN is required")?;
+        let expected_version = std::env::var("CSSWITCH_EXPECTED_SCIENCE_VERSION")?;
+        let expected_sha256 = std::env::var("CSSWITCH_EXPECTED_SCIENCE_SHA256")?;
+        let root = unique_temp_dir("science-real-installed-app")?;
+        let data_dir = root.join("home/.claude-science");
+        fs::create_dir_all(&data_dir)?;
+        let marker = data_dir.join("state-marker");
+        fs::write(&marker, "keep-me")?;
+
+        let selected = select_science_runtime_for_paths(&data_dir, None, &app_bin, None)?;
+        assert_eq!(selected.source, ScienceRuntimeSource::InstalledApp);
+        assert_eq!(selected.path, app_bin);
+        let expected_version_output =
+            format!("claude-science {expected_version} (release, public)");
+        assert_eq!(
+            selected.version.as_deref(),
+            Some(expected_version_output.as_str())
+        );
+        assert_eq!(
+            fingerprint_sha256_hex(&selected.fingerprint),
+            expected_sha256
+        );
+        assert_eq!(fs::read_to_string(&marker)?, "keep-me");
+        assert_eq!(data_dir.read_dir()?.count(), 1);
 
         fs::remove_dir_all(root)?;
         Ok(())

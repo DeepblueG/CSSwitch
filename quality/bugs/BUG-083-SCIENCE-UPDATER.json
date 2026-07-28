@@ -3,23 +3,57 @@
   "bug": {
     "id": "BUG-083-SCIENCE-UPDATER",
     "version": "v0.8.3",
-    "title": "Science check-only and CSSwitch updater behavior are not closed",
-    "summary": "The product issue distinguishes Science check-only behavior from the CSSwitch updater path; their selection, identity, and failure boundaries are not claimed closed by this node.",
+    "title": "Science standalone updater identity was confused with the DMG seed identity",
+    "summary": "The official 0.1.25 standalone updater reproduced a source failure because CSSwitch required the DMG-seed identifier at the fixed updater path. Source now distinguishes the two official tracks and passes exact 0.1.20/0.1.25 updater and DMG-seed oracles; production artifact/runtime and public release remain pending.",
     "status": "active",
     "owner": "science-runtime",
     "severity": "P1",
-    "claim_state": "inferred",
-    "reproduction_state": "not-run-current-target",
-    "resolution_state": "open-not-fixed",
-    "affected_paths": ["desktop/src-tauri/src/runtime/science.rs", "desktop/src-tauri/src/runtime/sandbox_session.rs", "scripts/launch-virtual-sandbox.sh"],
+    "claim_state": "confirmed",
+    "reproduction_state": "source-reproduced",
+    "resolution_state": "source-fixed-product-pending",
+    "affected_paths": ["desktop/src-tauri/src/runtime/science.rs"],
     "requirement_ids": ["REQ-083-SCIENCE-UPDATER", "REQ-083-EVIDENCE"],
     "change_ids": ["CHG-SCIENCE-UPDATER"],
-    "expected_suite_ids": ["SUITE-PRODUCT-SCIENCE-UPDATER", "SUITE-QUALITY-FOCUSED"],
-    "expected_gate_ids": ["GATE-SCIENCE-UPDATER", "GATE-QUALITY-RELEASE"],
-    "evidence_boundary": {"allowed_layers": ["source-test"], "excluded_layers": ["isolated-test-app", "final-dmg", "installed-final", "live", "signing", "public"], "basis": [".agents/rules/science-runtime.md", "product issue registration"]},
-    "reproduction": {"state": "not-run-current-target", "steps": ["Compare the check-only path with updater candidate selection in an isolated fixture.", "Record executable identity and failure behavior without reading real Science data."], "observed": "The issue is registered as open; no updater, installed, or live Science result is asserted here.", "not_claimed": ["isolated-test-app", "final-dmg", "installed-final", "live", "signing", "public"]},
-    "confirmed_facts": [{"statement": "The requirement registry keeps the Science check-only path and CSSwitch updater selection as separate concerns.", "evidence_ref": "quality/requirements.v1.json", "verification_status": "confirmed"}],
-    "hypotheses": [{"statement": "An invalid or mismatched candidate may be accepted or rejected at the updater identity boundary; the current target has not been run.", "evidence_ref": ".agents/rules/science-runtime.md", "verification_status": "inferred"}],
+    "expected_suite_ids": ["SUITE-PRODUCT-SCIENCE-UPDATER", "SUITE-RUST-DESKTOP"],
+    "expected_gate_ids": ["GATE-SCIENCE-UPDATER", "GATE-SOURCE"],
+    "evidence_boundary": {
+      "allowed_layers": ["source-test"],
+      "excluded_layers": ["isolated-test-app", "final-dmg", "installed-final", "live", "signing", "public"],
+      "basis": [
+        ".agents/rules/science-runtime.md",
+        "official 0.1.20 and 0.1.25 manifests and executables",
+        "old-source red and repaired-source dual-track green",
+        "temporary HOME/data-dir only"
+      ]
+    },
+    "reproduction": {
+      "state": "source-reproduced; production artifact/runtime and public release pending",
+      "steps": [
+        "Supply the manifest-matched 0.1.25 standalone updater to the exact ignored real-updater test.",
+        "Observe the fixed updater candidate rejected because its identifier is com.anthropic.operon rather than the DMG seed's com.anthropic.operon.cli.",
+        "Repair only the standalone updater identity guard, retain the fixed-path and SHA-256 snapshot boundary, and rerun both official versions on both tracks."
+      ],
+      "observed": "Old source failed the official 0.1.25 updater oracle at candidate eligibility. Repaired source passed official 0.1.20 and 0.1.25 updater snapshots, official 0.1.20 and 0.1.25 DMG-seed installed_app selection, the exact identity parser, and local fail-closed/replacement units.",
+      "not_claimed": ["isolated-test-app", "final-dmg", "installed-final", "live", "signing", "public"]
+    },
+    "confirmed_facts": [
+      {
+        "statement": "The standalone updater uses identifier com.anthropic.operon, while the DMG-seed CLI uses com.anthropic.operon.cli; both use Team ID Q6L2SF6YDW.",
+        "evidence_ref": "docs/evidence/investigations/2026-07-28-claude-science-0.1.25-compatibility.md",
+        "verification_status": "confirmed"
+      },
+      {
+        "statement": "The repaired updater path accepts both manifest-matched standalone versions, commits an exact SHA-256 content-addressed snapshot, and the installed_app path separately accepts both DMG seeds without mutating the temporary data-dir.",
+        "evidence_ref": "desktop/src-tauri/src/runtime/science.rs::runtime::science::tests::real_updated_runtime_candidate_is_eligible_without_reading_real_science_data",
+        "verification_status": "confirmed"
+      },
+      {
+        "statement": "Unsafe or mismatched updater candidates remain fail-closed and do not silently fall back to the installed App.",
+        "evidence_ref": "desktop/src-tauri/src/runtime/science.rs::runtime::science::tests::locally_validated_updated_runtime_wins_over_app_and_is_fingerprint_bound",
+        "verification_status": "confirmed"
+      }
+    ],
+    "hypotheses": [],
     "retirement": null
   }
 }
