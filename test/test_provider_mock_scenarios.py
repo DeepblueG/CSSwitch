@@ -756,6 +756,7 @@ class ProviderMockScenarioTests(unittest.TestCase):
                 self.assertEqual(
                     request(instance.mock, "POST", "/status/503", {})[0], 503
                 )
+                self.assertTrue(instance.mock.wait_complete(timeout=2))
                 self.assertTrue(instance.mock.result()["protocol_complete"])
                 instance._stop_requested.set()
                 return value
