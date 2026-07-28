@@ -1,4 +1,6 @@
 use std::io::Read;
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -95,14 +97,74 @@ fn append_installer_note(mut message: String, status: &RegistrationStatus) -> St
 }
 
 struct AuthorityTreeSnapshot {
+    scope: AuthoritySnapshotScope,
     source: PathBuf,
     backup: PathBuf,
     existed: bool,
+    backup_identity: Option<(u64, u64, libc::mode_t)>,
+    backup_parent: Option<std::fs::File>,
+    backup_name: Option<std::ffi::CString>,
 }
 
-const MAX_AUTHORITY_SNAPSHOT_ENTRIES: usize = 16_384;
-const MAX_AUTHORITY_SNAPSHOT_FILE_BYTES: u64 = 128 * 1024 * 1024;
-const MAX_AUTHORITY_SNAPSHOT_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
+struct AuthorityDirectoryStream(*mut libc::DIR);
+
+impl Drop for AuthorityDirectoryStream {
+    fn drop(&mut self) {
+        unsafe {
+            libc::closedir(self.0);
+        }
+    }
+}
+
+const MAX_AUTHORITY_SNAPSHOT_ENTRIES: usize = 32_768;
+const MAX_AUTHORITY_SNAPSHOT_FILE_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_AUTHORITY_SNAPSHOT_TOTAL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_AUTHORITY_FULL_COPY_FILE_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_AUTHORITY_FULL_COPY_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum AuthoritySnapshotScope {
+    ScienceData,
+    SandboxState,
+    CsswitchRuntime,
+    ManagedReceipt,
+    #[default]
+    Test,
+}
+
+impl AuthoritySnapshotScope {
+    fn code(self) -> &'static str {
+        match self {
+            Self::ScienceData => "science_data",
+            Self::SandboxState => "sandbox_state",
+            Self::CsswitchRuntime => "csswitch_runtime",
+            Self::ManagedReceipt => "managed_receipt",
+            Self::Test => "test",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum AuthoritySnapshotCategory {
+    CondaCache,
+    ScienceRuntime,
+    Skills,
+    OrgState,
+    #[default]
+    Other,
+}
+
+impl AuthoritySnapshotCategory {
+    fn code(self) -> &'static str {
+        match self {
+            Self::CondaCache => "conda_cache",
+            Self::ScienceRuntime => "science_runtime",
+            Self::Skills => "skills",
+            Self::OrgState => "org_state",
+            Self::Other => "other",
+        }
+    }
+}
 
 #[cfg(test)]
 #[derive(Default)]
@@ -110,6 +172,10 @@ struct SandboxSessionTestSeams {
     cleanup_fault: Option<(PathBuf, String, PathBuf)>,
     cleanup_calls: usize,
     capture_fail_source: Option<PathBuf>,
+    authority_clone_errno: Option<(std::thread::ThreadId, i32)>,
+    authority_fallback_fail_after_create: Option<std::thread::ThreadId>,
+    authority_completion_sync_failure: Option<std::thread::ThreadId>,
+    authority_cleanup_parent_sync_failure: Option<std::thread::ThreadId>,
     directory_barrier: Option<(PathBuf, PathBuf)>,
     one_click_capture: Option<(PathBuf, PathBuf, bool, u32, PathBuf)>,
     catalog_failure_port: Option<u16>,
@@ -158,6 +224,43 @@ pub(crate) fn test_arm_authority_snapshot_capture_failure(
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .capture_fail_source = Some(source);
+    SandboxSessionTestSeamGuard
+}
+
+#[cfg(test)]
+fn test_arm_authority_snapshot_clone_errno(errno: i32) -> SandboxSessionTestSeamGuard {
+    SANDBOX_SESSION_TEST_SEAMS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .authority_clone_errno = Some((std::thread::current().id(), errno));
+    SandboxSessionTestSeamGuard
+}
+
+#[cfg(test)]
+fn test_arm_authority_snapshot_fallback_create_failure() -> SandboxSessionTestSeamGuard {
+    SANDBOX_SESSION_TEST_SEAMS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .authority_fallback_fail_after_create = Some(std::thread::current().id());
+    SandboxSessionTestSeamGuard
+}
+
+#[cfg(test)]
+fn test_arm_authority_snapshot_completion_sync_failure() -> SandboxSessionTestSeamGuard {
+    SANDBOX_SESSION_TEST_SEAMS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .authority_completion_sync_failure = Some(std::thread::current().id());
+    SandboxSessionTestSeamGuard
+}
+
+#[cfg(test)]
+fn test_arm_authority_cleanup_parent_sync_failure() -> SandboxSessionTestSeamGuard {
+    SANDBOX_SESSION_TEST_SEAMS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .authority_cleanup_parent_sync_failure =
+        Some(std::thread::current().id());
     SandboxSessionTestSeamGuard
 }
 
@@ -245,7 +348,26 @@ pub(crate) fn test_rollback_diagnostic_snapshot() -> Option<PathBuf> {
         .clone()
 }
 
-fn remove_authority_snapshot_root(path: &Path) -> std::io::Result<()> {
+fn sync_authority_cleanup_parent(
+    parent: &std::fs::File,
+) -> std::io::Result<()> {
+    #[cfg(test)]
+    if SANDBOX_SESSION_TEST_SEAMS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .authority_cleanup_parent_sync_failure
+        .is_some_and(|thread| thread == std::thread::current().id())
+    {
+        return Err(std::io::Error::from_raw_os_error(libc::EIO));
+    }
+    parent.sync_all()
+}
+
+fn remove_authority_snapshot_root(
+    entry: &PendingCleanupEntry,
+    expected_parent: &Path,
+) -> std::io::Result<()> {
+    let path = &entry.path;
     #[cfg(test)]
     {
         let observation = {
@@ -287,22 +409,92 @@ fn remove_authority_snapshot_root(path: &Path) -> std::io::Result<()> {
             }
         }
     }
-    std::fs::remove_dir_all(path)
+    let parent = AuthorityTreeSnapshot::open_absolute_directory(expected_parent)?;
+    let name = AuthorityTreeSnapshot::destination_name(path)
+        .map_err(std::io::Error::other)?;
+    let tombstone_name = std::ffi::CString::new(cleanup_tombstone_name(entry))
+        .map_err(|_| std::io::Error::other("invalid cleanup tombstone name"))?;
+    let inspect = |name: &std::ffi::CStr| {
+        match AuthorityTreeSnapshot::stat_destination_at(&parent, name) {
+            Ok(value) => Ok(Some(value)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    };
+    let identity_matches = |current: &libc::stat| {
+        current.st_mode & libc::S_IFMT == libc::S_IFDIR
+            && u64::try_from(current.st_dev).ok() == Some(entry.device)
+            && u64::try_from(current.st_ino).ok() == Some(entry.inode)
+            && u32::from(current.st_mode) & 0o777 == 0o700
+            && current.st_uid == unsafe { libc::geteuid() }
+    };
+    match (inspect(&name)?, inspect(&tombstone_name)?) {
+        (None, None) => return sync_authority_cleanup_parent(&parent),
+        (Some(current), None) if identity_matches(&current) => {
+            let renamed = unsafe {
+                libc::renameat(
+                    parent.as_raw_fd(),
+                    name.as_ptr(),
+                    parent.as_raw_fd(),
+                    tombstone_name.as_ptr(),
+                )
+            };
+            if renamed != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            sync_authority_cleanup_parent(&parent)?;
+        }
+        (None, Some(current)) if identity_matches(&current) => {
+            sync_authority_cleanup_parent(&parent)?;
+        }
+        _ => {
+            return Err(std::io::Error::other(
+                "authority snapshot cleanup identity changed",
+            ))
+        }
+    }
+    let tombstone = AuthorityTreeSnapshot::stat_destination_at(
+        &parent,
+        &tombstone_name,
+    )?;
+    if !identity_matches(&tombstone) {
+        return Err(std::io::Error::other(
+            "authority snapshot cleanup tombstone identity changed",
+        ));
+    }
+    AuthorityTreeSnapshot::remove_tree_at(&parent, &tombstone_name)?;
+    sync_authority_cleanup_parent(&parent)
 }
 
-fn remove_authority_snapshot_root_with_retry(path: &Path) -> Result<(), String> {
-    match remove_authority_snapshot_root(path) {
+fn remove_authority_snapshot_root_with_retry(
+    entry: &PendingCleanupEntry,
+    expected_parent: &Path,
+) -> Result<(), String> {
+    match remove_authority_snapshot_root(entry, expected_parent) {
         Ok(()) => Ok(()),
-        Err(first) => remove_authority_snapshot_root(path).map_err(|second| {
-            format!(
-                "首次清理失败：{first}；重试清理失败：{second}"
-            )
-        }),
+        Err(first) => remove_authority_snapshot_root(entry, expected_parent)
+            .map_err(|second| {
+                format!("首次清理失败：{first}；重试清理失败：{second}")
+            }),
     }
 }
 
 const PENDING_CLEANUP_MARKER_FILE: &str = ".csswitch-one-click-rollback.marker";
 const MAX_PENDING_CLEANUP_MANIFEST_BYTES: usize = 64 * 1024;
+
+fn cleanup_tombstone_name(entry: &PendingCleanupEntry) -> String {
+    format!("{}.deleting", entry.managed_id)
+}
+
+fn cleanup_tombstone_path(entry: &PendingCleanupEntry) -> PathBuf {
+    entry
+        .path
+        .parent()
+        .unwrap_or_else(|| Path::new("/"))
+        .join(cleanup_tombstone_name(entry))
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -327,6 +519,7 @@ struct AuthorityCleanupContext {
     expected_snapshot_parent: PathBuf,
     managed_id: String,
     root: PathBuf,
+    expected_root_identity: Option<(u64, u64)>,
     state: SharedAppState,
 }
 
@@ -431,15 +624,24 @@ fn read_marker(path: &Path) -> Result<String, String> {
 }
 
 fn inspect_pending_cleanup_target(entry: &PendingCleanupEntry) -> PendingCleanupTargetState {
-    let metadata = match std::fs::symlink_metadata(&entry.path) {
-        Ok(metadata) => metadata,
+    let (actual_path, metadata, is_tombstone) =
+        match std::fs::symlink_metadata(&entry.path) {
+        Ok(metadata) => (entry.path.clone(), metadata, false),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return PendingCleanupTargetState::Missing
+            let tombstone = cleanup_tombstone_path(entry);
+            match std::fs::symlink_metadata(&tombstone) {
+                Ok(metadata) => (tombstone, metadata, true),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return PendingCleanupTargetState::Missing
+                }
+                Err(_) => return PendingCleanupTargetState::Unsafe,
+            }
         }
         Err(_) => return PendingCleanupTargetState::Unsafe,
     };
-    let marker = match read_marker(&entry.path.join(PENDING_CLEANUP_MARKER_FILE)) {
+    let marker = match read_marker(&actual_path.join(PENDING_CLEANUP_MARKER_FILE)) {
         Ok(marker) => marker,
+        Err(_) if is_tombstone => format!("{}\n", entry.marker),
         Err(_) => return PendingCleanupTargetState::Unsafe,
     };
     let marker = marker.strip_suffix('\n').unwrap_or(&marker).to_string();
@@ -520,8 +722,21 @@ impl AuthorityCleanupContext {
             expected_snapshot_parent,
             managed_id,
             root,
+            expected_root_identity: None,
             state: state.clone(),
         })
+    }
+
+    fn bind_root_identity(&mut self, entry: &libc::stat) -> Result<(), String> {
+        let device = u64::try_from(entry.st_dev)
+            .map_err(|_| self.register_error("事务快照 device 非法。"))?;
+        let inode = u64::try_from(entry.st_ino)
+            .map_err(|_| self.register_error("事务快照 inode 非法。"))?;
+        if entry.st_mode & libc::S_IFMT != libc::S_IFDIR {
+            return Err(self.register_error("事务快照不是目录。"));
+        }
+        self.expected_root_identity = Some((device, inode));
+        Ok(())
     }
 
     fn register_error(&self, detail: &str) -> String {
@@ -542,51 +757,119 @@ fn register_authority_cleanup(
     {
         return Err(context.register_error("事务快照路径不在受管根内。"));
     }
-    let before = std::fs::symlink_metadata(&context.root)
+    let parent = AuthorityTreeSnapshot::open_absolute_directory(
+        &context.expected_snapshot_parent,
+    )
+    .map_err(|_| context.register_error("事务快照父目录不可用。"))?;
+    let root_name = AuthorityTreeSnapshot::destination_name(&context.root)
+        .map_err(|_| context.register_error("事务快照名称非法。"))?;
+    let root = AuthorityTreeSnapshot::open_directory_at(
+        parent.as_raw_fd(),
+        &root_name,
+    )
+    .map_err(|_| context.register_error("事务快照不可用。"))?;
+    let before = root
+        .metadata()
         .map_err(|_| context.register_error("事务快照不可用。"))?;
-    if before.file_type().is_symlink()
-        || !before.is_dir()
+    let before_entry =
+        AuthorityTreeSnapshot::stat_destination_at(&parent, &root_name)
+            .map_err(|_| context.register_error("事务快照不可用。"))?;
+    let Some((expected_device, expected_inode)) = context.expected_root_identity else {
+        return Err(context.register_error("事务快照创建身份缺失。"));
+    };
+    if !before.is_dir()
         || before.uid() != unsafe { libc::geteuid() }
         || before.permissions().mode() & 0o777 != 0o700
+        || before.dev() != expected_device
+        || before.ino() != expected_inode
+        || !AuthorityTreeSnapshot::destination_entry_matches_file(
+            &before_entry,
+            &before,
+            libc::S_IFDIR,
+        )
     {
         return Err(context.register_error("事务快照身份不安全。"));
     }
-    let marker_path = context.root.join(PENDING_CLEANUP_MARKER_FILE);
-    match marker_path.symlink_metadata() {
+    let marker_name =
+        std::ffi::CString::new(PENDING_CLEANUP_MARKER_FILE).unwrap();
+    match AuthorityTreeSnapshot::stat_destination_at(&root, &marker_name) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let mut marker = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-                .open(&marker_path)
+            let mut marker = AuthorityTreeSnapshot::open_destination_at(
+                root.as_raw_fd(),
+                &marker_name,
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+                0o600,
+            )
                 .map_err(|_| context.register_error("无法创建事务快照 marker。"))?;
             std::io::Write::write_all(
                 &mut marker,
                 format!("{}\n", context.managed_id).as_bytes(),
             )
+                .and_then(|_| {
+                    marker.set_permissions(std::fs::Permissions::from_mode(0o600))
+                })
                 .and_then(|_| marker.sync_all())
                 .map_err(|_| context.register_error("无法持久化事务快照 marker。"))?;
-            AuthorityTreeSnapshot::sync_directory(&context.root)
+            let metadata = marker
+                .metadata()
+                .map_err(|_| context.register_error("无法复核事务快照 marker。"))?;
+            if !metadata.is_file()
+                || metadata.uid() != unsafe { libc::geteuid() }
+                || metadata.permissions().mode() & 0o777 != 0o600
+                || metadata.nlink() != 1
+                || metadata.len() > 256
+            {
+                return Err(context.register_error("事务快照 marker 身份不安全。"));
+            }
+            root.sync_all()
+                .and_then(|_| parent.sync_all())
                 .map_err(|_| context.register_error("无法持久化事务快照目录。"))?;
         }
         Ok(_) => {
-            let marker = read_marker(&marker_path)
+            let mut marker = AuthorityTreeSnapshot::open_destination_at(
+                root.as_raw_fd(),
+                &marker_name,
+                libc::O_RDONLY,
+                0,
+            )
+            .map_err(|_| context.register_error("事务快照 marker 身份不安全。"))?;
+            let metadata = marker
+                .metadata()
                 .map_err(|_| context.register_error("事务快照 marker 身份不安全。"))?;
-            if marker != format!("{}\n", context.managed_id) {
+            if !metadata.is_file()
+                || metadata.uid() != unsafe { libc::geteuid() }
+                || metadata.permissions().mode() & 0o777 != 0o600
+                || metadata.nlink() != 1
+                || metadata.len() > 256
+            {
+                return Err(context.register_error("事务快照 marker 身份不安全。"));
+            }
+            let mut bytes = Vec::new();
+            std::io::Read::take(&mut marker, 257)
+                .read_to_end(&mut bytes)
+                .map_err(|_| context.register_error("无法读取事务快照 marker。"))?;
+            if bytes != format!("{}\n", context.managed_id).as_bytes() {
                 return Err(context.register_error("事务快照 marker 不匹配。"));
             }
         }
         Err(_) => return Err(context.register_error("无法检查事务快照 marker。")),
     }
-    let after = std::fs::symlink_metadata(&context.root)
+    let after = root
+        .metadata()
         .map_err(|_| context.register_error("无法复核事务快照。"))?;
+    let after_entry =
+        AuthorityTreeSnapshot::stat_destination_at(&parent, &root_name)
+            .map_err(|_| context.register_error("无法复核事务快照。"))?;
     if after.dev() != before.dev()
         || after.ino() != before.ino()
         || !after.is_dir()
-        || after.file_type().is_symlink()
         || after.uid() != unsafe { libc::geteuid() }
         || after.permissions().mode() & 0o777 != 0o700
+        || !AuthorityTreeSnapshot::destination_entry_matches_file(
+            &after_entry,
+            &after,
+            libc::S_IFDIR,
+        )
     {
         return Err(context.register_error("事务快照在注册期间发生变化。"));
     }
@@ -643,6 +926,19 @@ fn register_authority_cleanup(
         manifest_raw,
         entry,
     })
+}
+
+fn finalize_failed_authority_snapshot(
+    context: &AuthorityCleanupContext,
+    primary: String,
+) -> String {
+    let cleanup = register_authority_cleanup(context).and_then(|ticket| {
+        finalize_registered_authority_cleanup(context, &ticket)
+    });
+    match cleanup {
+        Ok(()) => primary,
+        Err(cleanup_error) => format!("{primary}；{cleanup_error}"),
+    }
 }
 
 fn publish_pending_cleanup_clear(
@@ -743,7 +1039,12 @@ fn finalize_registered_authority_cleanup(
             )
         }
     }
-    if remove_authority_snapshot_root_with_retry(&ticket.entry.path).is_err() {
+    if remove_authority_snapshot_root_with_retry(
+        &ticket.entry,
+        &context.expected_snapshot_parent,
+    )
+    .is_err()
+    {
         return Err(cleanup_required_error(
             "one-click 事务快照仍无法清理",
             &ticket.entry.path,
@@ -826,7 +1127,12 @@ fn retry_pending_authority_cleanup(state: &SharedAppState) -> Result<(), String>
         ) if actual == &entry => {
             #[cfg(test)]
             config::test_observe_pending_cleanup_delete_attempt();
-            if remove_authority_snapshot_root_with_retry(&entry.path).is_err() {
+            if remove_authority_snapshot_root_with_retry(
+                &entry,
+                expected_parent,
+            )
+            .is_err()
+            {
                 #[cfg(test)]
                 config::test_observe_pending_cleanup_completion(
                     config::PendingCleanupRemovalOutcome::Error,
@@ -890,6 +1196,7 @@ fn retry_pending_authority_cleanup(state: &SharedAppState) -> Result<(), String>
 struct AuthorityCopyBudget {
     entries: usize,
     bytes: u64,
+    full_copy_bytes: u64,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -905,39 +1212,488 @@ struct AuthorityDirectoryEntryIdentity {
 }
 
 impl AuthorityTreeSnapshot {
-    fn directory_manifest(
-        entries: &[std::fs::DirEntry],
-    ) -> Result<Vec<AuthorityDirectoryEntryIdentity>, String> {
-        entries
+    fn os_error_code(error: &std::io::Error) -> i32 {
+        error.raw_os_error().unwrap_or(-1)
+    }
+
+    fn clone_regular_file_at(
+        source_fd: i32,
+        parent_fd: i32,
+        destination_name: &std::ffi::CStr,
+    ) -> Result<(), std::io::Error> {
+        #[cfg(test)]
+        if let Some((_, errno)) = SANDBOX_SESSION_TEST_SEAMS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .authority_clone_errno
+            .filter(|(thread, _)| *thread == std::thread::current().id())
+        {
+            return Err(std::io::Error::from_raw_os_error(errno));
+        }
+        let result = unsafe {
+            libc::fclonefileat(source_fd, parent_fd, destination_name.as_ptr(), 0)
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    fn open_destination_at(
+        parent_fd: i32,
+        destination_name: &std::ffi::CStr,
+        flags: i32,
+        mode: libc::mode_t,
+    ) -> Result<std::fs::File, std::io::Error> {
+        let fd = unsafe {
+            libc::openat(
+                parent_fd,
+                destination_name.as_ptr(),
+                flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                libc::c_uint::from(mode),
+            )
+        };
+        if fd < 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+        }
+    }
+
+    fn open_directory_at(
+        parent_fd: i32,
+        destination_name: &std::ffi::CStr,
+    ) -> Result<std::fs::File, std::io::Error> {
+        Self::open_destination_at(
+            parent_fd,
+            destination_name,
+            libc::O_RDONLY | libc::O_DIRECTORY,
+            0,
+        )
+    }
+
+    fn open_absolute_directory(path: &Path) -> Result<std::fs::File, std::io::Error> {
+        if !path.is_absolute() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "directory path must be absolute",
+            ));
+        }
+        let mut directory = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open("/")?;
+        for component in path.components() {
+            match component {
+                std::path::Component::RootDir => {}
+                std::path::Component::Normal(name) => {
+                    let name = std::ffi::CString::new(name.as_bytes()).map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "directory component contains NUL",
+                        )
+                    })?;
+                    directory =
+                        Self::open_directory_at(directory.as_raw_fd(), &name)?;
+                }
+                _ => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "directory path contains unsupported component",
+                    ))
+                }
+            }
+        }
+        Ok(directory)
+    }
+
+    fn absolute_directory_binding_matches(
+        path: &Path,
+        pinned: &std::fs::File,
+    ) -> Result<bool, std::io::Error> {
+        let current = Self::open_absolute_directory(path)?;
+        let expected = pinned.metadata()?;
+        let actual = current.metadata()?;
+        Ok(
+            expected.is_dir()
+                && actual.is_dir()
+                && expected.dev() == actual.dev()
+                && expected.ino() == actual.ino()
+                && expected.uid() == actual.uid(),
+        )
+    }
+
+    fn read_directory_names(
+        directory: &std::fs::File,
+    ) -> Result<Vec<std::ffi::OsString>, std::io::Error> {
+        let duplicate =
+            unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+        if duplicate < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if unsafe { libc::lseek(duplicate, 0, libc::SEEK_SET) } < 0 {
+            let error = std::io::Error::last_os_error();
+            unsafe {
+                libc::close(duplicate);
+            }
+            return Err(error);
+        }
+        let stream = unsafe { libc::fdopendir(duplicate) };
+        if stream.is_null() {
+            let error = std::io::Error::last_os_error();
+            unsafe {
+                libc::close(duplicate);
+            }
+            return Err(error);
+        }
+        let stream = AuthorityDirectoryStream(stream);
+        let mut names = Vec::new();
+        loop {
+            unsafe {
+                *libc::__error() = 0;
+            }
+            let entry = unsafe { libc::readdir(stream.0) };
+            if entry.is_null() {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error().unwrap_or(0) == 0 {
+                    break;
+                }
+                return Err(error);
+            }
+            let name = unsafe {
+                std::ffi::CStr::from_ptr((*entry).d_name.as_ptr())
+            }
+            .to_bytes();
+            if name == b"." || name == b".." {
+                continue;
+            }
+            names.push(std::ffi::OsString::from_vec(name.to_vec()));
+        }
+        names.sort();
+        Ok(names)
+    }
+
+    fn remove_tree_at(
+        destination_parent: &std::fs::File,
+        destination_name: &std::ffi::CStr,
+    ) -> Result<(), std::io::Error> {
+        let entry = Self::stat_destination_at(destination_parent, destination_name)?;
+        match entry.st_mode & libc::S_IFMT {
+            libc::S_IFDIR => {
+                let directory = Self::open_directory_at(
+                    destination_parent.as_raw_fd(),
+                    destination_name,
+                )?;
+                let metadata = directory.metadata()?;
+                if !Self::destination_entry_matches_file(
+                    &entry,
+                    &metadata,
+                    libc::S_IFDIR,
+                ) {
+                    return Err(std::io::Error::other(
+                        "directory entry identity changed",
+                    ));
+                }
+                for child in Self::read_directory_names(&directory)? {
+                    let child = std::ffi::CString::new(child.as_bytes()).map_err(
+                        |_| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::InvalidInput,
+                                "directory entry contains NUL",
+                            )
+                        },
+                    )?;
+                    Self::remove_tree_at(&directory, &child)?;
+                }
+                directory.sync_all()?;
+                let final_entry =
+                    Self::stat_destination_at(destination_parent, destination_name)?;
+                let final_metadata = directory.metadata()?;
+                if !Self::destination_entry_matches_file(
+                    &final_entry,
+                    &final_metadata,
+                    libc::S_IFDIR,
+                ) {
+                    return Err(std::io::Error::other(
+                        "directory entry rebound before removal",
+                    ));
+                }
+                let result = unsafe {
+                    libc::unlinkat(
+                        destination_parent.as_raw_fd(),
+                        destination_name.as_ptr(),
+                        libc::AT_REMOVEDIR,
+                    )
+                };
+                if result != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            libc::S_IFREG | libc::S_IFLNK => {
+                Self::unlink_destination_at(
+                    destination_parent.as_raw_fd(),
+                    destination_name,
+                )?;
+            }
+            _ => {
+                return Err(std::io::Error::other(
+                    "refusing to remove special authority entry",
+                ))
+            }
+        }
+        destination_parent.sync_all()
+    }
+
+    fn mkdir_destination_at(
+        parent_fd: i32,
+        destination_name: &std::ffi::CStr,
+        mode: libc::mode_t,
+    ) -> Result<(), std::io::Error> {
+        let result =
+            unsafe { libc::mkdirat(parent_fd, destination_name.as_ptr(), mode) };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    fn unlink_destination_at(
+        parent_fd: i32,
+        destination_name: &std::ffi::CStr,
+    ) -> Result<(), std::io::Error> {
+        let result =
+            unsafe { libc::unlinkat(parent_fd, destination_name.as_ptr(), 0) };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    fn destination_name(path: &Path) -> Result<std::ffi::CString, String> {
+        let name = path
+            .file_name()
+            .ok_or("code=authority_snapshot_destination_name_missing")?;
+        std::ffi::CString::new(name.as_bytes())
+            .map_err(|_| "code=authority_snapshot_destination_name_invalid".into())
+    }
+
+    fn cleanup_created_destination(
+        destination_parent: &std::fs::File,
+        destination_name: &std::ffi::CStr,
+        scope: AuthoritySnapshotScope,
+        category: AuthoritySnapshotCategory,
+    ) -> Result<(), String> {
+        Self::unlink_destination_at(destination_parent.as_raw_fd(), destination_name)
+            .map_err(|error| {
+                format!(
+                    "code=authority_snapshot_cleanup_unlink_failed scope={} category={} os_error={}",
+                    scope.code(),
+                    category.code(),
+                    Self::os_error_code(&error)
+                )
+            })?;
+        destination_parent.sync_all().map_err(|error| {
+            format!(
+                "code=authority_snapshot_cleanup_sync_failed scope={} category={} os_error={}",
+                scope.code(),
+                category.code(),
+                Self::os_error_code(&error)
+            )
+        })
+    }
+
+    fn stat_destination_at(
+        destination_parent: &std::fs::File,
+        destination_name: &std::ffi::CStr,
+    ) -> Result<libc::stat, std::io::Error> {
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::zeroed();
+        let result = unsafe {
+            libc::fstatat(
+                destination_parent.as_raw_fd(),
+                destination_name.as_ptr(),
+                stat.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if result == 0 {
+            Ok(unsafe { stat.assume_init() })
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    fn destination_entry_matches_file(
+        entry: &libc::stat,
+        file: &std::fs::Metadata,
+        expected_kind: libc::mode_t,
+    ) -> bool {
+        u64::try_from(entry.st_dev).ok() == Some(file.dev())
+            && u64::try_from(entry.st_ino).ok() == Some(file.ino())
+            && entry.st_mode & libc::S_IFMT == expected_kind
+    }
+
+    fn readlink_destination_at(
+        destination_parent: &std::fs::File,
+        destination_name: &std::ffi::CStr,
+        expected_len: usize,
+    ) -> Result<Vec<u8>, std::io::Error> {
+        let mut bytes = vec![0u8; expected_len.saturating_add(1)];
+        let length = unsafe {
+            libc::readlinkat(
+                destination_parent.as_raw_fd(),
+                destination_name.as_ptr(),
+                bytes.as_mut_ptr().cast(),
+                bytes.len(),
+            )
+        };
+        if length < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        bytes.truncate(length as usize);
+        Ok(bytes)
+    }
+
+    fn category(
+        scope: AuthoritySnapshotScope,
+        root: &Path,
+        current: &Path,
+    ) -> AuthoritySnapshotCategory {
+        if scope != AuthoritySnapshotScope::ScienceData {
+            return AuthoritySnapshotCategory::Other;
+        }
+        let Ok(relative) = current.strip_prefix(root) else {
+            return AuthoritySnapshotCategory::Other;
+        };
+        let components = relative
+            .components()
+            .filter_map(|component| component.as_os_str().to_str())
+            .collect::<Vec<_>>();
+        let Some(first) = components.first().copied() else {
+            return AuthoritySnapshotCategory::Other;
+        };
+        if first == "conda" {
+            return AuthoritySnapshotCategory::CondaCache;
+        }
+        if matches!(
+            first,
+            "runtime" | "seed-assets" | "r-libs" | "sbx-bind-src"
+        ) {
+            return AuthoritySnapshotCategory::ScienceRuntime;
+        }
+        if components
             .iter()
-            .map(|entry| {
-                let metadata = std::fs::symlink_metadata(entry.path()).map_err(|error| {
-                    format!("无法复核隔离 authority 目录成员：{error}")
-                })?;
-                let kind = if metadata.is_file() {
-                    1
-                } else if metadata.is_dir() {
-                    2
-                } else if metadata.file_type().is_symlink() {
-                    3
-                } else {
-                    4
+            .any(|component| matches!(*component, "skills" | "marketplace-plugins"))
+        {
+            return AuthoritySnapshotCategory::Skills;
+        }
+        if matches!(
+            first,
+            ".oauth-tokens"
+                | ".key-backups"
+                | "active-org.json"
+                | "auth-owner.lock"
+                | "encryption.key"
+                | "mcp"
+                | "orgs"
+        ) {
+            return AuthoritySnapshotCategory::OrgState;
+        }
+        AuthoritySnapshotCategory::Other
+    }
+
+    fn stat_entry_stable(initial: &libc::stat, final_entry: &libc::stat) -> bool {
+        initial.st_dev == final_entry.st_dev
+            && initial.st_ino == final_entry.st_ino
+            && initial.st_mode == final_entry.st_mode
+            && initial.st_uid == final_entry.st_uid
+            && initial.st_gid == final_entry.st_gid
+            && initial.st_nlink == final_entry.st_nlink
+            && initial.st_size == final_entry.st_size
+            && initial.st_mtime == final_entry.st_mtime
+            && initial.st_mtime_nsec == final_entry.st_mtime_nsec
+    }
+
+    fn directory_manifest_at(
+        directory: &std::fs::File,
+        names: &[std::ffi::OsString],
+    ) -> Result<Vec<AuthorityDirectoryEntryIdentity>, String> {
+        names
+            .iter()
+            .map(|name| {
+                let name_c = std::ffi::CString::new(name.as_bytes())
+                    .map_err(|_| "code=authority_snapshot_source_name_invalid")?;
+                let metadata =
+                    Self::stat_destination_at(directory, &name_c).map_err(|error| {
+                        format!(
+                            "code=authority_snapshot_directory_member_validate_failed os_error={}",
+                            Self::os_error_code(&error)
+                        )
+                    })?;
+                let kind = match metadata.st_mode & libc::S_IFMT {
+                    libc::S_IFREG => 1,
+                    libc::S_IFDIR => 2,
+                    libc::S_IFLNK => 3,
+                    _ => 4,
                 };
                 Ok(AuthorityDirectoryEntryIdentity {
-                    name: entry.file_name(),
+                    name: name.clone(),
                     kind,
-                    device: metadata.dev(),
-                    inode: metadata.ino(),
-                    size: metadata.len(),
-                    mode: metadata.permissions().mode() & 0o777,
-                    modified_seconds: metadata.mtime(),
-                    modified_nanoseconds: metadata.mtime_nsec(),
+                    device: u64::try_from(metadata.st_dev)
+                        .map_err(|_| "code=authority_snapshot_source_device_invalid")?,
+                    inode: u64::try_from(metadata.st_ino)
+                        .map_err(|_| "code=authority_snapshot_source_inode_invalid")?,
+                    size: u64::try_from(metadata.st_size)
+                        .map_err(|_| "code=authority_snapshot_source_size_invalid")?,
+                    mode: u32::from(metadata.st_mode) & 0o777,
+                    modified_seconds: metadata.st_mtime,
+                    modified_nanoseconds: metadata.st_mtime_nsec,
                 })
             })
             .collect()
     }
 
+    #[cfg(test)]
     fn capture(source: PathBuf, backup: PathBuf) -> Result<Self, String> {
+        Self::capture_scoped(AuthoritySnapshotScope::Test, source, backup)
+    }
+
+    #[cfg(test)]
+    fn capture_scoped(
+        scope: AuthoritySnapshotScope,
+        source: PathBuf,
+        backup: PathBuf,
+    ) -> Result<Self, String> {
+        let backup_parent = backup
+            .parent()
+            .ok_or("code=authority_snapshot_destination_parent_missing")?;
+        let backup_parent_file = Self::open_absolute_directory(backup_parent)
+            .map_err(|error| {
+                format!(
+                    "code=authority_snapshot_destination_parent_open_failed scope={} os_error={}",
+                    scope.code(),
+                    Self::os_error_code(&error)
+                )
+            })?;
+        let backup_name = Self::destination_name(&backup)?;
+        Self::capture_scoped_at(
+            scope,
+            source,
+            backup,
+            &backup_parent_file,
+            &backup_name,
+        )
+    }
+
+    fn capture_scoped_at(
+        scope: AuthoritySnapshotScope,
+        source: PathBuf,
+        backup: PathBuf,
+        backup_parent: &std::fs::File,
+        backup_name: &std::ffi::CStr,
+    ) -> Result<Self, String> {
         #[cfg(test)]
         if SANDBOX_SESSION_TEST_SEAMS
             .lock()
@@ -951,184 +1707,847 @@ impl AuthorityTreeSnapshot {
                 source.display()
             ));
         }
-        let existed = match std::fs::symlink_metadata(&source) {
-            Ok(metadata) => {
-                if metadata.file_type().is_symlink() {
-                    return Err(format!(
-                        "隔离 authority 根 {} 是符号链接，拒绝建立事务快照",
-                        source.display()
-                    ));
-                }
-                let mut budget = AuthorityCopyBudget::default();
-                Self::copy_tree(&source, &backup, &mut budget, false)?;
-                true
+        let source_parent_path = source
+            .parent()
+            .ok_or("code=authority_snapshot_source_parent_missing")?;
+        let source_parent = match Self::open_absolute_directory(source_parent_path) {
+            Ok(parent) => parent,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self {
+                    scope,
+                    source,
+                    backup,
+                    existed: false,
+                    backup_identity: None,
+                    backup_parent: None,
+                    backup_name: None,
+                })
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
             Err(error) => {
                 return Err(format!(
-                    "无法快照隔离 authority {}：{error}",
-                    source.display()
+                    "code=authority_snapshot_source_parent_open_failed scope={} os_error={}",
+                    scope.code(),
+                    Self::os_error_code(&error)
                 ))
             }
         };
+        let source_name = Self::destination_name(&source)?;
+        let backup_identity =
+            match Self::stat_destination_at(&source_parent, &source_name) {
+            Ok(source_identity) => {
+                if source_identity.st_mode & libc::S_IFMT == libc::S_IFLNK {
+                    return Err(format!(
+                        "code=authority_snapshot_root_symlink scope={} category=other",
+                        scope.code()
+                    ));
+                }
+                let mut budget = AuthorityCopyBudget::default();
+                Self::copy_tree_from_at(
+                    &source,
+                    &source_parent,
+                    &source_name,
+                    backup_parent,
+                    backup_name,
+                    &mut budget,
+                    false,
+                    scope,
+                    &source,
+                )?;
+                let source_parent_still_bound =
+                    Self::absolute_directory_binding_matches(
+                        source_parent_path,
+                        &source_parent,
+                    )
+                    .map_err(|error| {
+                        format!(
+                            "code=authority_snapshot_source_parent_revalidate_failed scope={} os_error={}",
+                            scope.code(),
+                            Self::os_error_code(&error)
+                        )
+                    })?;
+                if !source_parent_still_bound {
+                    let primary = format!(
+                        "code=authority_snapshot_source_parent_rebound scope={}",
+                        scope.code()
+                    );
+                    return match Self::cleanup_created_destination(
+                        backup_parent,
+                        backup_name,
+                        scope,
+                        AuthoritySnapshotCategory::Other,
+                    ) {
+                        Ok(()) => Err(primary),
+                        Err(cleanup) => Err(format!("{primary}; {cleanup}")),
+                    };
+                }
+                let identity =
+                    Self::stat_destination_at(backup_parent, backup_name)
+                        .map_err(|error| {
+                            format!(
+                                "code=authority_snapshot_root_entry_validate_failed scope={} os_error={}",
+                                scope.code(),
+                                Self::os_error_code(&error)
+                            )
+                        })?;
+                Some((
+                    u64::try_from(identity.st_dev).map_err(|_| {
+                        "code=authority_snapshot_root_device_invalid"
+                    })?,
+                    u64::try_from(identity.st_ino).map_err(|_| {
+                        "code=authority_snapshot_root_inode_invalid"
+                    })?,
+                    identity.st_mode & libc::S_IFMT,
+                ))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(format!(
+                    "code=authority_snapshot_root_metadata_failed scope={} category=other os_error={}",
+                    scope.code(),
+                    Self::os_error_code(&error)
+                ))
+            }
+        };
+        let backup_parent_handle = if backup_identity.is_some() {
+            Some(backup_parent.try_clone().map_err(|error| {
+                format!(
+                    "code=authority_snapshot_backup_parent_pin_failed scope={} os_error={}",
+                    scope.code(),
+                    Self::os_error_code(&error)
+                )
+            })?)
+        } else {
+            None
+        };
+        let backup_name_handle =
+            backup_identity.as_ref().map(|_| backup_name.to_owned());
         Ok(Self {
+            scope,
             source,
             backup,
-            existed,
+            existed: backup_identity.is_some(),
+            backup_identity,
+            backup_parent: backup_parent_handle,
+            backup_name: backup_name_handle,
         })
     }
 
     fn charge_entry(
         budget: &mut AuthorityCopyBudget,
         file_bytes: u64,
+        scope: AuthoritySnapshotScope,
+        category: AuthoritySnapshotCategory,
     ) -> Result<(), String> {
         budget.entries = budget
             .entries
             .checked_add(1)
-            .ok_or("隔离 authority 快照条目计数溢出")?;
+            .ok_or_else(|| {
+                format!(
+                    "code=authority_snapshot_entry_overflow scope={} category={}",
+                    scope.code(),
+                    category.code()
+                )
+            })?;
         if budget.entries > MAX_AUTHORITY_SNAPSHOT_ENTRIES {
             return Err(format!(
-                "隔离 authority 快照超过安全条目上限 {MAX_AUTHORITY_SNAPSHOT_ENTRIES}"
+                "code=authority_snapshot_entry_limit scope={} category={} observed_entries={} entry_limit={MAX_AUTHORITY_SNAPSHOT_ENTRIES}",
+                scope.code(),
+                category.code(),
+                budget.entries
             ));
         }
         if file_bytes > MAX_AUTHORITY_SNAPSHOT_FILE_BYTES {
             return Err(format!(
-                "隔离 authority 单文件超过安全上限 {MAX_AUTHORITY_SNAPSHOT_FILE_BYTES} bytes"
+                "code=authority_snapshot_file_limit scope={} category={} observed_bytes={file_bytes} file_limit={MAX_AUTHORITY_SNAPSHOT_FILE_BYTES}",
+                scope.code(),
+                category.code()
             ));
         }
         budget.bytes = budget
             .bytes
             .checked_add(file_bytes)
-            .ok_or("隔离 authority 快照大小溢出")?;
+            .ok_or_else(|| {
+                format!(
+                    "code=authority_snapshot_total_overflow scope={} category={} observed_entries={}",
+                    scope.code(),
+                    category.code(),
+                    budget.entries
+                )
+            })?;
         if budget.bytes > MAX_AUTHORITY_SNAPSHOT_TOTAL_BYTES {
             return Err(format!(
-                "隔离 authority 快照超过安全总大小上限 {MAX_AUTHORITY_SNAPSHOT_TOTAL_BYTES} bytes"
+                "code=authority_snapshot_total_limit scope={} category={} observed_total_bytes={} total_limit={MAX_AUTHORITY_SNAPSHOT_TOTAL_BYTES} observed_entries={}",
+                scope.code(),
+                category.code(),
+                budget.bytes,
+                budget.entries
             ));
         }
         Ok(())
     }
 
-    fn sync_directory(path: &Path) -> Result<(), String> {
-        std::fs::File::open(path)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|error| format!("无法持久化隔离 authority 目录：{error}"))
+    fn charge_full_copy(
+        budget: &mut AuthorityCopyBudget,
+        file_bytes: u64,
+        scope: AuthoritySnapshotScope,
+        category: AuthoritySnapshotCategory,
+    ) -> Result<(), String> {
+        if file_bytes > MAX_AUTHORITY_FULL_COPY_FILE_BYTES {
+            return Err(format!(
+                "code=authority_snapshot_clone_required scope={} category={} observed_bytes={file_bytes} full_copy_file_limit={MAX_AUTHORITY_FULL_COPY_FILE_BYTES}",
+                scope.code(),
+                category.code()
+            ));
+        }
+        budget.full_copy_bytes = budget
+            .full_copy_bytes
+            .checked_add(file_bytes)
+            .ok_or_else(|| {
+                format!(
+                    "code=authority_snapshot_full_copy_overflow scope={} category={}",
+                    scope.code(),
+                    category.code()
+                )
+            })?;
+        if budget.full_copy_bytes > MAX_AUTHORITY_FULL_COPY_TOTAL_BYTES {
+            return Err(format!(
+                "code=authority_snapshot_clone_required scope={} category={} observed_full_copy_bytes={} full_copy_total_limit={MAX_AUTHORITY_FULL_COPY_TOTAL_BYTES}",
+                scope.code(),
+                category.code(),
+                budget.full_copy_bytes
+            ));
+        }
+        Ok(())
     }
 
+    fn sync_snapshot_completion(
+        backup_root: &std::fs::File,
+        snapshot_parent: &std::fs::File,
+    ) -> Result<(), std::io::Error> {
+        #[cfg(test)]
+        if SANDBOX_SESSION_TEST_SEAMS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .authority_completion_sync_failure
+            .is_some_and(|thread| thread == std::thread::current().id())
+        {
+            return Err(std::io::Error::from_raw_os_error(libc::EIO));
+        }
+        backup_root.sync_all()?;
+        snapshot_parent.sync_all()
+    }
+
+    #[cfg(test)]
     fn copy_tree(
         source: &Path,
         backup: &Path,
         budget: &mut AuthorityCopyBudget,
         allow_symlink: bool,
+        scope: AuthoritySnapshotScope,
+        root: &Path,
     ) -> Result<(), String> {
-        let metadata = std::fs::symlink_metadata(source)
-            .map_err(|error| format!("无法检查隔离 authority {}：{error}", source.display()))?;
-        if metadata.file_type().is_symlink() {
+        let parent = backup
+            .parent()
+            .ok_or("code=authority_snapshot_destination_parent_missing")?;
+        let parent_file = Self::open_absolute_directory(parent)
+            .map_err(|error| {
+                format!(
+                    "code=authority_snapshot_destination_parent_open_failed scope={} os_error={}",
+                    scope.code(),
+                    Self::os_error_code(&error)
+                )
+            })?;
+        let backup_name = Self::destination_name(backup)?;
+        let source_parent_path = source
+            .parent()
+            .ok_or("code=authority_snapshot_source_parent_missing")?;
+        let source_parent =
+            Self::open_absolute_directory(source_parent_path).map_err(|error| {
+                format!(
+                    "code=authority_snapshot_source_parent_open_failed scope={} os_error={}",
+                    scope.code(),
+                    Self::os_error_code(&error)
+                )
+            })?;
+        let source_name = Self::destination_name(source)?;
+        Self::copy_tree_from_at(
+            source,
+            &source_parent,
+            &source_name,
+            &parent_file,
+            &backup_name,
+            budget,
+            allow_symlink,
+            scope,
+            root,
+        )
+    }
+
+    fn copy_tree_from_at(
+        source_logical: &Path,
+        source_parent: &std::fs::File,
+        source_name: &std::ffi::CStr,
+        destination_parent: &std::fs::File,
+        destination_name: &std::ffi::CStr,
+        budget: &mut AuthorityCopyBudget,
+        allow_symlink: bool,
+        scope: AuthoritySnapshotScope,
+        root: &Path,
+    ) -> Result<(), String> {
+        let category = Self::category(scope, root, source_logical);
+        let metadata = Self::stat_destination_at(source_parent, source_name).map_err(
+            |error| {
+            format!(
+                "code=authority_snapshot_metadata_failed scope={} category={} os_error={}",
+                scope.code(),
+                category.code(),
+                Self::os_error_code(&error)
+            )
+            },
+        )?;
+        let source_kind = metadata.st_mode & libc::S_IFMT;
+        if source_kind == libc::S_IFLNK {
             if !allow_symlink {
                 return Err(format!(
-                    "隔离 authority 根 {} 是符号链接，拒绝建立事务快照",
-                    source.display()
+                    "code=authority_snapshot_root_symlink scope={} category={}",
+                    scope.code(),
+                    category.code()
                 ));
             }
-            let target = std::fs::read_link(source)
-                .map_err(|error| format!("无法读取隔离 authority 符号链接：{error}"))?;
-            let target_bytes = target.as_os_str().as_encoded_bytes();
-            Self::charge_entry(budget, target_bytes.len() as u64)?;
-            let parent = backup.parent().ok_or("隔离 authority 备份路径没有父目录")?;
-            std::fs::create_dir_all(parent)
-                .map_err(|error| format!("无法创建隔离 authority 备份目录：{error}"))?;
-            std::os::unix::fs::symlink(&target, backup)
-                .map_err(|error| format!("无法创建隔离 authority 符号链接快照：{error}"))?;
-            let final_metadata = std::fs::symlink_metadata(source)
-                .map_err(|error| format!("无法复核隔离 authority 符号链接：{error}"))?;
-            let final_target = std::fs::read_link(source)
-                .map_err(|error| format!("无法复核隔离 authority 符号链接目标：{error}"))?;
-            if !final_metadata.file_type().is_symlink()
-                || final_metadata.dev() != metadata.dev()
-                || final_metadata.ino() != metadata.ino()
-                || final_metadata.len() != metadata.len()
-                || final_metadata.mtime() != metadata.mtime()
-                || final_metadata.mtime_nsec() != metadata.mtime_nsec()
-                || final_target != target
-            {
-                return Err("隔离 authority 符号链接在快照期间发生变化".into());
+            let expected_len = usize::try_from(metadata.st_size).map_err(|_| {
+                format!(
+                    "code=authority_snapshot_symlink_size_invalid scope={} category={}",
+                    scope.code(),
+                    category.code()
+                )
+            })?;
+            let target_bytes =
+                Self::readlink_destination_at(source_parent, source_name, expected_len)
+                    .map_err(|error| {
+                        format!(
+                            "code=authority_snapshot_symlink_read_failed scope={} category={} os_error={}",
+                            scope.code(),
+                            category.code(),
+                            Self::os_error_code(&error)
+                        )
+                    })?;
+            Self::charge_entry(
+                budget,
+                target_bytes.len() as u64,
+                scope,
+                category,
+            )?;
+            let target_name = std::ffi::CString::new(target_bytes.clone())
+                .map_err(|_| "code=authority_snapshot_symlink_target_invalid")?;
+            let symlink_result = unsafe {
+                libc::symlinkat(
+                    target_name.as_ptr(),
+                    destination_parent.as_raw_fd(),
+                    destination_name.as_ptr(),
+                )
+            };
+            if symlink_result != 0 {
+                let error = std::io::Error::last_os_error();
+                return Err(format!(
+                    "code=authority_snapshot_symlink_create_failed scope={} category={} os_error={}",
+                    scope.code(),
+                    category.code(),
+                    Self::os_error_code(&error)
+                ));
+            }
+            let destination_identity =
+                Self::stat_destination_at(destination_parent, destination_name)
+                    .map_err(|error| {
+                        format!(
+                            "code=authority_snapshot_symlink_validate_failed scope={} category={} os_error={}",
+                            scope.code(),
+                            category.code(),
+                            Self::os_error_code(&error)
+                        )
+                    });
+            let snapshot_result = (|| -> Result<(), String> {
+                let destination_identity = destination_identity?;
+                if destination_identity.st_mode & libc::S_IFMT != libc::S_IFLNK {
+                    return Err(format!(
+                        "code=authority_snapshot_symlink_identity_failed scope={} category={}",
+                        scope.code(),
+                        category.code()
+                    ));
+                }
+                let final_metadata =
+                    Self::stat_destination_at(source_parent, source_name).map_err(
+                        |error| {
+                            format!(
+                                "code=authority_snapshot_symlink_revalidate_failed scope={} category={} os_error={}",
+                                scope.code(),
+                                category.code(),
+                                Self::os_error_code(&error)
+                            )
+                        },
+                    )?;
+                let final_target = Self::readlink_destination_at(
+                    source_parent,
+                    source_name,
+                    target_bytes.len(),
+                )
+                .map_err(|error| {
+                    format!(
+                        "code=authority_snapshot_symlink_target_revalidate_failed scope={} category={} os_error={}",
+                        scope.code(),
+                        category.code(),
+                        Self::os_error_code(&error)
+                    )
+                })?;
+                if !Self::stat_entry_stable(&metadata, &final_metadata)
+                    || final_metadata.st_mode & libc::S_IFMT != libc::S_IFLNK
+                    || final_target != target_bytes
+                {
+                    return Err(format!(
+                        "code=authority_snapshot_symlink_changed scope={} category={}",
+                        scope.code(),
+                        category.code()
+                    ));
+                }
+                let final_destination =
+                    Self::stat_destination_at(destination_parent, destination_name)
+                        .map_err(|error| {
+                            format!(
+                                "code=authority_snapshot_symlink_entry_revalidate_failed scope={} category={} os_error={}",
+                                scope.code(),
+                                category.code(),
+                                Self::os_error_code(&error)
+                            )
+                        })?;
+                let final_destination_target = Self::readlink_destination_at(
+                    destination_parent,
+                    destination_name,
+                    target_bytes.len(),
+                )
+                .map_err(|error| {
+                    format!(
+                        "code=authority_snapshot_symlink_target_validate_failed scope={} category={} os_error={}",
+                        scope.code(),
+                        category.code(),
+                        Self::os_error_code(&error)
+                    )
+                })?;
+                if final_destination.st_dev != destination_identity.st_dev
+                    || final_destination.st_ino != destination_identity.st_ino
+                    || final_destination.st_mode & libc::S_IFMT != libc::S_IFLNK
+                    || final_destination_target != target_bytes
+                {
+                    return Err(format!(
+                        "code=authority_snapshot_destination_rebound scope={} category={} kind=symlink",
+                        scope.code(),
+                        category.code()
+                    ));
+                }
+                destination_parent.sync_all().map_err(|error| {
+                    format!(
+                        "code=authority_snapshot_parent_sync_failed scope={} category={} os_error={}",
+                        scope.code(),
+                        category.code(),
+                        Self::os_error_code(&error)
+                    )
+                })
+            })();
+            if let Err(primary) = snapshot_result {
+                return match Self::cleanup_created_destination(
+                    destination_parent,
+                    destination_name,
+                    scope,
+                    category,
+                ) {
+                    Ok(()) => Err(primary),
+                    Err(cleanup) => Err(format!("{primary}; {cleanup}")),
+                };
             }
             return Ok(());
         }
-        if metadata.is_file() {
-            Self::charge_entry(budget, metadata.len())?;
-            let parent = backup.parent().ok_or("隔离 authority 备份路径没有父目录")?;
-            std::fs::create_dir_all(parent)
-                .map_err(|error| format!("无法创建隔离 authority 备份目录：{error}"))?;
-            let mut input = std::fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-                .open(source)
-                .map_err(|error| format!("无法打开隔离 authority 快照源：{error}"))?;
+        if source_kind == libc::S_IFREG {
+            let source_size = u64::try_from(metadata.st_size).map_err(|_| {
+                format!(
+                    "code=authority_snapshot_source_size_invalid scope={} category={}",
+                    scope.code(),
+                    category.code()
+                )
+            })?;
+            let source_mode = u32::from(metadata.st_mode) & 0o777;
+            Self::charge_entry(budget, source_size, scope, category)?;
+            let mut input = Self::open_destination_at(
+                source_parent.as_raw_fd(),
+                source_name,
+                libc::O_RDONLY,
+                0,
+            )
+            .map_err(|error| {
+                format!(
+                    "code=authority_snapshot_source_open_failed scope={} category={} os_error={}",
+                    scope.code(),
+                    category.code(),
+                    Self::os_error_code(&error)
+                )
+            })?;
             let opened = input
                 .metadata()
-                .map_err(|error| format!("无法复核隔离 authority 快照源：{error}"))?;
+                .map_err(|error| {
+                    format!(
+                        "code=authority_snapshot_source_open_validate_failed scope={} category={} os_error={}",
+                        scope.code(),
+                        category.code(),
+                        Self::os_error_code(&error)
+                    )
+                })?;
             if !opened.is_file()
-                || opened.dev() != metadata.dev()
-                || opened.ino() != metadata.ino()
-                || opened.len() != metadata.len()
+                || !Self::destination_entry_matches_file(
+                    &metadata,
+                    &opened,
+                    libc::S_IFREG,
+                )
+                || opened.len() != source_size
             {
-                return Err("隔离 authority 快照源在读取前发生变化".into());
+                return Err(format!(
+                    "code=authority_snapshot_source_changed scope={} category={} phase=open",
+                    scope.code(),
+                    category.code()
+                ));
             }
-            let mut output = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-                .open(backup)
-                .map_err(|error| format!("无法创建隔离 authority 独立快照：{error}"))?;
-            let copied = std::io::copy(&mut input, &mut output)
-                .map_err(|error| format!("无法复制隔离 authority 快照：{error}"))?;
-            if copied != metadata.len() {
-                return Err("隔离 authority 快照源在读取期间发生变化".into());
-            }
-            output
-                .sync_all()
-                .map_err(|error| format!("无法持久化隔离 authority 快照：{error}"))?;
-            std::fs::set_permissions(
-                backup,
-                std::fs::Permissions::from_mode(metadata.permissions().mode() & 0o777),
-            )
-            .map_err(|error| format!("无法保留隔离 authority 文件权限：{error}"))?;
-            let final_metadata = input
-                .metadata()
-                .map_err(|error| format!("无法复核隔离 authority 快照源：{error}"))?;
-            if final_metadata.dev() != metadata.dev()
-                || final_metadata.ino() != metadata.ino()
-                || final_metadata.len() != metadata.len()
-                || final_metadata.mtime() != metadata.mtime()
-                || final_metadata.mtime_nsec() != metadata.mtime_nsec()
-            {
-                return Err("隔离 authority 快照源在读取期间发生变化".into());
+            let parent_fd = destination_parent.as_raw_fd();
+            let clone_result =
+                Self::clone_regular_file_at(input.as_raw_fd(), parent_fd, destination_name);
+            let mut destination_created = clone_result.is_ok();
+            let cloned = clone_result.is_ok();
+            let snapshot_result = (|| -> Result<(), String> {
+                let output = match clone_result {
+                    Ok(()) => Self::open_destination_at(
+                        parent_fd,
+                        destination_name,
+                        libc::O_RDONLY,
+                        0,
+                    )
+                    .map_err(|error| {
+                        format!(
+                            "code=authority_snapshot_clone_open_failed scope={} category={} os_error={}",
+                            scope.code(),
+                            category.code(),
+                            Self::os_error_code(&error)
+                        )
+                    })?,
+                    Err(clone_error)
+                        if matches!(
+                            clone_error.raw_os_error(),
+                            Some(libc::ENOTSUP) | Some(libc::EXDEV)
+                        ) =>
+                    {
+                        Self::charge_full_copy(budget, source_size, scope, category)?;
+                        let mut output = Self::open_destination_at(
+                            parent_fd,
+                            destination_name,
+                            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+                            0o600,
+                        )
+                        .map_err(|error| {
+                            format!(
+                                "code=authority_snapshot_copy_create_failed scope={} category={} os_error={}",
+                                scope.code(),
+                                category.code(),
+                                Self::os_error_code(&error)
+                            )
+                        })?;
+                        destination_created = true;
+                        #[cfg(test)]
+                        if SANDBOX_SESSION_TEST_SEAMS
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .authority_fallback_fail_after_create
+                            .is_some_and(|thread| thread == std::thread::current().id())
+                        {
+                            return Err(format!(
+                                "code=authority_snapshot_copy_injected_failure scope={} category={}",
+                                scope.code(),
+                                category.code()
+                            ));
+                        }
+                        let copied = std::io::copy(&mut input, &mut output).map_err(|error| {
+                            format!(
+                                "code=authority_snapshot_copy_failed scope={} category={} os_error={}",
+                                scope.code(),
+                                category.code(),
+                                Self::os_error_code(&error)
+                            )
+                        })?;
+                        if copied != source_size {
+                            return Err(format!(
+                                "code=authority_snapshot_source_changed scope={} category={} phase=copy",
+                                scope.code(),
+                                category.code()
+                            ));
+                        }
+                        output
+                    }
+                    Err(clone_error) => {
+                        return Err(format!(
+                            "code=authority_snapshot_clone_failed scope={} category={} os_error={}",
+                            scope.code(),
+                            category.code(),
+                            Self::os_error_code(&clone_error)
+                        ))
+                    }
+                };
+                output
+                    .set_permissions(std::fs::Permissions::from_mode(
+                        source_mode,
+                    ))
+                    .map_err(|error| {
+                        format!(
+                            "code=authority_snapshot_chmod_failed scope={} category={} os_error={}",
+                            scope.code(),
+                            category.code(),
+                            Self::os_error_code(&error)
+                        )
+                    })?;
+                let saved = output.metadata().map_err(|error| {
+                    format!(
+                        "code=authority_snapshot_validate_failed scope={} category={} os_error={}",
+                        scope.code(),
+                        category.code(),
+                        Self::os_error_code(&error)
+                    )
+                })?;
+                if !saved.is_file()
+                    || (cloned && saved.dev() != opened.dev())
+                    || (saved.dev() == opened.dev() && saved.ino() == opened.ino())
+                    || saved.len() != opened.len()
+                    || saved.permissions().mode() & 0o777 != source_mode
+                {
+                    return Err(format!(
+                        "code=authority_snapshot_independence_failed scope={} category={}",
+                        scope.code(),
+                        category.code()
+                    ));
+                }
+                let destination_entry =
+                    Self::stat_destination_at(destination_parent, destination_name)
+                        .map_err(|error| {
+                            format!(
+                                "code=authority_snapshot_entry_revalidate_failed scope={} category={} os_error={}",
+                                scope.code(),
+                                category.code(),
+                                Self::os_error_code(&error)
+                            )
+                        })?;
+                if !Self::destination_entry_matches_file(
+                    &destination_entry,
+                    &saved,
+                    libc::S_IFREG,
+                ) {
+                    return Err(format!(
+                        "code=authority_snapshot_destination_rebound scope={} category={} kind=file",
+                        scope.code(),
+                        category.code()
+                    ));
+                }
+                let final_entry =
+                    Self::stat_destination_at(source_parent, source_name).map_err(
+                        |error| {
+                            format!(
+                                "code=authority_snapshot_source_entry_revalidate_failed scope={} category={} os_error={}",
+                                scope.code(),
+                                category.code(),
+                                Self::os_error_code(&error)
+                            )
+                        },
+                    )?;
+                let final_metadata = input.metadata().map_err(|error| {
+                    format!(
+                        "code=authority_snapshot_source_revalidate_failed scope={} category={} os_error={}",
+                        scope.code(),
+                        category.code(),
+                        Self::os_error_code(&error)
+                    )
+                })?;
+                if !Self::stat_entry_stable(&metadata, &final_entry)
+                    || !Self::destination_entry_matches_file(
+                        &final_entry,
+                        &final_metadata,
+                        libc::S_IFREG,
+                    )
+                    || final_metadata.dev() != opened.dev()
+                    || final_metadata.ino() != opened.ino()
+                    || final_metadata.len() != opened.len()
+                    || final_metadata.permissions().mode() & 0o777
+                        != opened.permissions().mode() & 0o777
+                    || final_metadata.mtime() != opened.mtime()
+                    || final_metadata.mtime_nsec() != opened.mtime_nsec()
+                {
+                    return Err(format!(
+                        "code=authority_snapshot_source_changed scope={} category={} phase=revalidate",
+                        scope.code(),
+                        category.code()
+                    ));
+                }
+                output.sync_all().map_err(|error| {
+                    format!(
+                        "code=authority_snapshot_sync_failed scope={} category={} os_error={}",
+                        scope.code(),
+                        category.code(),
+                        Self::os_error_code(&error)
+                    )
+                })?;
+                destination_parent.sync_all().map_err(|error| {
+                    format!(
+                        "code=authority_snapshot_parent_sync_failed scope={} category={} os_error={}",
+                        scope.code(),
+                        category.code(),
+                        Self::os_error_code(&error)
+                    )
+                })?;
+                Ok(())
+            })();
+            if let Err(primary) = snapshot_result {
+                if destination_created {
+                    return match Self::cleanup_created_destination(
+                        destination_parent,
+                        destination_name,
+                        scope,
+                        category,
+                    ) {
+                        Ok(()) => Err(primary),
+                        Err(cleanup) => Err(format!("{primary}; {cleanup}")),
+                    };
+                }
+                return Err(primary);
             }
             return Ok(());
         }
-        if !metadata.is_dir() {
+        if source_kind != libc::S_IFDIR {
             return Err(format!(
-                "隔离 authority {} 不是普通文件或目录",
-                source.display()
+                "code=authority_snapshot_special_file scope={} category={}",
+                scope.code(),
+                category.code()
             ));
         }
-        Self::charge_entry(budget, 0)?;
-        std::fs::create_dir(backup)
-            .map_err(|error| format!("无法创建隔离 authority 快照目录：{error}"))?;
-        let mut children = std::fs::read_dir(source)
-            .map_err(|error| format!("无法枚举隔离 authority：{error}"))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("无法枚举隔离 authority：{error}"))?;
-        children.sort_by_key(|entry| entry.file_name());
-        let initial_manifest = Self::directory_manifest(&children)?;
+        let source_directory =
+            Self::open_directory_at(source_parent.as_raw_fd(), source_name).map_err(
+                |error| {
+                    format!(
+                        "code=authority_snapshot_directory_source_open_failed scope={} category={} os_error={}",
+                        scope.code(),
+                        category.code(),
+                        Self::os_error_code(&error)
+                    )
+                },
+            )?;
+        let source_directory_metadata = source_directory.metadata().map_err(|error| {
+            format!(
+                "code=authority_snapshot_directory_source_validate_failed scope={} category={} os_error={}",
+                scope.code(),
+                category.code(),
+                Self::os_error_code(&error)
+            )
+        })?;
+        if !source_directory_metadata.is_dir()
+            || !Self::destination_entry_matches_file(
+                &metadata,
+                &source_directory_metadata,
+                libc::S_IFDIR,
+            )
+        {
+            return Err(format!(
+                "code=authority_snapshot_source_changed scope={} category={} phase=directory_open",
+                scope.code(),
+                category.code()
+            ));
+        }
+        let source_mode = u32::from(metadata.st_mode) & 0o777;
+        Self::charge_entry(budget, 0, scope, category)?;
+        Self::mkdir_destination_at(
+            destination_parent.as_raw_fd(),
+            destination_name,
+            0o700,
+        )
+        .map_err(|error| {
+            format!(
+                "code=authority_snapshot_directory_create_failed scope={} category={} os_error={}",
+                scope.code(),
+                category.code(),
+                Self::os_error_code(&error)
+            )
+        })?;
+        let created_destination_entry =
+            Self::stat_destination_at(destination_parent, destination_name)
+                .map_err(|error| {
+                    format!(
+                        "code=authority_snapshot_directory_entry_validate_failed scope={} category={} os_error={}",
+                        scope.code(),
+                        category.code(),
+                        Self::os_error_code(&error)
+                    )
+                })?;
+        let destination_directory = Self::open_directory_at(
+            destination_parent.as_raw_fd(),
+            destination_name,
+        )
+        .map_err(|error| {
+            format!(
+                "code=authority_snapshot_directory_open_failed scope={} category={} os_error={}",
+                scope.code(),
+                category.code(),
+                Self::os_error_code(&error)
+            )
+        })?;
+        destination_directory
+            .set_permissions(std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| {
+                format!(
+                    "code=authority_snapshot_directory_chmod_failed scope={} category={} os_error={}",
+                    scope.code(),
+                    category.code(),
+                    Self::os_error_code(&error)
+                )
+            })?;
+        let destination_metadata = destination_directory.metadata().map_err(|error| {
+            format!(
+                "code=authority_snapshot_directory_validate_failed scope={} category={} os_error={}",
+                scope.code(),
+                category.code(),
+                Self::os_error_code(&error)
+            )
+        })?;
+        if !destination_metadata.is_dir()
+            || destination_metadata.file_type().is_symlink()
+            || destination_metadata.uid() != unsafe { libc::geteuid() }
+            || (destination_metadata.dev() == source_directory_metadata.dev()
+                && destination_metadata.ino() == source_directory_metadata.ino())
+            || !Self::destination_entry_matches_file(
+                &created_destination_entry,
+                &destination_metadata,
+                libc::S_IFDIR,
+            )
+        {
+            return Err(format!(
+                "code=authority_snapshot_directory_identity_failed scope={} category={}",
+                scope.code(),
+                category.code()
+            ));
+        }
+        let children = Self::read_directory_names(&source_directory).map_err(|error| {
+            format!(
+                "code=authority_snapshot_directory_enumerate_failed scope={} category={} os_error={}",
+                scope.code(),
+                category.code(),
+                Self::os_error_code(&error)
+            )
+        })?;
+        let initial_manifest =
+            Self::directory_manifest_at(&source_directory, &children)?;
         #[cfg(test)]
         if let Some(barrier) = SANDBOX_SESSION_TEST_SEAMS
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .directory_barrier
             .as_ref()
-            .filter(|(target, _)| target == source)
+            .filter(|(target, _)| target == source_logical)
             .map(|(_, barrier)| barrier.clone())
         {
             std::fs::create_dir_all(&barrier)
@@ -1147,79 +2566,337 @@ impl AuthorityTreeSnapshot {
                 return Err("test-only authority snapshot barrier timed out".into());
             }
         }
-        for child in children {
-            Self::copy_tree(
-                &child.path(),
-                &backup.join(child.file_name()),
+        for child in &children {
+            let child_name = std::ffi::CString::new(child.as_bytes()).map_err(|_| {
+                format!(
+                    "code=authority_snapshot_source_name_invalid scope={} category={}",
+                    scope.code(),
+                    category.code()
+                )
+            })?;
+            let child_logical = source_logical.join(&child);
+            Self::copy_tree_from_at(
+                &child_logical,
+                &source_directory,
+                &child_name,
+                &destination_directory,
+                &child_name,
                 budget,
                 true,
+                scope,
+                root,
             )?;
         }
-        let mut final_children = std::fs::read_dir(source)
-            .map_err(|error| format!("无法复核隔离 authority 目录：{error}"))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("无法复核隔离 authority 目录：{error}"))?;
-        final_children.sort_by_key(|entry| entry.file_name());
-        let final_manifest = Self::directory_manifest(&final_children)?;
-        let final_metadata = std::fs::symlink_metadata(source)
-            .map_err(|error| format!("无法复核隔离 authority 目录：{error}"))?;
-        if initial_manifest != final_manifest
+        let final_children =
+            Self::read_directory_names(&source_directory).map_err(|error| {
+                format!(
+                    "code=authority_snapshot_directory_reenumerate_failed scope={} category={} os_error={}",
+                    scope.code(),
+                    category.code(),
+                    Self::os_error_code(&error)
+                )
+            })?;
+        let final_manifest =
+            Self::directory_manifest_at(&source_directory, &final_children)?;
+        let final_entry =
+            Self::stat_destination_at(source_parent, source_name).map_err(|error| {
+                format!(
+                    "code=authority_snapshot_directory_source_entry_revalidate_failed scope={} category={} os_error={}",
+                    scope.code(),
+                    category.code(),
+                    Self::os_error_code(&error)
+                )
+            })?;
+        let final_metadata = source_directory.metadata().map_err(|error| {
+            format!(
+                "code=authority_snapshot_directory_source_revalidate_failed scope={} category={} os_error={}",
+                scope.code(),
+                category.code(),
+                Self::os_error_code(&error)
+            )
+        })?;
+        let membership_stable =
+            initial_manifest == final_manifest && children == final_children;
+        let entry_stable = Self::stat_entry_stable(&metadata, &final_entry);
+        let binding_stable = Self::destination_entry_matches_file(
+                &final_entry,
+                &final_metadata,
+                libc::S_IFDIR,
+            );
+        let opened_stable = final_metadata.dev() == source_directory_metadata.dev()
+            && final_metadata.ino() == source_directory_metadata.ino()
+            && final_metadata.uid() == source_directory_metadata.uid()
+            && final_metadata.permissions().mode() & 0o777
+                == source_directory_metadata.permissions().mode() & 0o777
+            && final_metadata.mtime() == source_directory_metadata.mtime()
+            && final_metadata.mtime_nsec() == source_directory_metadata.mtime_nsec();
+        if !membership_stable
             || !final_metadata.is_dir()
-            || final_metadata.dev() != metadata.dev()
-            || final_metadata.ino() != metadata.ino()
-            || final_metadata.uid() != metadata.uid()
-            || final_metadata.permissions().mode() & 0o777
-                != metadata.permissions().mode() & 0o777
-            || final_metadata.mtime() != metadata.mtime()
-            || final_metadata.mtime_nsec() != metadata.mtime_nsec()
+            || !entry_stable
+            || !binding_stable
+            || !opened_stable
         {
-            return Err("隔离 authority 目录在快照期间发生变化".into());
+            let manifest_detail = initial_manifest
+                .iter()
+                .zip(&final_manifest)
+                .enumerate()
+                .find_map(|(index, (initial, final_entry))| {
+                    (initial != final_entry).then(|| {
+                        format!(
+                            " first_mismatch_index={index} name_equal={} kind_equal={} device_equal={} inode_equal={} size_equal={} mode_equal={} mtime_equal={}",
+                            initial.name == final_entry.name,
+                            initial.kind == final_entry.kind,
+                            initial.device == final_entry.device,
+                            initial.inode == final_entry.inode,
+                            initial.size == final_entry.size,
+                            initial.mode == final_entry.mode,
+                            initial.modified_seconds == final_entry.modified_seconds
+                                && initial.modified_nanoseconds
+                                    == final_entry.modified_nanoseconds
+                        )
+                    })
+                })
+                .unwrap_or_default();
+            return Err(format!(
+                "code=authority_snapshot_directory_changed scope={} category={} membership_stable={} entry_stable={} binding_stable={} opened_stable={} initial_entries={} final_entries={}{}",
+                scope.code(),
+                category.code(),
+                membership_stable,
+                entry_stable,
+                binding_stable,
+                opened_stable,
+                initial_manifest.len(),
+                final_manifest.len(),
+                manifest_detail
+            ));
         }
-        std::fs::set_permissions(
-            backup,
-            std::fs::Permissions::from_mode(metadata.permissions().mode() & 0o777),
-        )
-        .map_err(|error| format!("无法保留隔离 authority 目录权限：{error}"))?;
-        Self::sync_directory(backup)?;
+        destination_directory
+            .set_permissions(std::fs::Permissions::from_mode(
+                source_mode,
+            ))
+            .map_err(|error| {
+                format!(
+                    "code=authority_snapshot_directory_chmod_failed scope={} category={} os_error={}",
+                    scope.code(),
+                    category.code(),
+                    Self::os_error_code(&error)
+                )
+            })?;
+        let final_destination_metadata =
+            destination_directory.metadata().map_err(|error| {
+                format!(
+                    "code=authority_snapshot_directory_validate_failed scope={} category={} os_error={}",
+                    scope.code(),
+                    category.code(),
+                    Self::os_error_code(&error)
+                )
+            })?;
+        let final_destination_entry =
+            Self::stat_destination_at(destination_parent, destination_name)
+                .map_err(|error| {
+                    format!(
+                        "code=authority_snapshot_directory_entry_revalidate_failed scope={} category={} os_error={}",
+                        scope.code(),
+                        category.code(),
+                        Self::os_error_code(&error)
+                    )
+                })?;
+        if !Self::destination_entry_matches_file(
+            &final_destination_entry,
+            &final_destination_metadata,
+            libc::S_IFDIR,
+        ) {
+            return Err(format!(
+                "code=authority_snapshot_destination_rebound scope={} category={} kind=directory",
+                scope.code(),
+                category.code()
+            ));
+        }
+        destination_directory.sync_all().map_err(|error| {
+            format!(
+                "code=authority_snapshot_directory_sync_failed scope={} category={} os_error={}",
+                scope.code(),
+                category.code(),
+                Self::os_error_code(&error)
+            )
+        })?;
+        destination_parent.sync_all().map_err(|error| {
+            format!(
+                "code=authority_snapshot_parent_sync_failed scope={} category={} os_error={}",
+                scope.code(),
+                category.code(),
+                Self::os_error_code(&error)
+            )
+        })?;
         Ok(())
     }
 
-    fn remove_current(path: &Path) -> Result<(), String> {
-        let metadata = match std::fs::symlink_metadata(path) {
+    fn remove_current_at(
+        scope: AuthoritySnapshotScope,
+        parent: &std::fs::File,
+        name: &std::ffi::CStr,
+    ) -> Result<(), String> {
+        let metadata = match Self::stat_destination_at(parent, name) {
             Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(format!("无法检查待恢复 authority：{error}")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return parent.sync_all().map_err(|sync_error| {
+                    format!(
+                        "code=authority_restore_parent_sync_failed scope={} os_error={}",
+                        scope.code(),
+                        Self::os_error_code(&sync_error)
+                    )
+                })
+            }
+            Err(error) => {
+                return Err(format!(
+                    "code=authority_restore_metadata_failed scope={} os_error={}",
+                    scope.code(),
+                    Self::os_error_code(&error)
+                ))
+            }
         };
-        if metadata.file_type().is_symlink() {
+        if metadata.st_mode & libc::S_IFMT == libc::S_IFLNK {
             return Err(format!(
-                "待恢复 authority {} 变成符号链接，拒绝跟随",
-                path.display()
+                "code=authority_restore_root_symlink scope={}",
+                scope.code()
             ));
         }
-        if metadata.is_dir() {
-            std::fs::remove_dir_all(path)
-                .map_err(|error| format!("无法移除待恢复 authority 目录：{error}"))
-        } else if metadata.is_file() {
-            std::fs::remove_file(path)
-                .map_err(|error| format!("无法移除待恢复 authority 文件：{error}"))
+        if matches!(
+            metadata.st_mode & libc::S_IFMT,
+            libc::S_IFDIR | libc::S_IFREG
+        ) {
+            Self::remove_tree_at(parent, name).map_err(|error| {
+                format!(
+                    "code=authority_restore_remove_failed scope={} os_error={}",
+                    scope.code(),
+                    Self::os_error_code(&error)
+                )
+            })
         } else {
             Err(format!(
-                "待恢复 authority {} 变成特殊文件，拒绝修改",
-                path.display()
+                "code=authority_restore_special_file scope={}",
+                scope.code()
             ))
         }
     }
 
+    fn validate_backup_identity(&self) -> Result<(), String> {
+        let Some((expected_device, expected_inode, expected_kind)) =
+            self.backup_identity
+        else {
+            return if self.existed {
+                Err(format!(
+                    "code=authority_restore_backup_identity_missing scope={}",
+                    self.scope.code()
+                ))
+            } else {
+                Ok(())
+            };
+        };
+        let parent = self.backup_parent.as_ref().ok_or_else(|| {
+            format!(
+                "code=authority_restore_backup_parent_missing scope={}",
+                self.scope.code()
+            )
+        })?;
+        let name = self.backup_name.as_deref().ok_or_else(|| {
+            format!(
+                "code=authority_restore_backup_name_missing scope={}",
+                self.scope.code()
+            )
+        })?;
+        let parent_path = self
+            .backup
+            .parent()
+            .ok_or("code=authority_restore_backup_parent_missing")?;
+        if !Self::absolute_directory_binding_matches(parent_path, parent).map_err(
+            |error| {
+                format!(
+                    "code=authority_restore_backup_parent_revalidate_failed scope={} os_error={}",
+                    self.scope.code(),
+                    Self::os_error_code(&error)
+                )
+            },
+        )? {
+            return Err(format!(
+                "code=authority_restore_backup_parent_rebound scope={}",
+                self.scope.code()
+            ));
+        }
+        let current =
+            Self::stat_destination_at(parent, name).map_err(|error| {
+                format!(
+                    "code=authority_restore_backup_validate_failed scope={} os_error={}",
+                    self.scope.code(),
+                    Self::os_error_code(&error)
+                )
+            })?;
+        if u64::try_from(current.st_dev).ok() != Some(expected_device)
+            || u64::try_from(current.st_ino).ok() != Some(expected_inode)
+            || current.st_mode & libc::S_IFMT != expected_kind
+        {
+            return Err(format!(
+                "code=authority_restore_backup_identity_changed scope={}",
+                self.scope.code()
+            ));
+        }
+        Ok(())
+    }
+
     fn restore(&mut self) -> Result<(), String> {
-        Self::remove_current(&self.source)?;
+        self.validate_backup_identity()?;
+        let parent_path = self.source.parent().ok_or("隔离 authority 没有父目录")?;
+        let parent = Self::open_absolute_directory(parent_path).map_err(|error| {
+            format!(
+                "code=authority_restore_parent_open_failed scope={} os_error={}",
+                self.scope.code(),
+                Self::os_error_code(&error)
+            )
+        })?;
+        let source_name = Self::destination_name(&self.source)?;
+        Self::remove_current_at(self.scope, &parent, &source_name)?;
         if self.existed {
-            let parent = self.source.parent().ok_or("隔离 authority 没有父目录")?;
-            std::fs::create_dir_all(parent)
-                .map_err(|error| format!("无法创建隔离 authority 恢复目录：{error}"))?;
             let mut budget = AuthorityCopyBudget::default();
-            Self::copy_tree(&self.backup, &self.source, &mut budget, false)
+            let backup_root = self.backup.clone();
+            let backup_parent = self.backup_parent.as_ref().ok_or_else(|| {
+                format!(
+                    "code=authority_restore_backup_parent_missing scope={}",
+                    self.scope.code()
+                )
+            })?;
+            let backup_name = self.backup_name.as_deref().ok_or_else(|| {
+                format!(
+                    "code=authority_restore_backup_name_missing scope={}",
+                    self.scope.code()
+                )
+            })?;
+            Self::copy_tree_from_at(
+                &self.backup,
+                backup_parent,
+                backup_name,
+                &parent,
+                &source_name,
+                &mut budget,
+                false,
+                self.scope,
+                &backup_root,
+            )
                 .map_err(|error| format!("无法恢复隔离 authority：{error}"))?;
-            Self::sync_directory(parent)?;
+            self.validate_backup_identity()?;
+        }
+        if !Self::absolute_directory_binding_matches(parent_path, &parent)
+            .map_err(|error| {
+                format!(
+                    "code=authority_restore_parent_revalidate_failed scope={} os_error={}",
+                    self.scope.code(),
+                    Self::os_error_code(&error)
+                )
+            })?
+        {
+            return Err(format!(
+                "code=authority_restore_parent_rebound scope={}",
+                self.scope.code()
+            ));
         }
         Ok(())
     }
@@ -1422,38 +3099,228 @@ impl OneClickAuthoritySnapshot {
         let sandbox_dir = sandbox_home
             .parent()
             .ok_or("沙箱 HOME 无父目录，无法建立事务快照")?;
-        let cleanup_context =
+        let mut cleanup_context =
             AuthorityCleanupContext::new(config_dir, sandbox_home, state)?;
         let backup_root = cleanup_context.root.clone();
-        std::fs::create_dir(&backup_root)
-            .map_err(|error| format!("无法创建 one-click 事务快照：{error}"))?;
-        std::fs::set_permissions(&backup_root, std::fs::Permissions::from_mode(0o700))
-            .map_err(|error| format!("无法收紧 one-click 事务快照权限：{error}"))?;
+        let snapshot_parent = AuthorityTreeSnapshot::open_absolute_directory(
+            &cleanup_context.expected_snapshot_parent,
+        )
+            .map_err(|error| {
+                format!(
+                    "code=authority_snapshot_root_parent_open_failed os_error={}",
+                    AuthorityTreeSnapshot::os_error_code(&error)
+                )
+            })?;
+        let snapshot_parent_metadata = snapshot_parent.metadata().map_err(|error| {
+            format!(
+                "code=authority_snapshot_root_parent_validate_failed os_error={}",
+                AuthorityTreeSnapshot::os_error_code(&error)
+            )
+        })?;
+        if !snapshot_parent_metadata.is_dir()
+            || snapshot_parent_metadata.file_type().is_symlink()
+            || snapshot_parent_metadata.uid() != unsafe { libc::geteuid() }
+        {
+            return Err("code=authority_snapshot_root_parent_identity_failed".into());
+        }
+        let backup_root_name =
+            AuthorityTreeSnapshot::destination_name(&backup_root)?;
+        AuthorityTreeSnapshot::mkdir_destination_at(
+            snapshot_parent.as_raw_fd(),
+            &backup_root_name,
+            0o700,
+        )
+        .map_err(|error| {
+            format!(
+                "code=authority_snapshot_root_create_failed os_error={}",
+                AuthorityTreeSnapshot::os_error_code(&error)
+            )
+        })?;
+        let created_root_entry = AuthorityTreeSnapshot::stat_destination_at(
+            &snapshot_parent,
+            &backup_root_name,
+        )
+        .map_err(|error| {
+            finalize_failed_authority_snapshot(
+                &cleanup_context,
+                format!(
+                    "code=authority_snapshot_root_entry_validate_failed os_error={}",
+                    AuthorityTreeSnapshot::os_error_code(&error)
+                ),
+            )
+        })?;
+        cleanup_context.bind_root_identity(&created_root_entry)?;
+        let backup_root_file = match (|| -> Result<std::fs::File, String> {
+            let root = AuthorityTreeSnapshot::open_directory_at(
+                snapshot_parent.as_raw_fd(),
+                &backup_root_name,
+            )
+            .map_err(|error| {
+                format!(
+                    "code=authority_snapshot_root_open_failed os_error={}",
+                    AuthorityTreeSnapshot::os_error_code(&error)
+                )
+            })?;
+            root.set_permissions(std::fs::Permissions::from_mode(0o700))
+                .map_err(|error| {
+                    format!(
+                        "code=authority_snapshot_root_chmod_failed os_error={}",
+                        AuthorityTreeSnapshot::os_error_code(&error)
+                    )
+                })?;
+            let metadata = root.metadata().map_err(|error| {
+                format!(
+                    "code=authority_snapshot_root_validate_failed os_error={}",
+                    AuthorityTreeSnapshot::os_error_code(&error)
+                )
+            })?;
+            if !metadata.is_dir()
+                || metadata.file_type().is_symlink()
+                || metadata.uid() != unsafe { libc::geteuid() }
+                || metadata.permissions().mode() & 0o777 != 0o700
+                || !AuthorityTreeSnapshot::destination_entry_matches_file(
+                    &created_root_entry,
+                    &metadata,
+                    libc::S_IFDIR,
+                )
+            {
+                return Err("code=authority_snapshot_root_identity_failed".into());
+            }
+            root.sync_all().map_err(|error| {
+                format!(
+                    "code=authority_snapshot_root_sync_failed os_error={}",
+                    AuthorityTreeSnapshot::os_error_code(&error)
+                )
+            })?;
+            snapshot_parent.sync_all().map_err(|error| {
+                format!(
+                    "code=authority_snapshot_root_parent_sync_failed os_error={}",
+                    AuthorityTreeSnapshot::os_error_code(&error)
+                )
+            })?;
+            Ok(root)
+        })() {
+            Ok(root) => root,
+            Err(error) => {
+                return Err(finalize_failed_authority_snapshot(
+                    &cleanup_context,
+                    error,
+                ))
+            }
+        };
         let sources = [
-            auth_dir.to_path_buf(),
-            sandbox_dir.join("state"),
-            config_dir.join("runtime"),
-            config_dir.join("science-managed-launch.v1.json"),
+            (
+                AuthoritySnapshotScope::ScienceData,
+                auth_dir.to_path_buf(),
+            ),
+            (
+                AuthoritySnapshotScope::SandboxState,
+                sandbox_dir.join("state"),
+            ),
+            (
+                AuthoritySnapshotScope::CsswitchRuntime,
+                config_dir.join("runtime"),
+            ),
+            (
+                AuthoritySnapshotScope::ManagedReceipt,
+                config_dir.join("science-managed-launch.v1.json"),
+            ),
         ];
         let mut trees = Vec::with_capacity(sources.len());
-        for (index, source) in sources.into_iter().enumerate() {
-            match AuthorityTreeSnapshot::capture(source, backup_root.join(index.to_string())) {
+        for (index, (scope, source)) in sources.into_iter().enumerate() {
+            let backup = backup_root.join(index.to_string());
+            let backup_name = AuthorityTreeSnapshot::destination_name(&backup)?;
+            match AuthorityTreeSnapshot::capture_scoped_at(
+                scope,
+                source,
+                backup,
+                &backup_root_file,
+                &backup_name,
+            ) {
                 Ok(snapshot) => trees.push(snapshot),
                 Err(error) => {
-                    let cleanup = register_authority_cleanup(&cleanup_context)
-                        .and_then(|ticket| {
-                            finalize_registered_authority_cleanup(
-                                &cleanup_context,
-                                &ticket,
-                            )
-                        });
-                    if let Err(cleanup_error) = cleanup {
-                        return Err(format!("{error}；{cleanup_error}"));
-                    }
-                    return Err(error);
+                    let durability = backup_root_file.sync_all().and_then(|_| {
+                        snapshot_parent.sync_all()
+                    });
+                    let primary = match durability {
+                        Ok(()) => error,
+                        Err(sync_error) => format!(
+                            "{error}; code=authority_snapshot_failure_sync_failed os_error={}",
+                            AuthorityTreeSnapshot::os_error_code(&sync_error)
+                        ),
+                    };
+                    return Err(finalize_failed_authority_snapshot(
+                        &cleanup_context,
+                        primary,
+                    ));
                 }
             }
         }
+        if !AuthorityTreeSnapshot::absolute_directory_binding_matches(
+            &cleanup_context.expected_snapshot_parent,
+            &snapshot_parent,
+        )
+        .map_err(|error| {
+            finalize_failed_authority_snapshot(
+                &cleanup_context,
+                format!(
+                    "code=authority_snapshot_root_parent_revalidate_failed os_error={}",
+                    AuthorityTreeSnapshot::os_error_code(&error)
+                ),
+            )
+        })?
+        {
+            return Err(finalize_failed_authority_snapshot(
+                &cleanup_context,
+                "code=authority_snapshot_root_parent_rebound".into(),
+            ));
+        }
+        let final_root_metadata =
+            backup_root_file.metadata().map_err(|error| {
+                finalize_failed_authority_snapshot(
+                    &cleanup_context,
+                    format!(
+                        "code=authority_snapshot_root_validate_failed os_error={}",
+                        AuthorityTreeSnapshot::os_error_code(&error)
+                    ),
+                )
+            })?;
+        let final_root_entry = AuthorityTreeSnapshot::stat_destination_at(
+            &snapshot_parent,
+            &backup_root_name,
+        )
+        .map_err(|error| {
+            finalize_failed_authority_snapshot(
+                &cleanup_context,
+                format!(
+                    "code=authority_snapshot_root_entry_revalidate_failed os_error={}",
+                    AuthorityTreeSnapshot::os_error_code(&error)
+                ),
+            )
+        })?;
+        if !AuthorityTreeSnapshot::destination_entry_matches_file(
+            &final_root_entry,
+            &final_root_metadata,
+            libc::S_IFDIR,
+        ) {
+            return Err(finalize_failed_authority_snapshot(
+                &cleanup_context,
+                "code=authority_snapshot_root_rebound".into(),
+            ));
+        }
+        AuthorityTreeSnapshot::sync_snapshot_completion(
+            &backup_root_file,
+            &snapshot_parent,
+        )
+        .map_err(|error| {
+            finalize_failed_authority_snapshot(
+                &cleanup_context,
+                format!(
+                    "code=authority_snapshot_completion_sync_failed os_error={}",
+                    AuthorityTreeSnapshot::os_error_code(&error)
+                ),
+            )
+        })?;
         Ok(Self {
             backup_root,
             cleanup_context,
@@ -1596,8 +3463,8 @@ impl OneClickAuthoritySnapshot {
 
 impl Drop for OneClickAuthoritySnapshot {
     fn drop(&mut self) {
-        if !self.preserve_recovery {
-            let _ = remove_authority_snapshot_root(&self.backup_root);
+        if !self.preserve_recovery && !self.cleanup_prepared {
+            let _ = self.cleanup_when_expendable();
         }
     }
 }
@@ -3086,11 +4953,23 @@ fn one_click_login_with_options<R: Runtime>(
 #[cfg(test)]
 mod transaction_tests {
     use super::{
-        advance_runtime_transaction, gateway_model_catalog_timeout_ms,
-        prevalidate_one_click_system_ssh, test_arm_authority_snapshot_capture_failure,
-        test_arm_authority_snapshot_cleanup_fault, test_arm_authority_snapshot_directory_barrier,
-        verify_gateway_model_catalog, AuthorityCopyBudget, AuthorityTreeSnapshot,
-        OneClickAuthoritySnapshot, MAX_AUTHORITY_SNAPSHOT_FILE_BYTES,
+        advance_runtime_transaction, cleanup_tombstone_path,
+        gateway_model_catalog_timeout_ms,
+        finalize_registered_authority_cleanup, parse_pending_cleanup_manifest,
+        prevalidate_one_click_system_ssh,
+        test_arm_authority_cleanup_parent_sync_failure,
+        test_arm_authority_snapshot_capture_failure,
+        test_arm_authority_snapshot_cleanup_fault,
+        test_arm_authority_snapshot_clone_errno,
+        test_arm_authority_snapshot_completion_sync_failure,
+        test_arm_authority_snapshot_directory_barrier,
+        test_arm_authority_snapshot_fallback_create_failure, verify_gateway_model_catalog,
+        AuthorityCopyBudget, AuthoritySnapshotCategory, AuthoritySnapshotScope,
+        AuthorityTreeSnapshot, OneClickAuthoritySnapshot, PendingCleanupEntry,
+        RegisteredAuthorityCleanup, PENDING_CLEANUP_MARKER_FILE,
+        MAX_AUTHORITY_FULL_COPY_FILE_BYTES,
+        MAX_AUTHORITY_FULL_COPY_TOTAL_BYTES, MAX_AUTHORITY_SNAPSHOT_ENTRIES,
+        MAX_AUTHORITY_SNAPSHOT_FILE_BYTES, MAX_AUTHORITY_SNAPSHOT_TOTAL_BYTES,
     };
     use crate::config::{self, Config, RuntimeBindingCommit};
     use crate::provider_contracts::ModelPolicy;
@@ -3218,16 +5097,110 @@ mod transaction_tests {
 
     #[test]
     fn authority_snapshot_uses_independent_inodes_and_restores_in_place_mutation() {
+        let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let mut science_0125_budget = AuthorityCopyBudget::default();
-        AuthorityTreeSnapshot::charge_entry(&mut science_0125_budget, 85_323_776)
-            .expect("Science 0.1.25 Conda cache files below 128 MiB must remain snapshotable");
+        AuthorityTreeSnapshot::charge_entry(
+            &mut science_0125_budget,
+            187_050_734,
+            AuthoritySnapshotScope::ScienceData,
+            AuthoritySnapshotCategory::CondaCache,
+        )
+        .expect("observed Science 0.1.25 files below 512 MiB must remain snapshotable");
         let mut oversized_budget = AuthorityCopyBudget::default();
         let oversized = AuthorityTreeSnapshot::charge_entry(
             &mut oversized_budget,
             MAX_AUTHORITY_SNAPSHOT_FILE_BYTES + 1,
+            AuthoritySnapshotScope::ScienceData,
+            AuthoritySnapshotCategory::ScienceRuntime,
         )
-        .expect_err("authority files above 128 MiB must remain fail-closed");
-        assert!(oversized.contains("134217728"));
+        .expect_err("authority files above 512 MiB must remain fail-closed");
+        assert!(oversized.contains("code=authority_snapshot_file_limit"));
+        assert!(oversized.contains("scope=science_data"));
+        assert!(oversized.contains("category=science_runtime"));
+        assert!(!oversized.contains('/'));
+
+        let mut total_budget = AuthorityCopyBudget::default();
+        for _ in 0..4 {
+            AuthorityTreeSnapshot::charge_entry(
+                &mut total_budget,
+                MAX_AUTHORITY_SNAPSHOT_FILE_BYTES,
+                AuthoritySnapshotScope::ScienceData,
+                AuthoritySnapshotCategory::ScienceRuntime,
+            )
+            .expect("exact 2 GiB logical authority boundary must pass");
+        }
+        assert_eq!(total_budget.bytes, MAX_AUTHORITY_SNAPSHOT_TOTAL_BYTES);
+        let total_error = AuthorityTreeSnapshot::charge_entry(
+            &mut total_budget,
+            1,
+            AuthoritySnapshotScope::ScienceData,
+            AuthoritySnapshotCategory::Other,
+        )
+        .expect_err("logical authority above 2 GiB must fail closed");
+        assert!(total_error.contains("code=authority_snapshot_total_limit"));
+
+        let mut entry_budget = AuthorityCopyBudget::default();
+        for _ in 0..MAX_AUTHORITY_SNAPSHOT_ENTRIES {
+            AuthorityTreeSnapshot::charge_entry(
+                &mut entry_budget,
+                0,
+                AuthoritySnapshotScope::Test,
+                AuthoritySnapshotCategory::Other,
+            )
+            .expect("exact entry boundary must pass");
+        }
+        let entry_error = AuthorityTreeSnapshot::charge_entry(
+            &mut entry_budget,
+            0,
+            AuthoritySnapshotScope::Test,
+            AuthoritySnapshotCategory::Other,
+        )
+        .expect_err("entry boundary plus one must fail closed");
+        assert!(entry_error.contains("code=authority_snapshot_entry_limit"));
+
+        let mut overflow_budget = AuthorityCopyBudget {
+            bytes: u64::MAX,
+            ..AuthorityCopyBudget::default()
+        };
+        let overflow_error = AuthorityTreeSnapshot::charge_entry(
+            &mut overflow_budget,
+            1,
+            AuthoritySnapshotScope::Test,
+            AuthoritySnapshotCategory::Other,
+        )
+        .expect_err("logical byte addition overflow must fail closed");
+        assert!(overflow_error.contains("code=authority_snapshot_total_overflow"));
+
+        let mut fallback_budget = AuthorityCopyBudget::default();
+        for _ in 0..4 {
+            AuthorityTreeSnapshot::charge_full_copy(
+                &mut fallback_budget,
+                MAX_AUTHORITY_FULL_COPY_FILE_BYTES,
+                AuthoritySnapshotScope::Test,
+                AuthoritySnapshotCategory::Other,
+            )
+            .expect("exact 512 MiB full-copy boundary must pass");
+        }
+        assert_eq!(
+            fallback_budget.full_copy_bytes,
+            MAX_AUTHORITY_FULL_COPY_TOTAL_BYTES
+        );
+        let fallback_total_error = AuthorityTreeSnapshot::charge_full_copy(
+            &mut fallback_budget,
+            1,
+            AuthoritySnapshotScope::Test,
+            AuthoritySnapshotCategory::Other,
+        )
+        .expect_err("full-copy boundary plus one must require clone support");
+        assert!(fallback_total_error.contains("code=authority_snapshot_clone_required"));
+        let fallback_file_error = AuthorityTreeSnapshot::charge_full_copy(
+            &mut AuthorityCopyBudget::default(),
+            MAX_AUTHORITY_FULL_COPY_FILE_BYTES + 1,
+            AuthoritySnapshotScope::Test,
+            AuthoritySnapshotCategory::Other,
+        )
+        .expect_err("large individual full copy must require clone support");
+        assert!(fallback_file_error.contains("code=authority_snapshot_clone_required"));
 
         let tmp = isolated_tmpdir("independent-inodes");
         let source = tmp.join("authority");
@@ -3302,7 +5275,7 @@ mod transaction_tests {
         )
         .err()
         .expect("authority root symlinks must remain fail-closed");
-        assert!(linked_error.contains("authority 根"));
+        assert!(linked_error.contains("code=authority_snapshot_root_symlink"));
 
         let restore_source = tmp.join("restore-authority");
         let restore_backup = tmp.join("rollback/restore-authority");
@@ -3315,7 +5288,351 @@ mod transaction_tests {
         let restore_error = restore_snapshot
             .restore()
             .expect_err("restore backup roots that become symlinks must remain fail-closed");
-        assert!(restore_error.contains("authority 根"));
+        assert!(
+            restore_error.contains("code=authority_restore_backup_identity_changed")
+                || restore_error
+                    .contains("code=authority_restore_backup_validate_failed")
+        );
+
+        for (label, errno) in [("enotsup", libc::ENOTSUP), ("exdev", libc::EXDEV)] {
+            let fallback_source = tmp.join(format!("fallback-{label}"));
+            let fallback_backup = tmp.join(format!("rollback/fallback-{label}"));
+            fs::create_dir(&fallback_source).unwrap();
+            fs::write(fallback_source.join("state"), b"fallback-bytes\n").unwrap();
+            {
+                let _clone_seam = test_arm_authority_snapshot_clone_errno(errno);
+                AuthorityTreeSnapshot::capture(
+                    fallback_source.clone(),
+                    fallback_backup.clone(),
+                )
+                .expect("ENOTSUP and EXDEV must use the bounded independent-copy fallback");
+            }
+            assert_eq!(
+                fs::read(fallback_backup.join("state")).unwrap(),
+                b"fallback-bytes\n"
+            );
+            let live = fs::metadata(fallback_source.join("state")).unwrap();
+            let saved = fs::metadata(fallback_backup.join("state")).unwrap();
+            assert!(
+                live.dev() != saved.dev() || live.ino() != saved.ino(),
+                "fallback must create an independent regular file"
+            );
+        }
+
+        let unexpected_source = tmp.join("unexpected-clone-error");
+        let unexpected_backup = tmp.join("rollback/unexpected-clone-error");
+        fs::create_dir(&unexpected_source).unwrap();
+        fs::write(unexpected_source.join("state"), b"unchanged\n").unwrap();
+        {
+            let _clone_seam = test_arm_authority_snapshot_clone_errno(libc::EIO);
+            let error = AuthorityTreeSnapshot::capture(
+                unexpected_source,
+                unexpected_backup.clone(),
+            )
+            .err()
+            .expect("unexpected clone errors must fail closed");
+            assert!(error.contains("code=authority_snapshot_clone_failed"));
+            assert!(error.contains("os_error=5"));
+        }
+        assert!(
+            !unexpected_backup.join("state").exists(),
+            "unexpected clone failure must not leave a destination file"
+        );
+
+        let injected_source = tmp.join("injected-fallback-failure");
+        let injected_backup = tmp.join("rollback/injected-fallback-failure");
+        fs::create_dir(&injected_source).unwrap();
+        fs::write(injected_source.join("state"), b"unchanged\n").unwrap();
+        {
+            let _clone_seam = test_arm_authority_snapshot_clone_errno(libc::ENOTSUP);
+            let _copy_seam = test_arm_authority_snapshot_fallback_create_failure();
+            let error = AuthorityTreeSnapshot::capture(
+                injected_source,
+                injected_backup.clone(),
+            )
+            .err()
+            .expect("fallback failure after create must fail closed");
+            assert!(error.contains("code=authority_snapshot_copy_injected_failure"));
+        }
+        assert!(
+            !injected_backup.join("state").exists(),
+            "failed fallback must unlink the pinned destination entry"
+        );
+
+        let per_file_source = tmp.join("fallback-per-file-limit");
+        let per_file_backup = tmp.join("rollback/fallback-per-file-limit");
+        fs::create_dir(&per_file_source).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(per_file_source.join("large"))
+            .unwrap()
+            .set_len(MAX_AUTHORITY_FULL_COPY_FILE_BYTES + 1)
+            .unwrap();
+        {
+            let _clone_seam = test_arm_authority_snapshot_clone_errno(libc::ENOTSUP);
+            let error = AuthorityTreeSnapshot::capture(
+                per_file_source,
+                per_file_backup.clone(),
+            )
+            .err()
+            .expect("fallback above the per-file copy budget must fail closed");
+            assert!(error.contains("code=authority_snapshot_clone_required"));
+        }
+        assert!(!per_file_backup.join("large").exists());
+
+        let aggregate_source = tmp.join("fallback-aggregate-limit");
+        let aggregate_backup = tmp.join("rollback/fallback-aggregate-limit");
+        fs::write(&aggregate_source, b"x").unwrap();
+        let mut exhausted_budget = AuthorityCopyBudget {
+            full_copy_bytes: MAX_AUTHORITY_FULL_COPY_TOTAL_BYTES,
+            ..AuthorityCopyBudget::default()
+        };
+        {
+            let _clone_seam = test_arm_authority_snapshot_clone_errno(libc::EXDEV);
+            let error = AuthorityTreeSnapshot::copy_tree(
+                &aggregate_source,
+                &aggregate_backup,
+                &mut exhausted_budget,
+                false,
+                AuthoritySnapshotScope::Test,
+                &aggregate_source,
+            )
+            .expect_err("fallback aggregate budget plus one must fail closed");
+            assert!(error.contains("code=authority_snapshot_clone_required"));
+        }
+        assert!(!aggregate_backup.exists());
+
+        let fallback_restore_source = tmp.join("fallback-restore");
+        let fallback_restore_backup = tmp.join("rollback/fallback-restore");
+        fs::create_dir(&fallback_restore_source).unwrap();
+        fs::write(fallback_restore_source.join("state"), b"prior\n").unwrap();
+        let mut fallback_restore_snapshot = AuthorityTreeSnapshot::capture(
+            fallback_restore_source.clone(),
+            fallback_restore_backup,
+        )
+        .unwrap();
+        fs::write(fallback_restore_source.join("state"), b"mutated\n").unwrap();
+        {
+            let _clone_seam = test_arm_authority_snapshot_clone_errno(libc::ENOTSUP);
+            fallback_restore_snapshot
+                .restore()
+                .expect("restore must use the bounded independent-copy fallback");
+        }
+        assert_eq!(
+            fs::read(fallback_restore_source.join("state")).unwrap(),
+            b"prior\n"
+        );
+
+        let rebound_parent = tmp.join("restore-rebound-parent");
+        let displaced_parent = tmp.join("restore-displaced-parent");
+        let rebound_foreign = tmp.join("restore-foreign");
+        let rebound_source = rebound_parent.join("authority");
+        let rebound_backup = tmp.join("rollback/restore-rebound");
+        let rebound_barrier = tmp.join("restore-rebound-barrier");
+        fs::create_dir_all(&rebound_source).unwrap();
+        fs::create_dir(&rebound_foreign).unwrap();
+        fs::write(rebound_source.join("state"), b"prior-pinned\n").unwrap();
+        let mut rebound_snapshot = AuthorityTreeSnapshot::capture(
+            rebound_source.clone(),
+            rebound_backup.clone(),
+        )
+        .unwrap();
+        fs::write(rebound_source.join("state"), b"mutated\n").unwrap();
+        let rebound_seam = test_arm_authority_snapshot_directory_barrier(
+            rebound_backup,
+            rebound_barrier.clone(),
+        );
+        let restore_worker = thread::spawn(move || rebound_snapshot.restore());
+        for _ in 0..200 {
+            if rebound_barrier.join("ready").is_file() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(rebound_barrier.join("ready").is_file());
+        fs::rename(&rebound_parent, &displaced_parent).unwrap();
+        symlink(&rebound_foreign, &rebound_parent).unwrap();
+        fs::write(rebound_barrier.join("release"), b"release\n").unwrap();
+        let restore_rebound_error = restore_worker
+            .join()
+            .unwrap()
+            .expect_err("restore parent rebind must fail closed");
+        drop(rebound_seam);
+        assert!(
+            restore_rebound_error.contains("code=authority_restore_parent_rebound")
+                || restore_rebound_error
+                    .contains("code=authority_restore_parent_revalidate_failed")
+        );
+        assert!(
+            !rebound_foreign.join("authority").exists(),
+            "restore must not write through a rebound parent symlink"
+        );
+        assert_eq!(
+            fs::read(displaced_parent.join("authority/state")).unwrap(),
+            b"prior-pinned\n"
+        );
+
+        let backup_parent_rebind_source = tmp.join("backup-parent-rebind-live");
+        let backup_parent_rebind_parent = tmp.join("backup-parent-rebind-root");
+        let backup_parent_displaced = tmp.join("backup-parent-rebind-displaced");
+        let backup_parent_rebind_backup =
+            backup_parent_rebind_parent.join("authority");
+        fs::create_dir(&backup_parent_rebind_source).unwrap();
+        fs::create_dir(&backup_parent_rebind_parent).unwrap();
+        fs::write(
+            backup_parent_rebind_source.join("state"),
+            b"trusted-prior\n",
+        )
+        .unwrap();
+        let mut backup_parent_rebind_snapshot = AuthorityTreeSnapshot::capture(
+            backup_parent_rebind_source.clone(),
+            backup_parent_rebind_backup.clone(),
+        )
+        .unwrap();
+        fs::write(
+            backup_parent_rebind_source.join("state"),
+            b"live-mutated\n",
+        )
+        .unwrap();
+        fs::rename(
+            &backup_parent_rebind_parent,
+            &backup_parent_displaced,
+        )
+        .unwrap();
+        fs::create_dir_all(&backup_parent_rebind_backup).unwrap();
+        fs::write(
+            backup_parent_rebind_backup.join("state"),
+            b"foreign-replacement\n",
+        )
+        .unwrap();
+        let backup_parent_rebind_error = backup_parent_rebind_snapshot
+            .restore()
+            .expect_err("backup parent rebind must fail closed");
+        assert!(
+            backup_parent_rebind_error
+                .contains("code=authority_restore_backup_parent_rebound")
+                || backup_parent_rebind_error.contains(
+                    "code=authority_restore_backup_parent_revalidate_failed"
+                )
+        );
+        assert_eq!(
+            fs::read(backup_parent_rebind_source.join("state")).unwrap(),
+            b"live-mutated\n",
+            "restore must not mutate live authority after backup parent rebind"
+        );
+        assert_eq!(
+            fs::read(backup_parent_rebind_backup.join("state")).unwrap(),
+            b"foreign-replacement\n",
+            "restore must never read or mutate the replacement backup tree"
+        );
+        assert_eq!(
+            fs::read(backup_parent_displaced.join("authority/state")).unwrap(),
+            b"trusted-prior\n",
+            "the pinned original backup must remain intact for diagnosis"
+        );
+        let _ = fs::remove_dir_all(tmp);
+    }
+
+    #[test]
+    fn authority_snapshot_accepts_observed_science_0125_tree_via_independent_clones() {
+        // Installed 0.1.25 metadata-only observation: 1,004,263,008 logical
+        // bytes total and a 187,050,734-byte largest regular file. Keep this
+        // fixture sparse: the regression is about bounded logical authority
+        // and independent snapshot objects, not allocating a GiB in the test.
+        const OBSERVED_TOTAL_BYTES: u64 = 1_004_263_008;
+        const OBSERVED_MAX_FILE_BYTES: u64 = 187_050_734;
+
+        let tmp = isolated_tmpdir("science-0125-observed-authority");
+        let source = tmp.join("authority");
+        let backup = tmp.join("rollback/authority");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir(tmp.join("rollback")).unwrap();
+
+        let mut remaining = OBSERVED_TOTAL_BYTES;
+        let mut index = 0usize;
+        while remaining > 0 {
+            let size = remaining.min(OBSERVED_MAX_FILE_BYTES);
+            let path = source.join(format!("payload-{index}"));
+            let file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .unwrap();
+            file.set_len(size).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            remaining -= size;
+            index += 1;
+        }
+
+        let mut snapshot = AuthorityTreeSnapshot::capture(source.clone(), backup.clone())
+            .expect("observed normal Science 0.1.25 authority must be snapshotable");
+        for entry in fs::read_dir(&source).unwrap() {
+            let entry = entry.unwrap();
+            let live = fs::metadata(entry.path()).unwrap();
+            let saved = fs::metadata(backup.join(entry.file_name())).unwrap();
+            assert_eq!(live.len(), saved.len());
+            assert_eq!(live.permissions().mode() & 0o777, saved.permissions().mode() & 0o777);
+            assert_eq!(live.dev(), saved.dev());
+            assert_ne!(live.ino(), saved.ino());
+        }
+        snapshot.restore().unwrap();
+        let restored_total = fs::read_dir(&source)
+            .unwrap()
+            .map(|entry| fs::metadata(entry.unwrap().path()).unwrap().len())
+            .sum::<u64>();
+        assert_eq!(restored_total, OBSERVED_TOTAL_BYTES);
+        let _ = fs::remove_dir_all(tmp);
+    }
+
+    #[test]
+    fn authority_snapshot_limit_diagnostic_is_path_and_credential_free() {
+        let tmp = isolated_tmpdir("authority-limit-redaction");
+        let source = tmp.join("science-data");
+        let backup = tmp.join("rollback/science-data");
+        fs::create_dir_all(source.join("conda")).unwrap();
+        fs::create_dir(tmp.join("rollback")).unwrap();
+        let canary = "sk-private-canary-path-secret";
+        let path = source.join("conda").join(canary);
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        file.set_len(MAX_AUTHORITY_SNAPSHOT_FILE_BYTES + 1)
+            .unwrap();
+
+        let error = AuthorityTreeSnapshot::capture_scoped(
+            AuthoritySnapshotScope::ScienceData,
+            source,
+            backup,
+        )
+        .err()
+        .expect("oversized Science authority must fail closed");
+        assert!(error.contains("code=authority_snapshot_file_limit"));
+        assert!(error.contains("scope=science_data"));
+        assert!(error.contains("category=conda_cache"));
+        assert!(!error.contains(canary));
+        assert!(!error.contains(tmp.to_string_lossy().as_ref()));
+
+        let special_source = tmp.join("special-science-data");
+        let special_backup = tmp.join("rollback/special-science-data");
+        fs::create_dir(&special_source).unwrap();
+        let special_canary = "sk-private-special-file-canary";
+        let socket_path = special_source.join(special_canary);
+        let socket_path_raw =
+            std::ffi::CString::new(socket_path.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(socket_path_raw.as_ptr(), 0o600) }, 0);
+        let special_error = AuthorityTreeSnapshot::capture_scoped(
+            AuthoritySnapshotScope::ScienceData,
+            special_source,
+            special_backup,
+        )
+        .err()
+        .expect("special authority files must fail closed");
+        assert!(special_error.contains("code=authority_snapshot_special_file"));
+        assert!(!special_error.contains(special_canary));
+        assert!(!special_error.contains(tmp.to_string_lossy().as_ref()));
         let _ = fs::remove_dir_all(tmp);
     }
 
@@ -3363,12 +5680,57 @@ mod transaction_tests {
         let accepted_torn_tree = capture.is_ok()
             && backup.join("database.db").is_file()
             && !backup.join("database.db-wal").exists();
-        let _ = fs::remove_dir_all(&tmp);
-
         assert!(
             capture.is_err(),
             "authority snapshot must fail closed when a DB/WAL directory entry appears after enumeration; accepted_torn_tree={accepted_torn_tree}"
         );
+        drop(_seam);
+
+        let rebound_source = tmp.join("rebound-authority");
+        let rebound_backup = tmp.join("rollback/rebound-authority");
+        let displaced_backup = tmp.join("rollback/displaced-authority");
+        let foreign = tmp.join("foreign-must-remain-empty");
+        let rebound_barrier = tmp.join("rebound-barrier");
+        fs::create_dir(&rebound_source).unwrap();
+        fs::create_dir(&foreign).unwrap();
+        fs::write(rebound_source.join("state"), b"must-stay-pinned\n").unwrap();
+        let rebound_seam = test_arm_authority_snapshot_directory_barrier(
+            rebound_source.clone(),
+            rebound_barrier.clone(),
+        );
+        let rebound_worker = {
+            let source = rebound_source.clone();
+            let backup = rebound_backup.clone();
+            thread::spawn(move || AuthorityTreeSnapshot::capture(source, backup))
+        };
+        for _ in 0..200 {
+            if rebound_barrier.join("ready").is_file() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(rebound_barrier.join("ready").is_file());
+        fs::rename(&rebound_backup, &displaced_backup).unwrap();
+        symlink(&foreign, &rebound_backup).unwrap();
+        fs::write(rebound_barrier.join("release"), b"release\n").unwrap();
+        let rebound_error = rebound_worker
+            .join()
+            .unwrap()
+            .err()
+            .expect("destination entry rebind must fail closed");
+        drop(rebound_seam);
+        assert!(
+            rebound_error.contains("code=authority_snapshot_destination_rebound")
+        );
+        assert!(
+            !foreign.join("state").exists(),
+            "dirfd-anchored copy must never write through a rebound destination symlink"
+        );
+        assert_eq!(
+            fs::read(displaced_backup.join("state")).unwrap(),
+            b"must-stay-pinned\n"
+        );
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -3388,6 +5750,154 @@ mod transaction_tests {
         .unwrap();
         let config = Config::default();
         let state: SharedAppState = Arc::new(Mutex::new(AppState::default()));
+        {
+            let _sync_seam =
+                test_arm_authority_snapshot_completion_sync_failure();
+            let error = OneClickAuthoritySnapshot::capture(
+                &config_dir,
+                &sandbox_home,
+                &auth_dir,
+                &config,
+                &state,
+            )
+            .err()
+            .expect("completion fsync failure must fail closed");
+            assert!(
+                error.contains("code=authority_snapshot_completion_sync_failed"),
+                "unexpected completion-sync failure: {error}"
+            );
+        }
+        let rollback_residue = fs::read_dir(
+            sandbox_home.parent().unwrap(),
+        )
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".one-click-rollback-")
+        });
+        assert!(
+            !rollback_residue,
+            "completion fsync failure must register and finish rollback cleanup"
+        );
+        let mut cleanup_sync_snapshot = OneClickAuthoritySnapshot::capture(
+            &config_dir,
+            &sandbox_home,
+            &auth_dir,
+            &config,
+            &state,
+        )
+        .unwrap();
+        let cleanup_sync_root = cleanup_sync_snapshot.backup_root.clone();
+        let cleanup_sync_tombstone = cleanup_tombstone_path(
+            &PendingCleanupEntry {
+                managed_id: cleanup_sync_root
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+                path: cleanup_sync_root.clone(),
+                device: 0,
+                inode: 0,
+                marker: String::new(),
+            },
+        );
+        {
+            let _cleanup_sync_seam =
+                test_arm_authority_cleanup_parent_sync_failure();
+            let error = cleanup_sync_snapshot
+                .cleanup_when_expendable()
+                .expect_err("cleanup parent fsync failure must remain pending");
+            assert!(error.contains("recovery_status=cleanup_required"));
+            let manifest = config::read_pending_authority_cleanup_manifest(
+                &config_dir,
+            )
+            .unwrap()
+            .unwrap();
+            let manifest: serde_json::Value =
+                serde_json::from_slice(&manifest).unwrap();
+            assert_eq!(
+                manifest["entries"].as_array().map(Vec::len),
+                Some(1)
+            );
+            assert!(
+                cleanup_sync_tombstone.is_dir()
+            );
+        }
+        fs::remove_file(
+            cleanup_sync_tombstone.join(PENDING_CLEANUP_MARKER_FILE),
+        )
+        .unwrap();
+        let pending_raw = config::read_pending_authority_cleanup_manifest(
+            &config_dir,
+        )
+        .unwrap()
+        .unwrap();
+        let pending = parse_pending_cleanup_manifest(&pending_raw).unwrap();
+        let retry_ticket = RegisteredAuthorityCleanup {
+            manifest_raw: pending_raw,
+            entry: pending.entries.into_iter().next().unwrap(),
+        };
+        finalize_registered_authority_cleanup(
+            &cleanup_sync_snapshot.cleanup_context,
+            &retry_ticket,
+        )
+        .unwrap();
+        let cleared = config::read_pending_authority_cleanup_manifest(
+            &config_dir,
+        )
+        .unwrap()
+        .unwrap();
+        let cleared: serde_json::Value = serde_json::from_slice(&cleared).unwrap();
+        assert_eq!(cleared["entries"].as_array().map(Vec::len), Some(0));
+        cleanup_sync_snapshot.cleanup_prepared = true;
+        cleanup_sync_snapshot.preserve_recovery = false;
+
+        let mut rebound_cleanup_snapshot = OneClickAuthoritySnapshot::capture(
+            &config_dir,
+            &sandbox_home,
+            &auth_dir,
+            &config,
+            &state,
+        )
+        .unwrap();
+        let rebound_root = rebound_cleanup_snapshot.backup_root.clone();
+        let displaced_root = tmp.join("cleanup-register-displaced-root");
+        fs::rename(&rebound_root, &displaced_root).unwrap();
+        fs::create_dir(&rebound_root).unwrap();
+        fs::set_permissions(&rebound_root, fs::Permissions::from_mode(0o700)).unwrap();
+        let rebound_error = rebound_cleanup_snapshot
+            .cleanup_when_expendable()
+            .expect_err("cleanup registration must reject a replacement root");
+        assert!(rebound_error.contains("cleanup_register_failed"));
+        assert!(rebound_root.is_dir(), "replacement root must not be deleted");
+        assert!(
+            displaced_root.is_dir(),
+            "original rollback root must remain recoverable"
+        );
+        assert!(
+            !rebound_root.join(PENDING_CLEANUP_MARKER_FILE).exists(),
+            "replacement root must not receive a cleanup marker"
+        );
+        let rebound_manifest = config::read_pending_authority_cleanup_manifest(
+            &config_dir,
+        )
+        .unwrap()
+        .unwrap();
+        let rebound_manifest: serde_json::Value =
+            serde_json::from_slice(&rebound_manifest).unwrap();
+        assert_eq!(
+            rebound_manifest["entries"].as_array().map(Vec::len),
+            Some(0),
+            "replacement root must not be blessed into the cleanup manifest"
+        );
+        rebound_cleanup_snapshot.cleanup_prepared = true;
+        drop(rebound_cleanup_snapshot);
+        fs::remove_dir(&rebound_root).unwrap();
+        fs::remove_dir_all(&displaced_root).unwrap();
+
         let _seam = test_arm_authority_snapshot_cleanup_fault(
             tmp.clone(),
             "once",
@@ -3645,7 +6155,7 @@ mod transaction_tests {
         let error = snapshot
             .restore(&config_dir, &state, ProxyAction::Reused)
             .unwrap_err();
-        let refused_without_following = error.contains("变成符号链接，拒绝跟随")
+        let refused_without_following = error.contains("code=authority_restore_root_symlink")
             && fs::read(&foreign).unwrap() == b"foreign-must-not-change\n"
             && fs::symlink_metadata(&auth_dir)
                 .unwrap()

@@ -158,7 +158,7 @@ Science-created Conda cache file. The failure was classified
 `PRODUCT_DEFECT`: the 64 MiB per-file authority snapshot budget was below a
 normal Science `0.1.25` managed-state file.
 
-The repair raises only the per-file authority snapshot limit to 128 MiB. The
+The first repair raised only the per-file authority snapshot limit to 128 MiB. The
 16,384-entry limit, 512 MiB total limit, authority-root symlink rejection,
 regular-file checks, independent-inode copy, streaming I/O, mode preservation, and
 device/inode/size/mtime stability checks remain unchanged. The cache is not
@@ -181,7 +181,63 @@ link and separately proves that both a symlinked live authority root and a
 private backup root replaced by a symlink are still rejected at the walker's
 root `lstat`.
 
-This post-candidate source repair invalidates the earlier source-gate,
-artifact, installed, and local-mock evidence. A new clean commit and complete
+The next installed candidate passed the isolated-HOME restart sequence but
+failed during a normal-HOME **One-click Start** with the 128 MiB limit. A
+metadata-only probe (no filenames or file contents) measured the normal
+Science data tree at 14,826 entries and 1,004,263,008 logical regular-file
+bytes, with a 187,050,734-byte largest file and two files above 128 MiB. Merely
+raising the per-file limit would not be sufficient because the same normal
+tree also exceeds the old 512 MiB aggregate full-copy budget.
+
+The revised source repair uses APFS `fclonefileat` copy-on-write clones for
+regular files. Destination traversal opens the rollback parent component by
+component from `/` with `O_NOFOLLOW`, then uses `mkdirat`, `openat`, and
+`symlinkat` recursively; it never re-resolves an intermediate destination path.
+Source traversal is descriptor-bound too: each directory is enumerated from a
+pinned fd, child metadata and links use `fstatat`/`readlinkat`, and regular
+files are opened with `openat(O_NOFOLLOW)`. Source membership, identity, mode,
+length, modification time, public-parent binding, destination entry,
+durability, and parent entry are revalidated without reopening a child path.
+The completed rollback root and its parent directory are both synced before
+authority mutation may begin. Only
+`ENOTSUP` and `EXDEV` may use byte-copy fallback, which retains the old 128 MiB
+per-file and 512 MiB per-scope full-copy limits. Other clone errors fail closed,
+and a failed fallback unlinks the pinned destination entry.
+
+Logical authority remains bounded per scope at 32,768 entries, 512 MiB per
+regular file, and 2 GiB total. Internal symlinks remain copied as link objects;
+authority-root symlinks and special files remain rejected. User-visible walker
+diagnostics report stable code, scope, category, numeric bounds, and errno only,
+without absolute paths or entry names. Focused tests cover the observed 0.1.25
+tree shape with sparse files, independent inode and exact restore behavior,
+forced `ENOTSUP`/`EXDEV` fallback, unexpected clone errors, fallback cleanup,
+fallback limits, restore fallback, directory mutation, and path/key canaries.
+An adversarial regression replaces a destination directory entry with a
+symlink during capture: the copy remains bound to the original directory fd,
+does not write into the foreign target, and fails closed on final entry
+revalidation. A matching restore regression rebinds the live authority parent:
+restore stays on the pinned parent, never writes through the foreign symlink,
+and fails closed when the public parent binding no longer matches. Restore also
+requires every private tree root and its public parent binding to retain the
+dev/inode/type identity recorded at capture before and after copying; the
+backup walk itself reads only through the pinned parent fd. A backup-parent
+replacement regression proves the foreign tree is neither read nor mutated.
+Completion sync failure likewise fails closed and registers the rollback root
+for cleanup.
+Cleanup first atomically renames the exact dev/inode-bound root to a deterministic
+managed tombstone, syncs the pinned parent, deletes recursively through dirfds,
+and syncs the parent again before clearing the pending manifest. A forced parent
+sync failure keeps the manifest and tombstone for a later exact-identity retry,
+including the crash window after marker deletion. Registration accepts only the
+root dev/inode captured immediately after creation; replacing the public root
+before registration cannot add a marker, bless a manifest entry, or delete
+either the replacement or displaced original.
+Copy-on-write does not reserve the full logical size up front: later writes to
+live Science files may materialize shared APFS blocks. An `ENOSPC` from clone,
+fallback, permission, or sync work is therefore a disk-capacity environment
+failure for the current transaction, not evidence that Science data is corrupt.
+
+This later source repair invalidates every earlier source-gate, artifact,
+installed, local-mock, and live-provider result. A new clean commit and complete
 rerun are required before the installed restart defect can move beyond
 `source-fixed-product-pending`.
