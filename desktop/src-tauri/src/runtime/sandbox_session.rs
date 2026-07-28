@@ -116,9 +116,9 @@ impl Drop for AuthorityDirectoryStream {
     }
 }
 
-const MAX_AUTHORITY_SNAPSHOT_ENTRIES: usize = 65_536;
+const MAX_AUTHORITY_SNAPSHOT_ENTRIES: usize = 131_072;
 const MAX_AUTHORITY_SNAPSHOT_FILE_BYTES: u64 = 512 * 1024 * 1024;
-const MAX_AUTHORITY_SNAPSHOT_TOTAL_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const MAX_AUTHORITY_SNAPSHOT_TOTAL_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const MAX_AUTHORITY_FULL_COPY_FILE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_AUTHORITY_FULL_COPY_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
 
@@ -3782,7 +3782,40 @@ pub(crate) fn one_click_login<R: Runtime>(
     runtime_choice: Option<&str>,
     auth_proof: Option<&crate::codex_auth_supervisor::CodexAuthReadyProof>,
 ) -> Result<Value, String> {
-    one_click_login_with_options(app, state, lifecycle, runtime_choice, auth_proof, true)
+    one_click_login_with_options(
+        app,
+        state,
+        lifecycle,
+        runtime_choice,
+        auth_proof,
+        true,
+        None,
+    )
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum PriorScienceDisposition {
+    #[default]
+    RestartRequired,
+    Restored,
+}
+
+#[derive(Debug)]
+pub(crate) enum ReconcileScienceError {
+    PriorScienceRestored { cause: String },
+    RestartRequired { cause: String },
+}
+
+impl ReconcileScienceError {
+    pub(crate) fn cause(&self) -> &str {
+        match self {
+            Self::PriorScienceRestored { cause } | Self::RestartRequired { cause } => cause,
+        }
+    }
+
+    pub(crate) fn prior_science_restored(&self) -> bool {
+        matches!(self, Self::PriorScienceRestored { .. })
+    }
 }
 
 pub(crate) fn reconcile_science_for_active<R: Runtime>(
@@ -3790,8 +3823,25 @@ pub(crate) fn reconcile_science_for_active<R: Runtime>(
     state: SharedAppState,
     lifecycle: &lifecycle::Lifecycle,
     auth_proof: Option<&crate::codex_auth_supervisor::CodexAuthReadyProof>,
-) -> Result<Value, String> {
-    one_click_login_with_options(app, state, lifecycle, None, auth_proof, false)
+) -> Result<Value, ReconcileScienceError> {
+    let mut disposition = PriorScienceDisposition::RestartRequired;
+    one_click_login_with_options(
+        app,
+        state,
+        lifecycle,
+        None,
+        auth_proof,
+        false,
+        Some(&mut disposition),
+    )
+    .map_err(|cause| match disposition {
+        PriorScienceDisposition::Restored => {
+            ReconcileScienceError::PriorScienceRestored { cause }
+        }
+        PriorScienceDisposition::RestartRequired => {
+            ReconcileScienceError::RestartRequired { cause }
+        }
+    })
 }
 
 /// Rollback-only recovery path. The persisted config is already the old,
@@ -3839,7 +3889,7 @@ pub(crate) fn force_restart_science_for_active<R: Runtime>(
         }
         None => {}
     }
-    one_click_login_with_options(app, state, lifecycle, None, auth_proof, false)
+    one_click_login_with_options(app, state, lifecycle, None, auth_proof, false, None)
 }
 
 fn advance_runtime_transaction(
@@ -3884,6 +3934,11 @@ struct PriorScienceContext {
     runtime: ScienceRuntimeIdentity,
     port: u16,
     launch_token: ScienceManagedLaunchToken,
+}
+
+enum AuthorityCaptureAfterQuiesceError {
+    PriorScienceRestored(String),
+    RestartRequired(String),
 }
 
 impl OneClickRollbackContext {
@@ -4068,7 +4123,7 @@ fn capture_authority_after_science_quiesce<R: Runtime>(
     auth_dir: &Path,
     config: &config::Config,
     prior_science: Option<&PriorScienceContext>,
-) -> Result<OneClickAuthoritySnapshot, String> {
+) -> Result<OneClickAuthoritySnapshot, AuthorityCaptureAfterQuiesceError> {
     match OneClickAuthoritySnapshot::capture(
         config_dir,
         sandbox_home,
@@ -4080,13 +4135,19 @@ fn capture_authority_after_science_quiesce<R: Runtime>(
         Err(capture_error) => {
             if let Some(prior) = prior_science {
                 match restart_prior_science(app, state, lifecycle, auth_proof, prior) {
-                    Ok(()) => Err(capture_error),
-                    Err(restart_error) => Err(format!(
-                        "{capture_error}；prior_science_restart={restart_error}"
+                    Ok(()) => Err(AuthorityCaptureAfterQuiesceError::PriorScienceRestored(
+                        capture_error,
                     )),
+                    Err(restart_error) => {
+                        Err(AuthorityCaptureAfterQuiesceError::RestartRequired(format!(
+                            "{capture_error}；prior_science_restart={restart_error}"
+                        )))
+                    }
                 }
             } else {
-                Err(capture_error)
+                Err(AuthorityCaptureAfterQuiesceError::RestartRequired(
+                    capture_error,
+                ))
             }
         }
     }
@@ -4169,6 +4230,7 @@ fn compensate_one_click_failure<R: Runtime>(
     authority_snapshot: &mut OneClickAuthoritySnapshot,
     prior_science: Option<&PriorScienceContext>,
     failure: OneClickFailure,
+    reconcile_disposition: Option<&mut PriorScienceDisposition>,
 ) -> Result<Value, String> {
     let cleanup = {
         let mut current = lock(state);
@@ -4213,6 +4275,14 @@ fn compensate_one_click_failure<R: Runtime>(
         && ssh_cleanup.is_ok()
         && rollback.is_ok()
         && prior_restart.as_ref().is_none_or(Result::is_ok);
+    let prior_science_restored = authorities_restored
+        && prior_science.is_some()
+        && prior_restart.as_ref().is_some_and(Result::is_ok);
+    if prior_science_restored {
+        if let Some(disposition) = reconcile_disposition {
+            *disposition = PriorScienceDisposition::Restored;
+        }
+    }
     let snapshot_cleanup = if authorities_restored {
         Some(authority_snapshot.cleanup_when_expendable())
     } else {
@@ -4396,6 +4466,7 @@ fn one_click_login_with_options<R: Runtime>(
     runtime_choice: Option<&str>,
     auth_proof: Option<&crate::codex_auth_supervisor::CodexAuthReadyProof>,
     open_surface: bool,
+    mut reconcile_disposition: Option<&mut PriorScienceDisposition>,
 ) -> Result<Value, String> {
     let trace = OperationTrace::start(OperationKind::OneClickLogin, "command=one_click_login");
     let dir = config::default_dir();
@@ -4563,7 +4634,7 @@ fn one_click_login_with_options<R: Runtime>(
         }
     }
     let prior_science_for_compensation = prior_science.as_ref();
-    let mut authority_snapshot = capture_authority_after_science_quiesce(
+    let mut authority_snapshot = match capture_authority_after_science_quiesce(
         &app,
         &state,
         lifecycle,
@@ -4573,7 +4644,18 @@ fn one_click_login_with_options<R: Runtime>(
         &auth_dir,
         &cfg,
         prior_science_for_compensation,
-    )?;
+    ) {
+        Ok(snapshot) => snapshot,
+        Err(AuthorityCaptureAfterQuiesceError::PriorScienceRestored(cause)) => {
+            if let Some(disposition) = reconcile_disposition.as_deref_mut() {
+                *disposition = PriorScienceDisposition::Restored;
+            }
+            return Err(cause);
+        }
+        Err(AuthorityCaptureAfterQuiesceError::RestartRequired(cause)) => {
+            return Err(cause);
+        }
+    };
     let transaction_result = (|| -> Result<Value, OneClickFailure> {
         if running_runtime_to_stop.is_some() {
             one_click_step(
@@ -4946,6 +5028,7 @@ fn one_click_login_with_options<R: Runtime>(
             &mut authority_snapshot,
             prior_science_for_compensation,
             failure,
+            reconcile_disposition,
         ),
     }
 }
@@ -5120,14 +5203,14 @@ mod transaction_tests {
         assert!(!oversized.contains('/'));
 
         let mut total_budget = AuthorityCopyBudget::default();
-        for _ in 0..8 {
+        for _ in 0..16 {
             AuthorityTreeSnapshot::charge_entry(
                 &mut total_budget,
                 MAX_AUTHORITY_SNAPSHOT_FILE_BYTES,
                 AuthoritySnapshotScope::ScienceData,
                 AuthoritySnapshotCategory::ScienceRuntime,
             )
-            .expect("exact 4 GiB logical authority boundary must pass");
+            .expect("exact 8 GiB logical authority boundary must pass");
         }
         assert_eq!(total_budget.bytes, MAX_AUTHORITY_SNAPSHOT_TOTAL_BYTES);
         let total_error = AuthorityTreeSnapshot::charge_entry(
@@ -5136,7 +5219,7 @@ mod transaction_tests {
             AuthoritySnapshotScope::ScienceData,
             AuthoritySnapshotCategory::Other,
         )
-        .expect_err("logical authority above 4 GiB must fail closed");
+        .expect_err("logical authority above 8 GiB must fail closed");
         assert!(total_error.contains("code=authority_snapshot_total_limit"));
 
         let mut entry_budget = AuthorityCopyBudget::default();
@@ -5536,13 +5619,13 @@ mod transaction_tests {
 
     #[test]
     fn authority_snapshot_accepts_observed_science_0125_tree_via_independent_clones() {
-        // Installed 0.1.25 normal-HOME metadata-only observation after Conda
-        // cache growth: 32,519 entries, 2,388,270,307 logical bytes total, and
-        // a 189,776,400-byte largest regular file. Keep this fixture sparse:
+        // Installed 0.1.25 normal-HOME metadata-only observation after first-run
+        // R/Conda setup: 75,588 entries, 4,386,369,604 logical bytes total, and
+        // a 189,776,400-byte largest regular file. Keep the filesystem fixture sparse:
         // the regression is about bounded logical authority and independent
         // snapshot objects, not allocating GiBs in the test.
-        const OBSERVED_ENTRIES: usize = 32_519;
-        const OBSERVED_TOTAL_BYTES: u64 = 2_388_270_307;
+        const OBSERVED_ENTRIES: usize = 75_588;
+        const OBSERVED_TOTAL_BYTES: u64 = 4_386_369_604;
         const OBSERVED_MAX_FILE_BYTES: u64 = 189_776_400;
 
         let mut observed_budget = AuthorityCopyBudget::default();

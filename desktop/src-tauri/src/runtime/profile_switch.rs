@@ -133,8 +133,8 @@ fn current_gateway_journal_identity(
 /// committed profile instead of leaving old config paired with a new gateway.
 ///
 /// Callers must hold the command serializer lock.
-pub(crate) fn set_active_profile_txn(
-    app: &tauri::AppHandle,
+pub(crate) fn set_active_profile_txn<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     state: &SharedAppState,
     lifecycle: &lifecycle::Lifecycle,
     id: &str,
@@ -354,6 +354,8 @@ pub(crate) fn set_active_profile_txn(
             lifecycle,
             auth_proof,
         ) {
+            let prior_science_restored = error.prior_science_restored();
+            let error_message = error.cause().to_string();
             trace.stage(OperationStage::Rollback, "reason=science_reconcile_failed");
             let config_restored = config::save_to(&dir, &cfg).is_ok();
             let proxy_restored = config_restored
@@ -366,18 +368,35 @@ pub(crate) fn set_active_profile_txn(
                     Some(&trace),
                     auth_proof,
                 );
-            // Ordinary reconcile must not be used here: the currently running
-            // process may have loaded the candidate catalog while disk now
-            // contains the old binding. Stop only the exact remembered
-            // Science identity, then launch the old committed chain afresh.
-            let science_restored = config_restored
-                && crate::runtime::sandbox_session::force_restart_science_for_active(
-                    app.clone(),
-                    state.clone(),
-                    lifecycle,
-                    auth_proof,
-                )
-                .is_ok();
+            let recovered_prior_is_healthy = config_restored
+                && proxy_restored
+                && prior_science_restored
+                && science_runtime_before.as_ref().is_some_and(|prior_runtime| {
+                    let current_runtime = { lock(state).science_runtime.clone() };
+                    current_runtime.as_ref() == Some(prior_runtime)
+                        && crate::runtime::science::probe_known_runtime(
+                            cfg.sandbox_port,
+                            prior_runtime,
+                        ) == crate::runtime::science::SandboxScienceState::RunningHealthy
+                        && crate::runtime::science::managed_launch_token_for_runtime(
+                            cfg.sandbox_port,
+                            prior_runtime,
+                        )
+                        .is_some()
+                });
+            // A typed pre-mutation or complete-compensation outcome proves the
+            // exact prior Science was already restored. Revalidate its runtime,
+            // managed receipt, and health before reusing it. Other failures may
+            // have loaded the candidate catalog, so retain the forced restart.
+            let science_restored = recovered_prior_is_healthy
+                || (config_restored
+                    && crate::runtime::sandbox_session::force_restart_science_for_active(
+                        app.clone(),
+                        state.clone(),
+                        lifecycle,
+                        auth_proof,
+                    )
+                    .is_ok());
             // A successful forced Science restart necessarily passed through
             // ensure_proxy for the restored config, so it is the final proof
             // that both old gateway and old Science are healthy. Keep the
@@ -396,7 +415,7 @@ pub(crate) fn set_active_profile_txn(
                 "stage": "science_start",
                 "status": "error",
                 "recovery_status": recovery_status,
-                "message": format!("新模型目录未能加载到 Science：{error}"),
+                "message": format!("新模型目录未能加载到 Science：{error_message}"),
                 "fallback_url": null,
             }));
         }

@@ -218,15 +218,47 @@ files, 2,388,270,307 logical regular-file bytes, and a 189,776,400-byte maximum
 regular file; zero files exceeded the independent 512 MiB per-file bound. The
 old 32,768-entry limit consequently had only 249 entries of headroom.
 
-The logical per-scope limits are therefore raised to 65,536 entries and 4 GiB,
+The first repaired installed candidate then allowed Science 0.1.25 to complete
+its first-run R/Conda environment creation. A second metadata-only probe, taken
+before the next live DeepSeek-to-Qwen model-binding restart completed, measured
+75,588 entries, 66,911 regular files, 4,386,369,604 logical regular-file bytes,
+and the same 189,776,400-byte maximum regular file. The transaction then failed
+closed at 65,537 observed entries with `authority_snapshot_entry_limit` and
+reported incomplete recovery at `science_start`. This later tree exceeded both
+the 65,536-entry and 4 GiB logical limits, so that candidate remained a
+`PRODUCT_DEFECT`; its source, artifact, installed, and live evidence was
+invalidated. The managed processes were stopped before source repair resumed.
+
+The `science_start` recovery degradation exposed a separate control-flow
+defect. The inner quiesce/capture path had already restarted and committed a
+fresh managed receipt for the exact prior Science process before returning the
+capture error. Profile-switch rollback then unconditionally stopped that
+healthy recovered process and entered one-click capture a second time, which
+repeated the same fail-closed limit error and left Science stopped.
+
+The reconcile boundary now returns a typed disposition:
+`PriorScienceRestored` only after pre-mutation capture recovery or complete
+post-snapshot compensation has restarted the prior managed Science;
+`RestartRequired` covers every other failure. Profile-switch restores the old
+config and Gateway first. It skips the former forced restart only when the
+typed disposition is restored and the remembered runtime, fresh managed
+receipt, and live health all revalidate exactly. Otherwise the existing
+fail-closed forced restart remains. A persistent capture-failure Acceptance
+regression exercises the real profile-switch transaction and proves the old
+profile/journal return, the local Gateway secret may rotate, the fresh receipt
+matches the sole listener, the original PID is gone, and the recovered Science
+remains safely stoppable without a second capture.
+
+The logical per-scope limits are therefore raised to 131,072 entries and 8 GiB,
 while the independent 512 MiB per-regular-file limit remains. The APFS clone
 path does not duplicate those logical bytes physically. More importantly, the
 non-clone fallback remains limited to 128 MiB per file and 512 MiB per scope,
 so this compatibility change does not authorize a multi-GiB byte-copy fallback.
-The budget regression covers the observed 32,519-entry / 2,388,270,307-byte
-pair. A separate sparse clone-and-restore regression covers the observed
-logical byte total without allocating the payload physically. Boundary tests
-prove exactly 65,536 entries and 4 GiB pass while either limit plus one still
+The budget regression covers the latest observed 75,588-entry /
+4,386,369,604-byte pair. A separate sparse clone-and-restore regression covers
+that logical byte total without allocating the payload physically; it does not
+pretend to create 75,588 filesystem entries. Boundary tests
+prove exactly 131,072 entries and 8 GiB pass while either limit plus one still
 fails closed.
 
 Internal symlinks remain copied as link objects;
@@ -235,7 +267,8 @@ diagnostics report stable code, scope, category, numeric bounds, and errno only,
 without absolute paths or entry names. Focused tests cover the observed 0.1.25
 tree shape with sparse files, independent inode and exact restore behavior,
 forced `ENOTSUP`/`EXDEV` fallback, unexpected clone errors, fallback cleanup,
-fallback limits, restore fallback, directory mutation, and path/key canaries.
+fallback limits, restore fallback, directory mutation, typed prior-Science
+recovery reuse, and path/key canaries.
 An adversarial regression replaces a destination directory entry with a
 symlink during capture: the copy remains bound to the original directory fd,
 does not write into the foreign target, and fails closed on final entry
