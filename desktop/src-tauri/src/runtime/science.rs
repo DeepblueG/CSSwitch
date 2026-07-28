@@ -157,6 +157,15 @@ pub(crate) struct ScienceManagedLaunchToken {
     receipt_file: Option<ManagedLaunchFileIdentity>,
 }
 
+#[cfg(test)]
+static MANAGED_LAUNCH_COMMIT_FAILURE_ONCE_FIRED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+pub(crate) fn test_reset_managed_launch_commit_failure_once() {
+    MANAGED_LAUNCH_COMMIT_FAILURE_ONCE_FIRED.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
 #[derive(Debug)]
 pub(crate) struct ScienceManagedLaunchCommitError {
     message: String,
@@ -1391,6 +1400,16 @@ fn data_dir_identity() -> Option<(PathBuf, u64, u64)> {
     Some((data_dir, metadata.dev(), metadata.ino()))
 }
 
+#[cfg(test)]
+pub(crate) fn test_process_start_identity_for_pid(pid: u32) -> Option<String> {
+    process_start_identity(pid)
+}
+
+#[cfg(test)]
+pub(crate) fn test_unique_listener_pid(port: u16) -> Option<u32> {
+    unique_listener_pid(port)
+}
+
 fn managed_launch_record_for(
     port: u16,
     listener_pid: u32,
@@ -1620,6 +1639,25 @@ pub(crate) fn record_managed_science_launch(
         record: record.clone(),
         receipt_file: None,
     };
+    #[cfg(test)]
+    {
+        let persistent =
+            std::env::var_os("CSSWITCH_TEST_MANAGED_LAUNCH_COMMIT_FAILURE").is_some();
+        let once = std::env::var_os("CSSWITCH_TEST_MANAGED_LAUNCH_COMMIT_FAILURE_ONCE").is_some()
+            && !MANAGED_LAUNCH_COMMIT_FAILURE_ONCE_FIRED
+                .swap(true, std::sync::atomic::Ordering::SeqCst);
+        if persistent || once {
+            if let Some(observation) =
+                std::env::var_os("CSSWITCH_TEST_MANAGED_LAUNCH_FAILURE_PID_LOG")
+            {
+                let _ = std::fs::write(observation, format!("{listener_pid}\n"));
+            }
+            return Err(ScienceManagedLaunchCommitError {
+                message: "test-only managed launch commit failure after listener identity".into(),
+                token: Some(uncommitted_token),
+            });
+        }
+    }
     if unique_listener_pid(port) != Some(listener_pid)
         || process_start_identity(listener_pid).as_deref() != Some(record.process_start.as_str())
     {
@@ -1638,6 +1676,23 @@ pub(crate) fn record_managed_science_launch(
         message: "Science managed launch 记录提交后回读不一致".into(),
         token: Some(uncommitted_token),
     })
+}
+
+/// Capture an exact, receipt-free stop token for a newly spawned Science
+/// listener. This is only valid for the narrow post-spawn/pre-receipt window:
+/// callers must either commit the managed receipt or use this token to stop
+/// the same PID/process-start/runtime identity before returning.
+pub(crate) fn uncommitted_managed_science_launch_token(
+    port: u16,
+    runtime: &ScienceRuntimeIdentity,
+) -> Option<ScienceManagedLaunchToken> {
+    let listener_pid = listener_runtime_pid(port, runtime)?;
+    let record = managed_launch_record_for(port, listener_pid, runtime)?;
+    let token = ScienceManagedLaunchToken {
+        record,
+        receipt_file: None,
+    };
+    managed_launch_token_is_current(&token, runtime).then_some(token)
 }
 
 fn managed_launch_token(
@@ -1671,6 +1726,20 @@ fn managed_launch_token(
     })
 }
 
+pub(crate) fn managed_launch_token_for_runtime(
+    port: u16,
+    runtime: &ScienceRuntimeIdentity,
+) -> Option<ScienceManagedLaunchToken> {
+    managed_launch_token(port, runtime)
+}
+
+pub(crate) fn managed_launch_token_process_is_alive(
+    token: &ScienceManagedLaunchToken,
+) -> bool {
+    process_start_identity(token.record.listener_pid).as_deref()
+        == Some(token.record.process_start.as_str())
+}
+
 fn managed_launch_identity_matches(port: u16, runtime: &ScienceRuntimeIdentity) -> bool {
     managed_launch_token(port, runtime).is_some()
 }
@@ -1700,6 +1769,13 @@ fn managed_launch_token_is_current(
     unique_listener_pid(record.port) == Some(record.listener_pid)
         && process_start_identity(record.listener_pid).as_deref()
             == Some(record.process_start.as_str())
+}
+
+pub(crate) fn managed_launch_token_is_current_for_runtime(
+    token: &ScienceManagedLaunchToken,
+    runtime: &ScienceRuntimeIdentity,
+) -> bool {
+    managed_launch_token_is_current(token, runtime)
 }
 
 fn restore_unmatched_managed_launch_tombstone(tombstone: &Path, path: &Path) -> Result<(), String> {

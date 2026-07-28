@@ -948,8 +948,16 @@ class Validator:
             if bug is None:
                 self.error("product-registry", "missing required product bug {}".format(bug_id))
                 continue
-            if bug.get("resolution_state") != "open-not-fixed":
-                self.error(bug_id, "product bug must remain open-not-fixed")
+            if bug.get("status") != "active":
+                self.error(bug_id, "product bug must remain active")
+            if bug.get("resolution_state") not in {
+                "open-not-fixed",
+                "source-fixed-product-pending",
+            }:
+                self.error(
+                    bug_id,
+                    "active product bug resolution_state must be open-not-fixed or source-fixed-product-pending",
+                )
             if len(bug.get("change_ids", [])) != 1:
                 self.error(bug_id, "product bug must have exactly one independent CHG")
             else:

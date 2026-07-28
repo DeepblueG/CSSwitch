@@ -336,7 +336,7 @@
       "profile": "product",
       "status": "active",
       "owner": "science-runtime",
-      "reason": "Future isolated OAuth/SSH compensation gate; real SSH config, agents, keys, and servers are out of scope.",
+      "reason": "Source prevalidation, serialized authority rechecks, exact compensation, durable cleanup, mutation, and fresh dual-review evidence passed with fake/local fixtures; production artifact/runtime and real SSH/provider evidence remain pending.",
       "expiry": "2026-10-01",
       "replacement_id": null,
       "evidence_layer": "source-test",

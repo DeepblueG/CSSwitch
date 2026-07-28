@@ -350,6 +350,14 @@ fn skill_install_bridge_token(secret: &str, launch_id: &str) -> Result<String, S
     Ok(format!("{:x}", hash.finalize()))
 }
 
+#[cfg(test)]
+pub(crate) fn test_skill_install_bridge_token(
+    secret: &str,
+    launch_id: &str,
+) -> Result<String, String> {
+    skill_install_bridge_token(secret, launch_id)
+}
+
 fn skill_install_bridge_key_path() -> PathBuf {
     config::default_dir()
         .join("runtime")
@@ -880,6 +888,25 @@ pub(crate) fn start_proxy_for<R: Runtime>(
             let _ = child.wait();
             return Err(error);
         }
+        #[cfg(test)]
+        if let Some(path) = std::env::var_os("CSSWITCH_TEST_GATEWAY_PUBLISH_LOG") {
+            if let Ok(mut log) = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                let _ = writeln!(
+                    log,
+                    "{} {} {} {} {}",
+                    child.id(),
+                    launch_id,
+                    key_fp,
+                    port,
+                    launch.adapter
+                );
+            }
+        }
         st.proxy = Some(child);
         st.proxy_port = port;
         st.secret = secret.clone();
@@ -888,6 +915,10 @@ pub(crate) fn start_proxy_for<R: Runtime>(
         st.shim_mode = shim_mode.to_string();
         st.launch_id = launch_id;
         st.key_fp = key_fp;
+        st.gateway_launch_context = Some(crate::GatewayLaunchContext {
+            profile: profile.clone(),
+            science_runtime: science_runtime.cloned(),
+        });
     }
     Ok((port, secret, ProxyAction::Restarted))
 }

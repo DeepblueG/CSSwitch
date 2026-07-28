@@ -45,3 +45,5 @@ libc = "0.2"
 
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }
+syn = { version = "2", features = ["full", "visit"] }
+proc-macro2 = "1"

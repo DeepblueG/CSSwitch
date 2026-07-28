@@ -37,9 +37,19 @@ class QualityKernelFocused(unittest.TestCase):
         self.assertEqual(PRODUCT_BUG_IDS, {bug_id for bug_id in validator.bugs if bug_id in PRODUCT_BUG_IDS})
         for bug_id in PRODUCT_BUG_IDS:
             bug = validator.bugs[bug_id]
-            self.assertEqual(bug["resolution_state"], "open-not-fixed")
+            self.assertEqual(bug["status"], "active")
+            self.assertIn(
+                bug["resolution_state"],
+                {"open-not-fixed", "source-fixed-product-pending"},
+            )
             self.assertEqual(len(bug["change_ids"]), 1)
             self.assertTrue(any(gate.startswith("GATE-") for gate in bug["expected_gate_ids"]))
+        ssh_late = validator.bugs["BUG-083-SSH-LATE"]
+        self.assertEqual(
+            ssh_late["resolution_state"],
+            "source-fixed-product-pending",
+        )
+        self.assertEqual(ssh_late["reproduction_state"], "source-reproduced")
         science = validator.bugs["BUG-083-SCIENCE-REATTACH"]
         self.assertEqual(science["resolution_state"], "source-fixed-product-pending")
         self.assertEqual(science["reproduction_state"], "source-reproduced")

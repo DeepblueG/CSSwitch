@@ -44,7 +44,7 @@
         "REQ-083-SCHEMA"
       ],
       "acceptance_conditions": [
-        "The eight scoped v0.8.3 bugs are present as active open-not-fixed records.",
+        "The eight scoped v0.8.3 bugs remain active with resolution_state open-not-fixed or source-fixed-product-pending; none is retired before the required product evidence is complete.",
         "The quality-kernel change covers its own quality, focused-test, and documentation paths.",
         "No source/unit record is promoted to artifact, installed, live, signing, or public evidence."
       ],
@@ -544,17 +544,19 @@
     {
       "id": "REQ-083-SSH-LATE",
       "version": "v0.8.3",
-      "title": "SSH late-failure transaction recovery",
-      "description": "OAuth-written then SSH-failed late setup must have an explicit rollback/compensation and deterministic retry contract.",
+      "title": "SSH late-failure transaction preserves one serialized authority",
+      "description": "System-SSH opt-in performs every prevalidatable check before OAuth mutation, rechecks the exact candidate and prior owned runtime authority inside the lifecycle serializer, and exactly compensates every changed authority after a true late failure.",
       "status": "active",
       "owner": "science-runtime",
       "depends_on": [
         "REQ-083-EVIDENCE"
       ],
       "acceptance_conditions": [
-        "Exercise the real late-failure order in a future isolated regression.",
-        "Prove state recovery before any release-layer claim.",
-        "Keep system SSH credentials and real servers outside this node."
+        "One operation-scoped Codex proof includes the candidate and any alive owned prior Gateway rollback context; the serialized section rechecks exact child, launch identity, key fingerprint, launch context, Config, and credential authority.",
+        "Every SSH config, wrapper, sandbox authority, and managed-stub check that can be completed early runs before OAuth mutation.",
+        "A true late failure exactly compensates OAuth, active profile, Gateway, Science, managed stub including a pre-existing managed V2 file, transaction journal, and durable cleanup state.",
+        "Foreign SSH state remains unchanged, retry is idempotent, and diagnostics contain only typed credential-free safe codes.",
+        "The same authority and compensation contract is exercised again by the final isolated production artifact runtime before release closure."
       ],
       "evidence_boundary": {
         "allowed_layers": [
@@ -570,7 +572,8 @@
         ],
         "basis": [
           ".agents/rules/system-ssh.md",
-          "docs/audits/v082-change-audit.md"
+          "source red-green-mutation contract and fresh dual final review",
+          "docs/evidence/investigations/2026-07-28-v083-ssh-late-source-repair.md"
         ]
       },
       "retirement": null
