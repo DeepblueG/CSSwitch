@@ -2295,7 +2295,10 @@ mod tests {
             "Identifier=com.anthropic.operon\nTeamIdentifier=WRONG\n",
         ));
         assert!(!official_updated_embedded_identity_metadata_matches(
-            "prefix-Identifier=com.anthropic.operon\nTeamIdentifier=Q6L2SF6YDW-suffix\n",
+            "prefix-Identifier=com.anthropic.operon\nTeamIdentifier=Q6L2SF6YDW\n",
+        ));
+        assert!(!official_updated_embedded_identity_metadata_matches(
+            "Identifier=com.anthropic.operon\nTeamIdentifier=Q6L2SF6YDW-suffix\n",
         ));
     }
 

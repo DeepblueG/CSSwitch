@@ -9,6 +9,12 @@ used temporary HOME/data directories or the two read-only DMG mounts; no real
 Science account, organization, config, Keychain item, or existing Science data
 was read.
 
+Field follow-up on 2026-07-29 established that the fixed
+`~/.claude-science/bin/claude-science` updater path can also contain the
+App-seeded executable byte-for-byte. Therefore the fixed-path runtime boundary
+must accept both exact identifiers below with the same exact Team ID; the
+standalone-download and DMG-seed artifact identities remain distinct evidence.
+
 ## Official release identity
 
 | Fact | 0.1.20 | 0.1.25 |
@@ -94,17 +100,23 @@ The cause was `PRODUCT_DEFECT`: CSSwitch required the DMG-seed identifier
 `com.anthropic.operon.cli` at the standalone updater path, whose actual
 identifier is `com.anthropic.operon`.
 
-The repair gives the updater track its actual exact identifier while retaining
-the fixed path, current-user ownership, non-group/world-writable directories
-and file, bounded Mach-O size, exact Team ID, same-open copy, SHA-256
-content-addressed read-only snapshot, source stability recheck, and snapshot
-reverification. A parser regression rejects the DMG-seed identifier, wrong Team
-ID, and substring/prefix spoofing at the updater boundary.
+The initial repair gave the standalone updater track its exact identifier.
+Field evidence on 2026-07-29 then reproduced a second valid fixed-path form:
+Science 0.1.25 had seeded that path byte-for-byte from the installed App
+(`63b0f57a…9c03f`, `com.anthropic.operon.cli`, Team ID `Q6L2SF6YDW`).
+CSSwitch v0.8.3 rejected that valid form. The v0.8.4 hotfix accepts both exact
+known identifiers while retaining the fixed path, current-user ownership,
+non-group/world-writable directories and file, bounded Mach-O size, exact Team
+ID, same-open copy, SHA-256 content-addressed read-only snapshot, source
+stability recheck, and snapshot reverification. Parser regressions separately
+reject an unknown identifier, wrong Team ID, identifier prefix spoofing, and
+Team ID suffix spoofing.
 
 After repair:
 
 - official 0.1.20 updater → `official_updated` snapshot: PASS;
 - official 0.1.25 updater → `official_updated` snapshot: PASS;
+- App-seeded 0.1.25 fixed-path updater → `official_updated` snapshot: PASS;
 - official 0.1.20 DMG seed → `installed_app`: PASS;
 - official 0.1.25 DMG seed → `installed_app`: PASS;
 - installed-App selection preserved the temporary data-dir marker;
