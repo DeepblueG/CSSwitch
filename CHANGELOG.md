@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.8.4] — 2026-07-29
+
+### Fixed
+
+- Accepted both exact Claude Science 0.1.25 updater identifiers observed in official installations while retaining the fixed-path, owner, permission, Mach-O, Team ID, SHA-256 snapshot, and source-stability checks. This prevents a valid App-seeded updater from being rejected as invalid embedded metadata.
+
 ## [0.8.3] — 2026-07-29
 
 ### Fixed

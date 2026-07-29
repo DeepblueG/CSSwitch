@@ -410,7 +410,7 @@
       "preconditions": ["candidate exists before test", "no download or update"],
       "fixture": "same-open content-addressed snapshot selection",
       "registered_test_ids": [
-        "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::official_updater_identity_parser_distinguishes_standalone_from_dmg_seed",
+        "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::official_updater_identity_parser_accepts_only_known_exact_variants",
         "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::real_updated_runtime_candidate_is_eligible_without_reading_real_science_data",
         "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::historical_updated_snapshots_remain_recoverable_after_source_replacement",
         "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::locally_validated_updated_runtime_wins_over_app_and_is_fingerprint_bound"

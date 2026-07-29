@@ -973,7 +973,7 @@
         "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::managed_launch_receipt_growth_read_is_hard_bounded",
         "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::managed_launch_tombstone_restore_is_atomic_no_clobber",
         "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::managed_launch_tombstone_restore_uses_no_clobber_primitive",
-        "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::official_updater_identity_parser_distinguishes_standalone_from_dmg_seed",
+        "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::official_updater_identity_parser_accepts_only_known_exact_variants",
         "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::real_installed_app_seed_is_selected_without_mutating_data_dir",
         "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::real_updated_runtime_candidate_is_eligible_without_reading_real_science_data",
         "desktop/src-tauri/Cargo.toml::lib::runtime::science::tests::replacing_installed_app_uses_new_version_without_mutating_cache_or_data_dir",

@@ -24,7 +24,8 @@ pub(crate) const SCIENCE_BIN: &str =
 pub(crate) const SCIENCE_DOWNLOAD_URL: &str = "https://claude.com/download";
 pub(crate) const CACHED_ONCE_CHOICE: &str = "cached_once";
 const OFFICIAL_UPDATED_RUNTIME_RELATIVE: &str = ".claude-science/bin/claude-science";
-const OFFICIAL_UPDATED_SCIENCE_IDENTIFIER: &str = "com.anthropic.operon";
+const OFFICIAL_UPDATED_SCIENCE_IDENTIFIERS: [&str; 2] =
+    ["com.anthropic.operon", "com.anthropic.operon.cli"];
 const OFFICIAL_SCIENCE_TEAM_ID: &str = "Q6L2SF6YDW";
 const MIN_SCIENCE_BINARY_SIZE: u64 = 1024 * 1024;
 const MAX_SCIENCE_BINARY_SIZE: u64 = 512 * 1024 * 1024;
@@ -324,13 +325,22 @@ fn embedded_identity_metadata_matches(details: &str, identifier: &str, team_id: 
             .any(|line| line == format!("TeamIdentifier={team_id}"))
 }
 
+fn official_updated_embedded_identity_metadata_matches(details: &str) -> bool {
+    OFFICIAL_UPDATED_SCIENCE_IDENTIFIERS
+        .iter()
+        .any(|identifier| {
+            embedded_identity_metadata_matches(details, identifier, OFFICIAL_SCIENCE_TEAM_ID)
+        })
+}
+
 fn official_updated_identity_metadata_matches(path: &Path) -> bool {
-    // The standalone updater executable uses `com.anthropic.operon`, while the
-    // executable seeded inside the DMG App uses `com.anthropic.operon.cli`.
+    // Official updater executables observed in 0.1.25 use either
+    // `com.anthropic.operon` or `com.anthropic.operon.cli`, including an updater
+    // seeded byte-for-byte from the installed App.
     // Both currently fail strict cryptographic `codesign --verify`. Treat the
-    // standalone fields only as format/identity guards; the local trust
-    // boundary is the fixed user-owned path plus SHA-256-bound runtime identity
-    // below, not a claim of verified official provenance.
+    // exact allowlisted fields only as format/identity guards; the local trust
+    // boundary remains the fixed user-owned path plus SHA-256-bound runtime
+    // identity below, not a claim of verified official provenance.
     let output = Command::new("/usr/bin/codesign")
         .args(["-d", "--verbose=4"])
         .arg(path)
@@ -343,11 +353,7 @@ fn official_updated_identity_metadata_matches(path: &Path) -> bool {
         return false;
     }
     let details = String::from_utf8_lossy(&output.stderr);
-    embedded_identity_metadata_matches(
-        &details,
-        OFFICIAL_UPDATED_SCIENCE_IDENTIFIER,
-        OFFICIAL_SCIENCE_TEAM_ID,
-    )
+    official_updated_embedded_identity_metadata_matches(&details)
 }
 
 fn file_is_macho(path: &Path) -> bool {
@@ -2254,8 +2260,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        classify_known_runtime_state, classify_sandbox_state, embedded_identity_metadata_matches,
-        fingerprint_sha256_hex, first_http_url, managed_launch_path,
+        classify_known_runtime_state, classify_sandbox_state, fingerprint_sha256_hex,
+        first_http_url, managed_launch_path, official_updated_embedded_identity_metadata_matches,
         official_updated_science_bin_for_home, official_updated_snapshot_for_home,
         official_updated_snapshot_from_process_paths, parse_unique_listener_pid,
         probe_sandbox_runtime_cached, read_managed_launch_record,
@@ -2269,33 +2275,27 @@ mod tests {
         settings_change_needs_teardown, stop_runtime_from_probe, trusted_science_status,
         SandboxScienceState, ScienceRuntimeIdentity, ScienceRuntimeSource, ScienceVersionCache,
         CACHED_ONCE_CHOICE, MANAGED_LAUNCH_LAST_READ_BYTES, MAX_MANAGED_LAUNCH_BYTES,
-        OFFICIAL_SCIENCE_TEAM_ID, OFFICIAL_UPDATED_SCIENCE_IDENTIFIER,
     };
 
     #[test]
-    fn official_updater_identity_parser_distinguishes_standalone_from_dmg_seed() {
+    fn official_updater_identity_parser_accepts_only_known_exact_variants() {
         let standalone = "Identifier=com.anthropic.operon\nTeamIdentifier=Q6L2SF6YDW\n";
-        assert!(embedded_identity_metadata_matches(
-            standalone,
-            OFFICIAL_UPDATED_SCIENCE_IDENTIFIER,
-            OFFICIAL_SCIENCE_TEAM_ID,
+        assert!(official_updated_embedded_identity_metadata_matches(
+            standalone
         ));
 
         let dmg_seed = "Identifier=com.anthropic.operon.cli\nTeamIdentifier=Q6L2SF6YDW\n";
-        assert!(!embedded_identity_metadata_matches(
-            dmg_seed,
-            OFFICIAL_UPDATED_SCIENCE_IDENTIFIER,
-            OFFICIAL_SCIENCE_TEAM_ID,
+        assert!(official_updated_embedded_identity_metadata_matches(
+            dmg_seed
         ));
-        assert!(!embedded_identity_metadata_matches(
+        assert!(!official_updated_embedded_identity_metadata_matches(
+            "Identifier=com.anthropic.operon.other\nTeamIdentifier=Q6L2SF6YDW\n",
+        ));
+        assert!(!official_updated_embedded_identity_metadata_matches(
             "Identifier=com.anthropic.operon\nTeamIdentifier=WRONG\n",
-            OFFICIAL_UPDATED_SCIENCE_IDENTIFIER,
-            OFFICIAL_SCIENCE_TEAM_ID,
         ));
-        assert!(!embedded_identity_metadata_matches(
+        assert!(!official_updated_embedded_identity_metadata_matches(
             "prefix-Identifier=com.anthropic.operon\nTeamIdentifier=Q6L2SF6YDW-suffix\n",
-            OFFICIAL_UPDATED_SCIENCE_IDENTIFIER,
-            OFFICIAL_SCIENCE_TEAM_ID,
         ));
     }
 
