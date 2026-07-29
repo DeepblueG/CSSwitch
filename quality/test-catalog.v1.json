@@ -9,6 +9,7 @@
     "desktop/src-tauri/Cargo.toml",
     "test/codex_auth_ui.test.mjs",
     "test/model_catalog_state.test.mjs",
+    "test/profile_preview_mock.test.mjs",
     "test/quality/test_quality_kernel.py",
     "test/quality/test_run_evidence_aggregation_runner.py",
     "test/quality/test_run_evidence_atomic_store.py",
@@ -30,6 +31,7 @@
     "test/test_capability.py",
     "test/test_capability_catalog.py",
     "test/test_codex_browser_auth_contract.py",
+    "test/test_profile_pin_contract.py",
     "test/test_external_skill_install_bridge.py",
     "test/test_gateway_rust.py",
     "test/test_installed_provider_matrix.py",
@@ -105,7 +107,7 @@
       },
       "test_identity": {
         "path": "test/quality/fixtures/source_gate/expected_test_ids.v1.json",
-        "sha256": "172133d09210a8b8ab25f910b82a9b9954610e38e0a012f667349e1a052acd89",
+        "sha256": "5d60856e68366a55ffa7ce6dcf4ed1a08691df1b254b8431b6ea68149c90fbf6",
         "suite_key": "QUALITY-METADATA"
       }
     },
@@ -188,7 +190,7 @@
       },
       "test_identity": {
         "path": "test/quality/fixtures/source_gate/expected_test_ids.v1.json",
-        "sha256": "172133d09210a8b8ab25f910b82a9b9954610e38e0a012f667349e1a052acd89",
+        "sha256": "5d60856e68366a55ffa7ce6dcf4ed1a08691df1b254b8431b6ea68149c90fbf6",
         "suite_key": "QUALITY-FOCUSED"
       }
     },
@@ -342,7 +344,7 @@
       },
       "test_identity": {
         "path": "test/quality/fixtures/source_gate/expected_test_ids.v1.json",
-        "sha256": "172133d09210a8b8ab25f910b82a9b9954610e38e0a012f667349e1a052acd89",
+        "sha256": "5d60856e68366a55ffa7ce6dcf4ed1a08691df1b254b8431b6ea68149c90fbf6",
         "suite_key": "RUN-EVIDENCE-CONTRACT"
       }
     },
@@ -547,7 +549,7 @@
       },
       "test_identity": {
         "path": "test/quality/fixtures/source_gate/expected_test_ids.v1.json",
-        "sha256": "172133d09210a8b8ab25f910b82a9b9954610e38e0a012f667349e1a052acd89",
+        "sha256": "5d60856e68366a55ffa7ce6dcf4ed1a08691df1b254b8431b6ea68149c90fbf6",
         "suite_key": "QUALITY-INVENTORY"
       }
     },
@@ -565,6 +567,7 @@
         "test.test_capability_catalog",
         "test.test_process_ownership_policy",
         "test.test_codex_browser_auth_contract",
+        "test.test_profile_pin_contract",
         "test.test_build_sidecar_identity",
         "-v"
       ],
@@ -588,6 +591,7 @@
         "test/test_capability_catalog.py",
         "test/test_process_ownership_policy.py",
         "test/test_codex_browser_auth_contract.py",
+        "test/test_profile_pin_contract.py",
         "test/test_build_sidecar_identity.py"
       ],
       "evidence_layer": "source-test",
@@ -620,7 +624,7 @@
       },
       "test_identity": {
         "path": "test/quality/fixtures/source_gate/expected_test_ids.v1.json",
-        "sha256": "172133d09210a8b8ab25f910b82a9b9954610e38e0a012f667349e1a052acd89",
+        "sha256": "5d60856e68366a55ffa7ce6dcf4ed1a08691df1b254b8431b6ea68149c90fbf6",
         "suite_key": "PY-OFFLINE"
       }
     },
@@ -698,7 +702,7 @@
       },
       "test_identity": {
         "path": "test/quality/fixtures/source_gate/expected_test_ids.v1.json",
-        "sha256": "172133d09210a8b8ab25f910b82a9b9954610e38e0a012f667349e1a052acd89",
+        "sha256": "5d60856e68366a55ffa7ce6dcf4ed1a08691df1b254b8431b6ea68149c90fbf6",
         "suite_key": "PY-LOOPBACK"
       }
     },
@@ -764,7 +768,7 @@
       },
       "test_identity": {
         "path": "test/quality/fixtures/source_gate/expected_test_ids.v1.json",
-        "sha256": "172133d09210a8b8ab25f910b82a9b9954610e38e0a012f667349e1a052acd89",
+        "sha256": "5d60856e68366a55ffa7ce6dcf4ed1a08691df1b254b8431b6ea68149c90fbf6",
         "suite_key": "SHELL-SCRIPTS"
       }
     },
@@ -840,7 +844,7 @@
       },
       "test_identity": {
         "path": "test/quality/fixtures/source_gate/expected_test_ids.v1.json",
-        "sha256": "172133d09210a8b8ab25f910b82a9b9954610e38e0a012f667349e1a052acd89",
+        "sha256": "5d60856e68366a55ffa7ce6dcf4ed1a08691df1b254b8431b6ea68149c90fbf6",
         "suite_key": "RUST-DESKTOP"
       }
     },
@@ -911,7 +915,7 @@
       },
       "test_identity": {
         "path": "test/quality/fixtures/source_gate/expected_test_ids.v1.json",
-        "sha256": "172133d09210a8b8ab25f910b82a9b9954610e38e0a012f667349e1a052acd89",
+        "sha256": "5d60856e68366a55ffa7ce6dcf4ed1a08691df1b254b8431b6ea68149c90fbf6",
         "suite_key": "RUST-GATEWAY"
       }
     },
@@ -981,7 +985,7 @@
       },
       "test_identity": {
         "path": "test/quality/fixtures/source_gate/expected_test_ids.v1.json",
-        "sha256": "172133d09210a8b8ab25f910b82a9b9954610e38e0a012f667349e1a052acd89",
+        "sha256": "5d60856e68366a55ffa7ce6dcf4ed1a08691df1b254b8431b6ea68149c90fbf6",
         "suite_key": "RUST-CODEX-NETWORK"
       }
     },
@@ -1053,7 +1057,7 @@
       },
       "test_identity": {
         "path": "test/quality/fixtures/source_gate/expected_test_ids.v1.json",
-        "sha256": "172133d09210a8b8ab25f910b82a9b9954610e38e0a012f667349e1a052acd89",
+        "sha256": "5d60856e68366a55ffa7ce6dcf4ed1a08691df1b254b8431b6ea68149c90fbf6",
         "suite_key": "RUST-SKILL-PACKAGE"
       }
     },
@@ -1068,6 +1072,7 @@
         "--test",
         "test/codex_auth_ui.test.mjs",
         "test/model_catalog_state.test.mjs",
+        "test/profile_preview_mock.test.mjs",
         "test/runtime_status_state.test.mjs",
         "test/skill_page_state.test.mjs"
       ],
@@ -1089,6 +1094,7 @@
         "test/run-frontend.sh",
         "test/codex_auth_ui.test.mjs",
         "test/model_catalog_state.test.mjs",
+        "test/profile_preview_mock.test.mjs",
         "test/runtime_status_state.test.mjs",
         "test/skill_page_state.test.mjs"
       ],
@@ -1123,7 +1129,7 @@
       },
       "test_identity": {
         "path": "test/quality/fixtures/source_gate/expected_test_ids.v1.json",
-        "sha256": "172133d09210a8b8ab25f910b82a9b9954610e38e0a012f667349e1a052acd89",
+        "sha256": "5d60856e68366a55ffa7ce6dcf4ed1a08691df1b254b8431b6ea68149c90fbf6",
         "suite_key": "MJS-FRONTEND"
       }
     },
@@ -1361,7 +1367,7 @@
       },
       "test_identity": {
         "path": "test/quality/fixtures/source_gate/expected_test_ids.v1.json",
-        "sha256": "172133d09210a8b8ab25f910b82a9b9954610e38e0a012f667349e1a052acd89",
+        "sha256": "5d60856e68366a55ffa7ce6dcf4ed1a08691df1b254b8431b6ea68149c90fbf6",
         "suite_key": "ORPHAN-SKILL-BRIDGE"
       }
     },
@@ -1430,7 +1436,7 @@
       },
       "test_identity": {
         "path": "test/quality/fixtures/source_gate/expected_test_ids.v1.json",
-        "sha256": "172133d09210a8b8ab25f910b82a9b9954610e38e0a012f667349e1a052acd89",
+        "sha256": "5d60856e68366a55ffa7ce6dcf4ed1a08691df1b254b8431b6ea68149c90fbf6",
         "suite_key": "ORPHAN-SKILL-BOUNDARY"
       }
     },
@@ -2042,7 +2048,7 @@
       "environment_allowlist": [],
       "test_identity": {
         "path": "test/quality/fixtures/source_gate/expected_test_ids.v1.json",
-        "sha256": "172133d09210a8b8ab25f910b82a9b9954610e38e0a012f667349e1a052acd89",
+        "sha256": "5d60856e68366a55ffa7ce6dcf4ed1a08691df1b254b8431b6ea68149c90fbf6",
         "suite_key": "SOURCE-GATE-CONTRACT"
       },
       "status": "implemented",

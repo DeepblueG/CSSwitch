@@ -64,6 +64,10 @@ pub(crate) struct ScienceRuntimeIdentity {
 }
 
 impl ScienceRuntimeIdentity {
+    pub(crate) fn environment_transaction_id(&self) -> String {
+        fingerprint_sha256_hex(&self.fingerprint)
+    }
+
     pub(crate) fn skill_install_host_context(
         &self,
         sandbox_port: u16,
@@ -1629,6 +1633,7 @@ fn write_managed_launch_record(record: &ScienceManagedLaunchRecord) -> Result<()
     write_result
 }
 
+#[allow(clippy::result_large_err)]
 pub(crate) fn record_managed_science_launch(
     port: u16,
     runtime: &ScienceRuntimeIdentity,
@@ -1650,8 +1655,7 @@ pub(crate) fn record_managed_science_launch(
     };
     #[cfg(test)]
     {
-        let persistent =
-            std::env::var_os("CSSWITCH_TEST_MANAGED_LAUNCH_COMMIT_FAILURE").is_some();
+        let persistent = std::env::var_os("CSSWITCH_TEST_MANAGED_LAUNCH_COMMIT_FAILURE").is_some();
         let once = std::env::var_os("CSSWITCH_TEST_MANAGED_LAUNCH_COMMIT_FAILURE_ONCE").is_some()
             && !MANAGED_LAUNCH_COMMIT_FAILURE_ONCE_FIRED
                 .swap(true, std::sync::atomic::Ordering::SeqCst);
@@ -1742,9 +1746,7 @@ pub(crate) fn managed_launch_token_for_runtime(
     managed_launch_token(port, runtime)
 }
 
-pub(crate) fn managed_launch_token_process_is_alive(
-    token: &ScienceManagedLaunchToken,
-) -> bool {
+pub(crate) fn managed_launch_token_process_is_alive(token: &ScienceManagedLaunchToken) -> bool {
     process_start_identity(token.record.listener_pid).as_deref()
         == Some(token.record.process_start.as_str())
 }

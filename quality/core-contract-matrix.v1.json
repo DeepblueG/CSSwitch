@@ -51,9 +51,14 @@
       "user_entry": "Set profile as current",
       "preconditions": ["two valid profiles", "temporary state and dynamic ports"],
       "fixture": "catalog-bound Anthropic, OpenAI Chat, and Responses profiles",
-      "registered_test_ids": ["desktop/src-tauri/Cargo.toml::lib::runtime::profile_switch::tests::candidate_profile_and_recovery_journal_are_published_as_one_config_state"],
+      "registered_test_ids": [
+        "desktop/src-tauri/Cargo.toml::lib::runtime::profile_switch::tests::candidate_profile_and_recovery_journal_are_published_as_one_config_state",
+        "test/profile_preview_mock.test.mjs::preview clear and delete remove applied truth only for the applied profile",
+        "test/profile_preview_mock.test.mjs::preview pin preserves applied binding until one-click succeeds",
+        "test/profile_preview_mock.test.mjs::preview selected edits and preset sync become pending without changing applied"
+      ],
       "planned_test_ids": ["profile_activation_exact_contract_and_model_matrix"],
-      "suite_ids": ["SUITE-RUST-DESKTOP", "SUITE-PY-LOOPBACK"],
+      "suite_ids": ["SUITE-RUST-DESKTOP", "SUITE-PY-LOOPBACK", "SUITE-MJS-FRONTEND"],
       "gate_ids": ["GATE-SOURCE"],
       "positive_oracle": "active profile, adapter, endpoint, and exact upstream model change as one generation",
       "negative_oracle": "unknown selector or stale generation makes no authoritative state change",
@@ -359,7 +364,10 @@
         "desktop/src-tauri/Cargo.toml::lib::runtime::sandbox_session::transaction_tests::authority_snapshot_fails_closed_when_directory_membership_changes_mid_capture",
         "desktop/src-tauri/Cargo.toml::lib::runtime::sandbox_session::transaction_tests::authority_snapshot_uses_independent_inodes_and_restores_in_place_mutation",
         "desktop/src-tauri/Cargo.toml::lib::runtime::sandbox_session::transaction_tests::enabled_ssh_prevalidation_rejects_unwritable_science_authority",
+        "desktop/src-tauri/Cargo.toml::lib::runtime::sandbox_session::transaction_tests::one_click_snapshot_blocks_protected_restore_after_opaque_root_rebind",
+        "desktop/src-tauri/Cargo.toml::lib::runtime::sandbox_session::transaction_tests::one_click_snapshot_does_not_descend_or_restore_science_owned_environment",
         "desktop/src-tauri/Cargo.toml::lib::runtime::sandbox_session::transaction_tests::one_click_snapshot_has_one_commit_and_one_failure_compensation_funnel",
+        "desktop/src-tauri/Cargo.toml::lib::runtime::sandbox_session::transaction_tests::one_click_snapshot_rejects_opaque_root_symlink_without_touching_target",
         "desktop/src-tauri/Cargo.toml::lib::runtime::sandbox_session::transaction_tests::one_shot_commit_cleanup_fault_is_retried_before_success",
         "desktop/src-tauri/Cargo.toml::lib::runtime::sandbox_session::transaction_tests::partial_capture_cleanup_failure_returns_tracked_degraded_recovery",
         "desktop/src-tauri/Cargo.toml::lib::runtime::sandbox_session::transaction_tests::pending_cleanup_observer_mapping_only_does_not_claim_durable_cleanup",
@@ -370,12 +378,12 @@
       "planned_test_ids": [],
       "suite_ids": ["SUITE-PRODUCT-SSH-LATE", "SUITE-RUST-DESKTOP"],
       "gate_ids": ["GATE-SSH-LATE", "GATE-SOURCE"],
-      "positive_oracle": "all prevalidatable SSH checks precede OAuth; serialized candidate and prior-runtime authorities are exact; true late failure restores every old authority and retry is idempotent",
-      "negative_oracle": "serializer drift publishes no candidate, foreign SSH state is unchanged, no authority remains mixed, and diagnostics expose no credential or raw rollback detail",
+      "positive_oracle": "all prevalidatable SSH checks precede OAuth; the exact private recovery snapshot is durably registered before protected writes; protected credentials, org history, route/config, Gateway, journal, and managed SSH state are exact; Science-owned environment roots remain opaque and in place with capture-to-spawn binding checks",
+      "negative_oracle": "serializer drift publishes no candidate; legacy or malformed Science-start journals and interrupted active snapshots fail closed; foreign SSH and Science-owned environment state are never traversed or restored; unproven candidates block protected-state restore; diagnostics expose no credential or raw rollback detail",
       "required_evidence_layers": ["source", "artifact", "runtime", "ui"],
       "current_coverage": "source default 390/0/27, serial ignored SSH-LATE Acceptance 20/20, expanded 28/28 authority-edge matrix, ten-case prevalidation matrix, exact successor tests, two restored product-only mutations, and fresh dual final review",
       "current_gap": "production artifact/runtime/UI and any specifically authorized real SSH/provider evidence remain pending",
-      "blocking_condition": "OAuth, profile, Gateway, Science, stub, journal, or durable cleanup differs from before state; serialized authority drift is missed; diagnostics leak; or any required artifact/runtime/UI layer is missing"
+      "blocking_condition": "protected OAuth, org history, profile, Gateway, bridge, stub, journal, or durable cleanup differs from before state; an opaque environment root is traversed, copied, deleted, or restored; serialized authority drift is missed; diagnostics leak; or any required artifact/runtime/UI layer is missing"
     },
     {
       "contract_id": "SCIENCE-INSTALLED",

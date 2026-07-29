@@ -35,6 +35,7 @@ PROXY_URL="${CSSWITCH_PROXY_URL:-http://127.0.0.1:18991}"
 EMAIL="virtual@localhost.invalid"
 DRY_RUN=0
 SKIP_FORGE=0
+SCIENCE_OPAQUE_BINDINGS="${CSSWITCH_SCIENCE_OPAQUE_BINDINGS:-}"
 
 is_safe_science_bin() {
   local probe="$1"
@@ -54,6 +55,50 @@ path_contains_symlink() {
     probe="${probe:h}"
   done
   return 1
+}
+
+validate_science_opaque_bindings() {
+  local binding name expected target actual owner mode
+  if [[ -z "$SCIENCE_OPAQUE_BINDINGS" ]]; then
+    [[ "${CSSWITCH_RUNTIME_VERSION_PRECHECKED:-0}" != "1" ]] && return 0
+    echo "拒绝：缺少 Science opaque-root 启动绑定" >&2
+    return 1
+  fi
+  for binding in ${(s:;:)SCIENCE_OPAQUE_BINDINGS}; do
+    name="${binding%%=*}"
+    expected="${binding#*=}"
+    case "$name" in
+      conda|runtime|seed-assets|r-libs|sbx-bind-src) ;;
+      *)
+        echo "拒绝：Science opaque-root 启动绑定名称非法" >&2
+        return 1
+        ;;
+    esac
+    target="$DATA_DIR/$name"
+    if [[ "$expected" == "absent" ]]; then
+      if [[ -e "$target" || -L "$target" ]]; then
+        echo "拒绝：Science opaque root 在启动前出现" >&2
+        return 1
+      fi
+      continue
+    fi
+    [[ "$expected" =~ ^[0-9]+:[0-9]+$ ]] || {
+      echo "拒绝：Science opaque-root 启动绑定格式非法" >&2
+      return 1
+    }
+    if [[ ! -d "$target" || -L "$target" ]]; then
+      echo "拒绝：Science opaque root 在启动前被替换" >&2
+      return 1
+    fi
+    actual="$(/usr/bin/stat -f '%d:%i' "$target" 2>/dev/null || true)"
+    owner="$(/usr/bin/stat -f '%u' "$target" 2>/dev/null || true)"
+    mode="$(/usr/bin/stat -f '%Lp' "$target" 2>/dev/null || true)"
+    if [[ "$actual" != "$expected" || "$owner" != "$(/usr/bin/id -u)" || ! "$mode" =~ ^[0-7]{3,4}$ ]] \
+        || (( (8#$mode & 8#22) != 0 )); then
+      echo "拒绝：Science opaque root 启动绑定已变化" >&2
+      return 1
+    fi
+  done
 }
 
 is_managed_ssh_stub() {
@@ -287,6 +332,7 @@ if path_contains_symlink "$DATA_DIR"; then
   echo "拒绝：Science data-dir 路径在启动前发生符号链接变化"
   exit 1
 fi
+validate_science_opaque_bindings
 typeset -a _SCIENCE_ENV
 _SCIENCE_ENV=(
   "HOME=$SANDBOX_HOME"
@@ -310,7 +356,9 @@ if ! /usr/bin/env "${_SCIENCE_ENV[@]}" "$BIN" serve \
     --no-browser --no-auto-update --detached \
     >/dev/null 2>&1; then
   echo "Science 启动命令失败（原始输出可能含临时链接或路径，未写入 CSSwitch 日志）" >&2
-  exit 1
+  # Contract with the desktop transaction: this distinct code proves that
+  # Science was invoked and may have mutated its opaque environment roots.
+  exit 70
 fi
 
 echo

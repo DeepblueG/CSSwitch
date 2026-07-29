@@ -26,6 +26,13 @@ DEFAULT_PROVIDER_CONTRACT_IDS = {
     "openai-responses": "custom-openai-responses",
     "codex": "codex-oauth",
 }
+SCIENCE_CANONICAL_ROLE_IDS = [
+    "claude-opus-5",
+    "claude-sonnet-5",
+    "claude-opus-4-8",
+    "claude-sonnet-4-6",
+    "claude-haiku-4-5-20251001",
+]
 
 
 def free_port():
@@ -548,6 +555,18 @@ class RustGatewayLoopback(unittest.TestCase):
             stdout, stderr = proc.communicate(timeout=3)
         return stdout, stderr
 
+    def assert_models_include_canonical_roles(self, body, original_ids):
+        ids = [item["id"] for item in body["data"]]
+        expected_ids = list(original_ids) + [
+            model_id
+            for model_id in SCIENCE_CANONICAL_ROLE_IDS
+            if model_id not in original_ids
+        ]
+        self.assertEqual(ids, expected_ids)
+        self.assertEqual(body["first_id"], ids[0])
+        self.assertEqual(body["last_id"], ids[-1])
+        self.assertEqual(body["data"][-1]["id"], body["last_id"])
+
     def start_current_gateway(self, *args, env_overrides=None, **kwargs):
         raw = os.environ.get("CSSWITCH_GATEWAY_BIN")
         self.assertTrue(
@@ -622,7 +641,13 @@ class RustGatewayLoopback(unittest.TestCase):
             conn.close()
             self.assertEqual(resp.status, 200)
             self.assertEqual(body["first_id"], "claude-opus-4-8")
-            self.assertEqual(body["last_id"], "claude-haiku-4-5")
+            self.assertEqual(body["last_id"], SCIENCE_CANONICAL_ROLE_IDS[-1])
+            self.assertEqual(body["data"][-1]["id"], body["last_id"])
+            self.assertTrue(
+                set(SCIENCE_CANONICAL_ROLE_IDS).issubset(
+                    {item["id"] for item in body["data"]}
+                )
+            )
 
             conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
             conn.request("GET", "/secret/health")
@@ -642,7 +667,7 @@ class RustGatewayLoopback(unittest.TestCase):
         finally:
             self.stop_gateway(proc)
 
-    def test_models_response_replaces_default_placeholder_with_upstream_name(self):
+    def test_models_response_replaces_default_with_science_safe_upstream_name(self):
         selector = "claude-csswitch-relay-real-model-123456789abc"
         catalog = {
             "schema_version": 1,
@@ -705,7 +730,10 @@ class RustGatewayLoopback(unittest.TestCase):
             body = json.loads(response.read())
             conn.close()
             self.assertEqual(response.status, 200)
-            self.assertEqual([item["id"] for item in body["data"]], [item[0] for item in routes])
+            self.assertEqual(
+                [item["id"] for item in body["data"]],
+                [item[0] for item in routes] + SCIENCE_CANONICAL_ROLE_IDS,
+            )
 
             for selector, _, target, _ in routes:
                 payload = json.dumps({
@@ -1167,7 +1195,13 @@ class RustGatewayLoopback(unittest.TestCase):
             conn.close()
             self.assertEqual(models_resp.status, 200)
             self.assertEqual(models_body["first_id"], "claude-csswitch-qwen-max-222222222222")
-            self.assertEqual(models_body["last_id"], "claude-csswitch-qwen-turbo-333333333333")
+            self.assertEqual(models_body["last_id"], SCIENCE_CANONICAL_ROLE_IDS[-1])
+            self.assertEqual(models_body["data"][-1]["id"], models_body["last_id"])
+            self.assertTrue(
+                set(SCIENCE_CANONICAL_ROLE_IDS).issubset(
+                    {item["id"] for item in models_body["data"]}
+                )
+            )
 
             request = {
                 "model": "claude-haiku-4-5-20250514",
@@ -1360,7 +1394,7 @@ class RustGatewayLoopback(unittest.TestCase):
             models_body = json.loads(models_resp.read())
             conn.close()
             self.assertEqual(models_resp.status, 200)
-            self.assertEqual(models_body["data"], [{
+            self.assertEqual(models_body["data"][0], {
                 "type": "model",
                 "id": "claude-opus-4-8",
                 "display_name": "glm-4.5",
@@ -1372,7 +1406,10 @@ class RustGatewayLoopback(unittest.TestCase):
                     "vision": None,
                 },
                 "created_at": "2026-01-01T00:00:00Z",
-            }])
+            })
+            self.assert_models_include_canonical_roles(
+                models_body, ["claude-opus-4-8"]
+            )
             self.assertEqual(upstream.requests, [], "forced model shell should not hit /models")
 
             request = {
@@ -1467,8 +1504,11 @@ class RustGatewayLoopback(unittest.TestCase):
             models = json.loads(response.read())
             conn.close()
             self.assertEqual(response.status, 200)
-            self.assertEqual([item["id"] for item in models["data"]], [k3_selector])
-            self.assertEqual([item["display_name"] for item in models["data"]], ["Kimi K3"])
+            self.assertEqual(
+                [item["id"] for item in models["data"]],
+                [k3_selector] + SCIENCE_CANONICAL_ROLE_IDS,
+            )
+            self.assertEqual(models["data"][0]["display_name"], "Kimi K3")
 
             status, body = post(k3_selector)
             self.assertEqual(status, 200, body)
@@ -1941,7 +1981,7 @@ class RustGatewayLoopback(unittest.TestCase):
             models_body = json.loads(models_resp.read())
             conn.close()
             self.assertEqual(models_resp.status, 200)
-            self.assertEqual(models_body["data"], [{
+            self.assertEqual(models_body["data"][0], {
                 "type": "model",
                 "id": "claude-opus-4-8",
                 "display_name": "gpt-5.2",
@@ -1953,7 +1993,10 @@ class RustGatewayLoopback(unittest.TestCase):
                     "vision": None,
                 },
                 "created_at": "2026-01-01T00:00:00Z",
-            }])
+            })
+            self.assert_models_include_canonical_roles(
+                models_body, ["claude-opus-4-8"]
+            )
             self.assertEqual(upstream.requests, [], "forced model shell should not hit /models")
 
             request = {
@@ -2766,7 +2809,7 @@ class RustGatewayLoopback(unittest.TestCase):
             models_body = json.loads(models_resp.read())
             conn.close()
             self.assertEqual(models_resp.status, 200)
-            self.assertEqual(models_body["data"], [{
+            self.assertEqual(models_body["data"][0], {
                 "type": "model",
                 "id": "claude-opus-4-8",
                 "display_name": "MiniMax-M2",
@@ -2778,7 +2821,10 @@ class RustGatewayLoopback(unittest.TestCase):
                     "vision": None,
                 },
                 "created_at": "2026-01-01T00:00:00Z",
-            }])
+            })
+            self.assert_models_include_canonical_roles(
+                models_body, ["claude-opus-4-8"]
+            )
             self.assertEqual(upstream.requests, [], "forced relay shell should not hit /models")
 
             request = {

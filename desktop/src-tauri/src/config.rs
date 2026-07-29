@@ -56,8 +56,7 @@ struct AtomicWritePreRenameFailpoint {
     id: u64,
     directory_device: u64,
     directory_inode: u64,
-    observation:
-        std::sync::Arc<std::sync::Mutex<Option<AtomicWritePreRenameObservation>>>,
+    observation: std::sync::Arc<std::sync::Mutex<Option<AtomicWritePreRenameObservation>>>,
 }
 
 #[cfg(test)]
@@ -189,17 +188,15 @@ pub(crate) fn test_arm_pending_cleanup_lifecycle(
 ) -> PendingCleanupLifecycleGuard {
     *PENDING_CLEANUP_LIFECYCLE_SEAM
         .lock()
-        .unwrap_or_else(|error| error.into_inner()) =
-        Some(PendingCleanupLifecycleSeam {
-            publish_fault,
-            ..Default::default()
-        });
+        .unwrap_or_else(|error| error.into_inner()) = Some(PendingCleanupLifecycleSeam {
+        publish_fault,
+        ..Default::default()
+    });
     PendingCleanupLifecycleGuard
 }
 
 #[cfg(test)]
-pub(crate) fn test_pending_cleanup_lifecycle_observation(
-) -> PendingCleanupLifecycleObservation {
+pub(crate) fn test_pending_cleanup_lifecycle_observation() -> PendingCleanupLifecycleObservation {
     let seam = PENDING_CLEANUP_LIFECYCLE_SEAM
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -247,9 +244,7 @@ pub(crate) fn test_pending_cleanup_clear_publish_attempt() -> io::Result<()> {
 
 #[cfg(test)]
 #[allow(dead_code)]
-pub(crate) fn test_observe_pending_cleanup_register_published(
-    identity: PendingCleanupIdentity,
-) {
+pub(crate) fn test_observe_pending_cleanup_register_published(identity: PendingCleanupIdentity) {
     let mut seam = PENDING_CLEANUP_LIFECYCLE_SEAM
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -262,9 +257,7 @@ pub(crate) fn test_observe_pending_cleanup_register_published(
 }
 
 #[cfg(test)]
-pub(crate) fn test_observe_pending_cleanup_manifest_validated(
-    identity: PendingCleanupIdentity,
-) {
+pub(crate) fn test_observe_pending_cleanup_manifest_validated(identity: PendingCleanupIdentity) {
     let mut seam = PENDING_CLEANUP_LIFECYCLE_SEAM
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -278,9 +271,7 @@ pub(crate) fn test_observe_pending_cleanup_manifest_validated(
 }
 
 #[cfg(test)]
-pub(crate) fn test_observe_pending_cleanup_initial_ticket(
-    ticket: PendingCleanupInitialTicket,
-) {
+pub(crate) fn test_observe_pending_cleanup_initial_ticket(ticket: PendingCleanupInitialTicket) {
     let mut seam = PENDING_CLEANUP_LIFECYCLE_SEAM
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -453,8 +444,7 @@ pub(crate) fn test_arm_pending_manifest_pre_rename_failure(
             "test-only manifest failpoint requires a regular config directory",
         ));
     }
-    let id = ATOMIC_WRITE_PRE_RENAME_FAILPOINT_ID
-        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let id = ATOMIC_WRITE_PRE_RENAME_FAILPOINT_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let observation = std::sync::Arc::new(std::sync::Mutex::new(None));
     let armed = AtomicWritePreRenameFailpoint {
         id,
@@ -508,14 +498,13 @@ fn atomic_write_pre_rename_failure(
     *armed
         .observation
         .lock()
-        .unwrap_or_else(|error| error.into_inner()) =
-        Some(AtomicWritePreRenameObservation {
-            temp_path,
-            target_path,
-            temp_device: metadata.dev(),
-            temp_inode: metadata.ino(),
-            config_access_held: CONFIG_ACCESS.try_lock().is_err(),
-        });
+        .unwrap_or_else(|error| error.into_inner()) = Some(AtomicWritePreRenameObservation {
+        temp_path,
+        target_path,
+        temp_device: metadata.dev(),
+        temp_inode: metadata.ino(),
+        config_access_held: CONFIG_ACCESS.try_lock().is_err(),
+    });
     Err(io::Error::other(
         "test-only pending manifest failure after temp sync before rename",
     ))
@@ -713,8 +702,19 @@ pub(crate) fn require_template_enabled(cfg: &Config, template_id: &str) -> Resul
     Ok(())
 }
 
+pub(crate) fn require_no_runtime_transaction(cfg: &Config) -> Result<(), String> {
+    if cfg.runtime_transaction.is_some() {
+        Err(
+            "code=runtime_transaction_in_progress 运行时事务尚未结束；请先完成恢复或重试一键开始。"
+                .into(),
+        )
+    } else {
+        Ok(())
+    }
+}
+
 impl Config {
-    /// 当前生效 profile（active_id 空或悬空 → None）。
+    /// 当前选择 profile（active_id 空或悬空 → None）。
     pub fn active_profile(&self) -> Option<&Profile> {
         if self.active_id.is_empty() {
             return None;
@@ -1109,9 +1109,7 @@ pub fn default_dir() -> PathBuf {
     default_dir_from_home(&home)
 }
 
-pub(crate) fn read_pending_authority_cleanup_manifest(
-    dir: &Path,
-) -> io::Result<Option<Vec<u8>>> {
+pub(crate) fn read_pending_authority_cleanup_manifest(dir: &Path) -> io::Result<Option<Vec<u8>>> {
     let access = config_access();
     ensure_config_access_open(&access)?;
     let secure = match SecureDir::open(dir, false) {
@@ -2411,6 +2409,24 @@ where
     let mut cfg = load_from_unlocked(dir).map_err(|error| error.to_string())?;
     let (result, changed) = f(&mut cfg)?;
     if changed {
+        save_to_unlocked(dir, &cfg).map_err(|error| error.to_string())?;
+    }
+    Ok(result)
+}
+
+/// Fallible serialized update whose rolling backup is created only after the
+/// closure accepts the mutation. Backup remains best-effort, matching existing
+/// profile-save behavior, while a guard error leaves both files untouched.
+pub fn update_result_with_rolling_backup<T, F>(dir: &Path, f: F) -> Result<T, String>
+where
+    F: FnOnce(&mut Config) -> Result<(T, bool), String>,
+{
+    let access = config_access();
+    ensure_config_access_open(&access).map_err(|error| error.to_string())?;
+    let mut cfg = load_from_unlocked(dir).map_err(|error| error.to_string())?;
+    let (result, changed) = f(&mut cfg)?;
+    if changed {
+        let _ = write_rolling_backup_unlocked(dir);
         save_to_unlocked(dir, &cfg).map_err(|error| error.to_string())?;
     }
     Ok(result)

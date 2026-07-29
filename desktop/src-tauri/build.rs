@@ -17,9 +17,8 @@ fn stage_gateway_sidecar() {
         return;
     };
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let out_dir = PathBuf::from(
-        std::env::var_os("OUT_DIR").expect("Desktop build must provide an OUT_DIR"),
-    );
+    let out_dir =
+        PathBuf::from(std::env::var_os("OUT_DIR").expect("Desktop build must provide an OUT_DIR"));
     let manifest_dir = PathBuf::from(manifest_dir);
     let gateway_dir = manifest_dir.join("../gateway");
     if !gateway_dir.join("Cargo.toml").is_file() {

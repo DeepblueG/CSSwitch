@@ -4,8 +4,9 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use csswitch_skill_install_core::{open_science_health_session_before, ScienceHealthSession};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{Manager, Runtime};
@@ -34,6 +35,12 @@ use crate::{
     HistoryRecoverySession, SharedAppState,
 };
 
+#[allow(clippy::useless_conversion)]
+fn inode_u64(value: libc::ino_t) -> Option<u64> {
+    u64::try_from(value).ok()
+}
+
+#[allow(dead_code)]
 fn stop_sandbox_state<R: Runtime>(
     app: &tauri::AppHandle<R>,
     st: &mut AppState,
@@ -101,6 +108,8 @@ struct AuthorityTreeSnapshot {
     source: PathBuf,
     backup: PathBuf,
     existed: bool,
+    source_parent: Option<std::fs::File>,
+    source_name: Option<std::ffi::CString>,
     backup_identity: Option<(u64, u64, libc::mode_t)>,
     backup_parent: Option<std::fs::File>,
     backup_name: Option<std::ffi::CString>,
@@ -121,6 +130,20 @@ const MAX_AUTHORITY_SNAPSHOT_FILE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_AUTHORITY_SNAPSHOT_TOTAL_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const MAX_AUTHORITY_FULL_COPY_FILE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_AUTHORITY_FULL_COPY_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
+const SCIENCE_OWNED_OPAQUE_ROOTS: [&str; 5] =
+    ["conda", "runtime", "seed-assets", "r-libs", "sbx-bind-src"];
+pub(crate) const SCIENCE_PROTECTED_AUTHORITY_ENTRIES: [&str; 10] = [
+    "encryption.key",
+    ".oauth-tokens",
+    "active-org.json",
+    ".key-backups",
+    "auth-owner.lock",
+    "config.toml",
+    "csswitch-ssh-bridge.v1.json",
+    "mcp",
+    ".csswitch-route-state.json",
+    "orgs",
+];
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum AuthoritySnapshotScope {
@@ -180,6 +203,7 @@ struct SandboxSessionTestSeams {
     snapshot_parent_barrier: Option<(PathBuf, PathBuf)>,
     one_click_capture: Option<(PathBuf, PathBuf, bool, u32, PathBuf)>,
     catalog_failure_port: Option<u16>,
+    catalog_bypass_port: Option<u16>,
     prior_restart_post_spawn_failure_port: Option<u16>,
     prior_restart_post_spawn_identity: Option<(u32, String)>,
     rollback_diagnostic_canary: Option<String>,
@@ -187,9 +211,8 @@ struct SandboxSessionTestSeams {
 }
 
 #[cfg(test)]
-static SANDBOX_SESSION_TEST_SEAMS: std::sync::LazyLock<
-    std::sync::Mutex<SandboxSessionTestSeams>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(SandboxSessionTestSeams::default()));
+static SANDBOX_SESSION_TEST_SEAMS: std::sync::LazyLock<std::sync::Mutex<SandboxSessionTestSeams>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(SandboxSessionTestSeams::default()));
 
 #[cfg(test)]
 pub(crate) struct SandboxSessionTestSeamGuard;
@@ -260,8 +283,7 @@ fn test_arm_authority_cleanup_parent_sync_failure() -> SandboxSessionTestSeamGua
     SANDBOX_SESSION_TEST_SEAMS
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .authority_cleanup_parent_sync_failure =
-        Some(std::thread::current().id());
+        .authority_cleanup_parent_sync_failure = Some(std::thread::current().id());
     SandboxSessionTestSeamGuard
 }
 
@@ -311,9 +333,7 @@ pub(crate) fn test_arm_one_click_snapshot_capture(
 }
 
 #[cfg(test)]
-pub(crate) fn test_arm_healthy_reopen_catalog_failure(
-    port: u16,
-) -> SandboxSessionTestSeamGuard {
+pub(crate) fn test_arm_healthy_reopen_catalog_failure(port: u16) -> SandboxSessionTestSeamGuard {
     SANDBOX_SESSION_TEST_SEAMS
         .lock()
         .unwrap_or_else(|error| error.into_inner())
@@ -322,9 +342,16 @@ pub(crate) fn test_arm_healthy_reopen_catalog_failure(
 }
 
 #[cfg(test)]
-pub(crate) fn test_arm_prior_restart_post_spawn_failure(
-    port: u16,
-) -> SandboxSessionTestSeamGuard {
+pub(crate) fn test_arm_gateway_catalog_bypass(port: u16) -> SandboxSessionTestSeamGuard {
+    SANDBOX_SESSION_TEST_SEAMS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .catalog_bypass_port = Some(port);
+    SandboxSessionTestSeamGuard
+}
+
+#[cfg(test)]
+pub(crate) fn test_arm_prior_restart_post_spawn_failure(port: u16) -> SandboxSessionTestSeamGuard {
     SANDBOX_SESSION_TEST_SEAMS
         .lock()
         .unwrap_or_else(|error| error.into_inner())
@@ -342,9 +369,7 @@ pub(crate) fn test_prior_restart_post_spawn_identity() -> Option<(u32, String)> 
 }
 
 #[cfg(test)]
-pub(crate) fn test_arm_rollback_diagnostic_canary(
-    canary: &str,
-) -> SandboxSessionTestSeamGuard {
+pub(crate) fn test_arm_rollback_diagnostic_canary(canary: &str) -> SandboxSessionTestSeamGuard {
     SANDBOX_SESSION_TEST_SEAMS
         .lock()
         .unwrap_or_else(|error| error.into_inner())
@@ -361,9 +386,7 @@ pub(crate) fn test_rollback_diagnostic_snapshot() -> Option<PathBuf> {
         .clone()
 }
 
-fn sync_authority_cleanup_parent(
-    parent: &std::fs::File,
-) -> std::io::Result<()> {
+fn sync_authority_cleanup_parent(parent: &std::fs::File) -> std::io::Result<()> {
     #[cfg(test)]
     if SANDBOX_SESSION_TEST_SEAMS
         .lock()
@@ -401,7 +424,6 @@ fn remove_authority_snapshot_root(
         };
         if let Some((attempt, injected, log_path)) = observation {
             if let Ok(mut log) = std::fs::OpenOptions::new()
-                .write(true)
                 .create(true)
                 .append(true)
                 .open(log_path)
@@ -423,23 +445,19 @@ fn remove_authority_snapshot_root(
         }
     }
     let parent = AuthorityTreeSnapshot::open_absolute_directory(expected_parent)?;
-    let name = AuthorityTreeSnapshot::destination_name(path)
-        .map_err(std::io::Error::other)?;
+    let name = AuthorityTreeSnapshot::destination_name(path).map_err(std::io::Error::other)?;
     let tombstone_name = std::ffi::CString::new(cleanup_tombstone_name(entry))
         .map_err(|_| std::io::Error::other("invalid cleanup tombstone name"))?;
-    let inspect = |name: &std::ffi::CStr| {
-        match AuthorityTreeSnapshot::stat_destination_at(&parent, name) {
+    let inspect =
+        |name: &std::ffi::CStr| match AuthorityTreeSnapshot::stat_destination_at(&parent, name) {
             Ok(value) => Ok(Some(value)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                Ok(None)
-            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error),
-        }
-    };
+        };
     let identity_matches = |current: &libc::stat| {
         current.st_mode & libc::S_IFMT == libc::S_IFDIR
             && u64::try_from(current.st_dev).ok() == Some(entry.device)
-            && u64::try_from(current.st_ino).ok() == Some(entry.inode)
+            && inode_u64(current.st_ino) == Some(entry.inode)
             && u32::from(current.st_mode) & 0o777 == 0o700
             && current.st_uid == unsafe { libc::geteuid() }
     };
@@ -468,10 +486,7 @@ fn remove_authority_snapshot_root(
             ))
         }
     }
-    let tombstone = AuthorityTreeSnapshot::stat_destination_at(
-        &parent,
-        &tombstone_name,
-    )?;
+    let tombstone = AuthorityTreeSnapshot::stat_destination_at(&parent, &tombstone_name)?;
     if !identity_matches(&tombstone) {
         return Err(std::io::Error::other(
             "authority snapshot cleanup tombstone identity changed",
@@ -488,9 +503,7 @@ fn remove_authority_snapshot_root_with_retry(
     match remove_authority_snapshot_root(entry, expected_parent) {
         Ok(()) => Ok(()),
         Err(first) => remove_authority_snapshot_root(entry, expected_parent)
-            .map_err(|second| {
-                format!("首次清理失败：{first}；重试清理失败：{second}")
-            }),
+            .map_err(|second| format!("首次清理失败：{first}；重试清理失败：{second}")),
     }
 }
 
@@ -513,7 +526,16 @@ fn cleanup_tombstone_path(entry: &PendingCleanupEntry) -> PathBuf {
 #[serde(deny_unknown_fields)]
 struct PendingCleanupManifest {
     schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    disposition: Option<PendingCleanupDisposition>,
     entries: Vec<PendingCleanupEntry>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PendingCleanupDisposition {
+    ActiveRecovery,
+    CleanupOnly,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -577,9 +599,11 @@ fn pending_cleanup_name_is_valid(name: &str) -> bool {
 
 fn pending_cleanup_manifest_bytes(
     entries: Vec<PendingCleanupEntry>,
+    disposition: PendingCleanupDisposition,
 ) -> Result<Vec<u8>, String> {
     serde_json::to_vec(&PendingCleanupManifest {
-        schema_version: 1,
+        schema_version: 2,
+        disposition: Some(disposition),
         entries,
     })
     .map_err(|_| "cleanup_manifest_encode_failed：无法编码待清理事务清单。".into())
@@ -587,19 +611,25 @@ fn pending_cleanup_manifest_bytes(
 
 fn parse_pending_cleanup_manifest(bytes: &[u8]) -> Result<PendingCleanupManifest, String> {
     if bytes.is_empty() || bytes.len() > MAX_PENDING_CLEANUP_MANIFEST_BYTES {
-        return Err(
-            "cleanup_manifest_invalid：待清理事务清单大小非法，已在运行前拒绝。".into(),
-        );
+        return Err("cleanup_manifest_invalid：待清理事务清单大小非法，已在运行前拒绝。".into());
     }
     let manifest: PendingCleanupManifest = serde_json::from_slice(bytes)
         .map_err(|_| "cleanup_manifest_invalid：待清理事务清单格式非法，已在运行前拒绝。")?;
-    if manifest.schema_version != 1 || manifest.entries.len() > 1 {
+    let schema_valid = match manifest.schema_version {
+        1 => manifest.disposition.is_none(),
+        2 => manifest.disposition.is_some(),
+        _ => false,
+    };
+    if !schema_valid || manifest.entries.len() > 1 {
         return Err(
-            "cleanup_manifest_invalid：待清理事务清单版本或条目数量非法，已在运行前拒绝。"
-                .into(),
+            "cleanup_manifest_invalid：待清理事务清单版本或条目数量非法，已在运行前拒绝。".into(),
         );
     }
     Ok(manifest)
+}
+
+fn pending_cleanup_requires_recovery(manifest: &PendingCleanupManifest) -> bool {
+    manifest.disposition == Some(PendingCleanupDisposition::ActiveRecovery)
 }
 
 fn read_marker(path: &Path) -> Result<String, String> {
@@ -637,8 +667,7 @@ fn read_marker(path: &Path) -> Result<String, String> {
 }
 
 fn inspect_pending_cleanup_target(entry: &PendingCleanupEntry) -> PendingCleanupTargetState {
-    let (actual_path, metadata, is_tombstone) =
-        match std::fs::symlink_metadata(&entry.path) {
+    let (actual_path, metadata, is_tombstone) = match std::fs::symlink_metadata(&entry.path) {
         Ok(metadata) => (entry.path.clone(), metadata, false),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let tombstone = cleanup_tombstone_path(entry);
@@ -681,8 +710,7 @@ fn validate_pending_cleanup_entry(
     if !pending_cleanup_name_is_valid(&entry.managed_id)
         || entry.marker != entry.managed_id
         || entry.path.parent() != Some(expected_parent)
-        || entry.path.file_name().and_then(|name| name.to_str())
-            != Some(entry.managed_id.as_str())
+        || entry.path.file_name().and_then(|name| name.to_str()) != Some(entry.managed_id.as_str())
     {
         return Err(
             "cleanup_manifest_invalid：待清理事务清单路径或 managed_id 非法，已在运行前拒绝。"
@@ -699,16 +727,13 @@ fn validate_pending_cleanup_entry(
             Ok(PendingCleanupTargetState::Present(current))
         }
         _ => Err(
-            "cleanup_manifest_identity_mismatch：待清理事务快照身份不一致，已在运行前拒绝。"
-                .into(),
+            "cleanup_manifest_identity_mismatch：待清理事务快照身份不一致，已在运行前拒绝。".into(),
         ),
     }
 }
 
 #[cfg(test)]
-fn test_pending_cleanup_identity(
-    entry: &PendingCleanupEntry,
-) -> config::PendingCleanupIdentity {
+fn test_pending_cleanup_identity(entry: &PendingCleanupEntry) -> config::PendingCleanupIdentity {
     config::PendingCleanupIdentity {
         managed_id: entry.managed_id.clone(),
         path: entry.path.clone(),
@@ -719,11 +744,7 @@ fn test_pending_cleanup_identity(
 }
 
 impl AuthorityCleanupContext {
-    fn new(
-        config_dir: &Path,
-        sandbox_home: &Path,
-        state: &SharedAppState,
-    ) -> Result<Self, String> {
+    fn new(config_dir: &Path, sandbox_home: &Path, state: &SharedAppState) -> Result<Self, String> {
         let expected_snapshot_parent = sandbox_home
             .parent()
             .ok_or("cleanup_register_failed：沙箱 HOME 无父目录。")?
@@ -743,8 +764,8 @@ impl AuthorityCleanupContext {
     fn bind_root_identity(&mut self, entry: &libc::stat) -> Result<(), String> {
         let device = u64::try_from(entry.st_dev)
             .map_err(|_| self.register_error("事务快照 device 非法。"))?;
-        let inode = u64::try_from(entry.st_ino)
-            .map_err(|_| self.register_error("事务快照 inode 非法。"))?;
+        let inode =
+            inode_u64(entry.st_ino).ok_or_else(|| self.register_error("事务快照 inode 非法。"))?;
         if entry.st_mode & libc::S_IFMT != libc::S_IFDIR {
             return Err(self.register_error("事务快照不是目录。"));
         }
@@ -770,23 +791,17 @@ fn register_authority_cleanup(
     {
         return Err(context.register_error("事务快照路径不在受管根内。"));
     }
-    let parent = AuthorityTreeSnapshot::open_absolute_directory(
-        &context.expected_snapshot_parent,
-    )
-    .map_err(|_| context.register_error("事务快照父目录不可用。"))?;
+    let parent = AuthorityTreeSnapshot::open_absolute_directory(&context.expected_snapshot_parent)
+        .map_err(|_| context.register_error("事务快照父目录不可用。"))?;
     let root_name = AuthorityTreeSnapshot::destination_name(&context.root)
         .map_err(|_| context.register_error("事务快照名称非法。"))?;
-    let root = AuthorityTreeSnapshot::open_directory_at(
-        parent.as_raw_fd(),
-        &root_name,
-    )
-    .map_err(|_| context.register_error("事务快照不可用。"))?;
+    let root = AuthorityTreeSnapshot::open_directory_at(parent.as_raw_fd(), &root_name)
+        .map_err(|_| context.register_error("事务快照不可用。"))?;
     let before = root
         .metadata()
         .map_err(|_| context.register_error("事务快照不可用。"))?;
-    let before_entry =
-        AuthorityTreeSnapshot::stat_destination_at(&parent, &root_name)
-            .map_err(|_| context.register_error("事务快照不可用。"))?;
+    let before_entry = AuthorityTreeSnapshot::stat_destination_at(&parent, &root_name)
+        .map_err(|_| context.register_error("事务快照不可用。"))?;
     let Some((expected_device, expected_inode)) = context.expected_root_identity else {
         return Err(context.register_error("事务快照创建身份缺失。"));
     };
@@ -803,8 +818,7 @@ fn register_authority_cleanup(
     {
         return Err(context.register_error("事务快照身份不安全。"));
     }
-    let marker_name =
-        std::ffi::CString::new(PENDING_CLEANUP_MARKER_FILE).unwrap();
+    let marker_name = std::ffi::CString::new(PENDING_CLEANUP_MARKER_FILE).unwrap();
     match AuthorityTreeSnapshot::stat_destination_at(&root, &marker_name) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let mut marker = AuthorityTreeSnapshot::open_destination_at(
@@ -813,14 +827,9 @@ fn register_authority_cleanup(
                 libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
                 0o600,
             )
-                .map_err(|_| context.register_error("无法创建事务快照 marker。"))?;
-            std::io::Write::write_all(
-                &mut marker,
-                format!("{}\n", context.managed_id).as_bytes(),
-            )
-                .and_then(|_| {
-                    marker.set_permissions(std::fs::Permissions::from_mode(0o600))
-                })
+            .map_err(|_| context.register_error("无法创建事务快照 marker。"))?;
+            std::io::Write::write_all(&mut marker, format!("{}\n", context.managed_id).as_bytes())
+                .and_then(|_| marker.set_permissions(std::fs::Permissions::from_mode(0o600)))
                 .and_then(|_| marker.sync_all())
                 .map_err(|_| context.register_error("无法持久化事务快照 marker。"))?;
             let metadata = marker
@@ -870,9 +879,8 @@ fn register_authority_cleanup(
     let after = root
         .metadata()
         .map_err(|_| context.register_error("无法复核事务快照。"))?;
-    let after_entry =
-        AuthorityTreeSnapshot::stat_destination_at(&parent, &root_name)
-            .map_err(|_| context.register_error("无法复核事务快照。"))?;
+    let after_entry = AuthorityTreeSnapshot::stat_destination_at(&parent, &root_name)
+        .map_err(|_| context.register_error("无法复核事务快照。"))?;
     if after.dev() != before.dev()
         || after.ino() != before.ino()
         || !after.is_dir()
@@ -911,8 +919,11 @@ fn register_authority_cleanup(
             return Err(context.register_error("已有不同的待清理事务快照。"));
         }
     }
-    let manifest_raw = pending_cleanup_manifest_bytes(vec![entry.clone()])
-        .map_err(|_| context.register_error("无法编码待清理事务清单。"))?;
+    let manifest_raw = pending_cleanup_manifest_bytes(
+        vec![entry.clone()],
+        PendingCleanupDisposition::ActiveRecovery,
+    )
+    .map_err(|_| context.register_error("无法编码待清理事务清单。"))?;
     let publish = match previous.as_deref() {
         Some(expected) => config::write_pending_authority_cleanup_manifest(
             &context.config_dir,
@@ -931,9 +942,7 @@ fn register_authority_cleanup(
         .iter()
         .any(|pending| pending == &context.root)
     {
-        current
-            .pending_authority_cleanup
-            .push(context.root.clone());
+        current.pending_authority_cleanup.push(context.root.clone());
     }
     Ok(RegisteredAuthorityCleanup {
         manifest_raw,
@@ -945,9 +954,9 @@ fn finalize_failed_authority_snapshot(
     context: &AuthorityCleanupContext,
     primary: String,
 ) -> String {
-    let cleanup = register_authority_cleanup(context).and_then(|ticket| {
-        finalize_registered_authority_cleanup(context, &ticket)
-    });
+    let cleanup = register_authority_cleanup(context)
+        .and_then(|ticket| prepare_registered_authority_cleanup(context, &ticket))
+        .and_then(|ticket| finalize_registered_authority_cleanup(context, &ticket));
     match cleanup {
         Ok(()) => primary,
         Err(cleanup_error) => format!("{primary}；{cleanup_error}"),
@@ -963,19 +972,15 @@ fn publish_pending_cleanup_clear(
 ) -> Result<(), String> {
     #[cfg(not(test))]
     let _ = observe_recovery;
-    let empty = pending_cleanup_manifest_bytes(Vec::new())?;
-    config::write_pending_authority_cleanup_manifest(
-        config_dir,
-        &empty,
-        Some(manifest_raw),
-    )
-    .map_err(|_| {
-        cleanup_required_error(
-            "待清理事务快照已移除，但清单 CLEAR 未提交",
-            &entry.path,
-            "cleanup_clear_failed",
-        )
-    })?;
+    let empty = pending_cleanup_manifest_bytes(Vec::new(), PendingCleanupDisposition::CleanupOnly)?;
+    config::write_pending_authority_cleanup_manifest(config_dir, &empty, Some(manifest_raw))
+        .map_err(|_| {
+            cleanup_required_error(
+                "待清理事务快照已移除，但清单 CLEAR 未提交",
+                &entry.path,
+                "cleanup_clear_failed",
+            )
+        })?;
     #[cfg(test)]
     if observe_recovery {
         config::test_observe_pending_cleanup_clear_published();
@@ -1029,34 +1034,31 @@ fn finalize_registered_authority_cleanup(
         .ok_or("cleanup_manifest_missing：刚注册的待清理事务清单不存在。")?;
     if manifest_raw != ticket.manifest_raw {
         return Err(
-            "cleanup_manifest_causal_mismatch：刚注册的待清理事务清单字节票据不匹配。"
-                .into(),
+            "cleanup_manifest_causal_mismatch：刚注册的待清理事务清单字节票据不匹配。".into(),
         );
     }
     let manifest = parse_pending_cleanup_manifest(&manifest_raw)?;
     if manifest.entries.len() != 1 || manifest.entries.first() != Some(&ticket.entry) {
         return Err(
-            "cleanup_manifest_causal_mismatch：刚注册的待清理事务清单因果票据不匹配。"
+            "cleanup_manifest_causal_mismatch：刚注册的待清理事务清单因果票据不匹配。".into(),
+        );
+    }
+    if pending_cleanup_requires_recovery(&manifest) {
+        return Err(
+            "cleanup_manifest_active_recovery：活动恢复快照未转换为 cleanup-only，拒绝删除。"
                 .into(),
         );
     }
-    match validate_pending_cleanup_entry(
-        &ticket.entry,
-        &context.expected_snapshot_parent,
-    )? {
+    match validate_pending_cleanup_entry(&ticket.entry, &context.expected_snapshot_parent)? {
         PendingCleanupTargetState::Present(actual) if actual == ticket.entry => {}
         _ => {
             return Err(
-                "cleanup_identity_changed：刚注册的事务快照在删除前发生变化，已停止清理。"
-                    .into(),
+                "cleanup_identity_changed：刚注册的事务快照在删除前发生变化，已停止清理。".into(),
             )
         }
     }
-    if remove_authority_snapshot_root_with_retry(
-        &ticket.entry,
-        &context.expected_snapshot_parent,
-    )
-    .is_err()
+    if remove_authority_snapshot_root_with_retry(&ticket.entry, &context.expected_snapshot_parent)
+        .is_err()
     {
         return Err(cleanup_required_error(
             "one-click 事务快照仍无法清理",
@@ -1068,9 +1070,7 @@ fn finalize_registered_authority_cleanup(
         inspect_pending_cleanup_target(&ticket.entry),
         PendingCleanupTargetState::Missing
     ) {
-        return Err(
-            "cleanup_identity_changed：刚注册的事务快照删除后仍存在，已停止清理。".into(),
-        );
+        return Err("cleanup_identity_changed：刚注册的事务快照删除后仍存在，已停止清理。".into());
     }
     publish_pending_cleanup_clear(
         &context.state,
@@ -1080,6 +1080,42 @@ fn finalize_registered_authority_cleanup(
         false,
     )?;
     Ok(())
+}
+
+fn prepare_registered_authority_cleanup(
+    context: &AuthorityCleanupContext,
+    ticket: &RegisteredAuthorityCleanup,
+) -> Result<RegisteredAuthorityCleanup, String> {
+    let current = config::read_pending_authority_cleanup_manifest(&context.config_dir)
+        .map_err(|_| "cleanup_manifest_read_failed：无法读取活动恢复快照清单。")?
+        .ok_or("cleanup_manifest_missing：活动恢复快照清单不存在。")?;
+    if current != ticket.manifest_raw {
+        return Err("cleanup_manifest_causal_mismatch：活动恢复快照清单字节票据不匹配。".into());
+    }
+    let manifest = parse_pending_cleanup_manifest(&current)?;
+    if manifest.entries.len() != 1 || manifest.entries.first() != Some(&ticket.entry) {
+        return Err("cleanup_manifest_causal_mismatch：活动恢复快照清单因果票据不匹配。".into());
+    }
+    let cleanup_only = pending_cleanup_manifest_bytes(
+        vec![ticket.entry.clone()],
+        PendingCleanupDisposition::CleanupOnly,
+    )?;
+    config::write_pending_authority_cleanup_manifest(
+        &context.config_dir,
+        &cleanup_only,
+        Some(&current),
+    )
+    .map_err(|_| {
+        cleanup_required_error(
+            "无法把活动恢复快照原子转换为 cleanup-only",
+            &ticket.entry.path,
+            "cleanup_prepare_failed",
+        )
+    })?;
+    Ok(RegisteredAuthorityCleanup {
+        manifest_raw: cleanup_only,
+        entry: ticket.entry.clone(),
+    })
 }
 
 fn retry_pending_authority_cleanup(state: &SharedAppState) -> Result<(), String> {
@@ -1097,6 +1133,7 @@ fn retry_pending_authority_cleanup(state: &SharedAppState) -> Result<(), String>
         lock(state).pending_authority_cleanup.clear();
         return Ok(());
     }
+    let recovery_snapshot = pending_cleanup_requires_recovery(&manifest);
     let sandbox_home_path = sandbox_home();
     let expected_parent = sandbox_home_path
         .parent()
@@ -1119,14 +1156,35 @@ fn retry_pending_authority_cleanup(state: &SharedAppState) -> Result<(), String>
             current.pending_authority_cleanup.push(entry.path.clone());
         }
     }
+    if recovery_snapshot {
+        return Err(cleanup_required_error(
+            "检测到中断的 one-click authority 事务；活动恢复快照尚未转换为 cleanup-only，已拒绝自动删除",
+            &entry.path,
+            "authority_snapshot_recovery_required",
+        ));
+    }
+    let active_stage = config::load_from(&config_dir)
+        .map_err(|error| format!("cleanup_manifest_read_failed：无法读取运行事务：{error}"))?
+        .runtime_transaction
+        .map(|journal| journal.stage);
+    if active_stage
+        .as_deref()
+        .is_some_and(runtime_transaction_requires_snapshot_preservation)
+    {
+        return Err(cleanup_required_error(
+            "检测到中断的 one-click authority 事务；已保留精确注册的私有快照，拒绝自动删除或把部分写入态当作新基线",
+            &entry.path,
+            "authority_snapshot_recovery_required",
+        ));
+    }
     #[cfg(test)]
     config::test_observe_pending_cleanup_initial_ticket(match &initial {
-        PendingCleanupTargetState::Present(_) => config::PendingCleanupInitialTicket::Present(
-            test_pending_cleanup_identity(&entry),
-        ),
-        PendingCleanupTargetState::Missing => config::PendingCleanupInitialTicket::Missing(
-            test_pending_cleanup_identity(&entry),
-        ),
+        PendingCleanupTargetState::Present(_) => {
+            config::PendingCleanupInitialTicket::Present(test_pending_cleanup_identity(&entry))
+        }
+        PendingCleanupTargetState::Missing => {
+            config::PendingCleanupInitialTicket::Missing(test_pending_cleanup_identity(&entry))
+        }
         PendingCleanupTargetState::Unsafe => unreachable!(),
     });
     #[cfg(test)]
@@ -1134,24 +1192,18 @@ fn retry_pending_authority_cleanup(state: &SharedAppState) -> Result<(), String>
         .map_err(|_| "cleanup_race_hook_failed：待清理事务快照复核失败。")?;
     let current = inspect_pending_cleanup_target(&entry);
     let completed = match (&initial, &current) {
-        (
-            PendingCleanupTargetState::Present(_),
-            PendingCleanupTargetState::Present(actual),
-        ) if actual == &entry => {
+        (PendingCleanupTargetState::Present(_), PendingCleanupTargetState::Present(actual))
+            if actual == &entry =>
+        {
             #[cfg(test)]
             config::test_observe_pending_cleanup_delete_attempt();
-            if remove_authority_snapshot_root_with_retry(
-                &entry,
-                expected_parent,
-            )
-            .is_err()
-            {
+            if remove_authority_snapshot_root_with_retry(&entry, expected_parent).is_err() {
                 #[cfg(test)]
                 config::test_observe_pending_cleanup_completion(
                     config::PendingCleanupRemovalOutcome::Error,
-                    config::PendingCleanupFinalState::Present(
-                        test_pending_cleanup_identity(&entry),
-                    ),
+                    config::PendingCleanupFinalState::Present(test_pending_cleanup_identity(
+                        &entry,
+                    )),
                 );
                 return Err(cleanup_required_error(
                     "待清理 one-click 事务快照仍无法清理",
@@ -1174,7 +1226,9 @@ fn retry_pending_authority_cleanup(state: &SharedAppState) -> Result<(), String>
             match current {
                 PendingCleanupTargetState::Missing => config::PendingCleanupFinalState::NotFound,
                 PendingCleanupTargetState::Present(actual) => {
-                    config::PendingCleanupFinalState::Present(test_pending_cleanup_identity(&actual))
+                    config::PendingCleanupFinalState::Present(test_pending_cleanup_identity(
+                        &actual,
+                    ))
                 }
                 PendingCleanupTargetState::Unsafe => config::PendingCleanupFinalState::Error,
             },
@@ -1243,9 +1297,8 @@ impl AuthorityTreeSnapshot {
         {
             return Err(std::io::Error::from_raw_os_error(errno));
         }
-        let result = unsafe {
-            libc::fclonefileat(source_fd, parent_fd, destination_name.as_ptr(), 0)
-        };
+        let result =
+            unsafe { libc::fclonefileat(source_fd, parent_fd, destination_name.as_ptr(), 0) };
         if result == 0 {
             Ok(())
         } else {
@@ -1307,8 +1360,7 @@ impl AuthorityTreeSnapshot {
                             "directory component contains NUL",
                         )
                     })?;
-                    directory =
-                        Self::open_directory_at(directory.as_raw_fd(), &name)?;
+                    directory = Self::open_directory_at(directory.as_raw_fd(), &name)?;
                 }
                 _ => {
                     return Err(std::io::Error::new(
@@ -1373,11 +1425,7 @@ impl AuthorityTreeSnapshot {
         match Self::stat_destination_at(&config_parent, &parent_name) {
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                match Self::mkdir_destination_at(
-                    config_parent.as_raw_fd(),
-                    &parent_name,
-                    0o700,
-                ) {
+                match Self::mkdir_destination_at(config_parent.as_raw_fd(), &parent_name, 0o700) {
                     Ok(()) => {}
                     Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
                     Err(error) => {
@@ -1395,14 +1443,13 @@ impl AuthorityTreeSnapshot {
                 ))
             }
         }
-        let parent_entry = Self::stat_destination_at(&config_parent, &parent_name).map_err(
-            |error| {
+        let parent_entry =
+            Self::stat_destination_at(&config_parent, &parent_name).map_err(|error| {
                 format!(
                     "code=authority_snapshot_root_parent_entry_validate_failed os_error={}",
                     Self::os_error_code(&error)
                 )
-            },
-        )?;
+            })?;
         #[cfg(test)]
         if let Some(barrier) = SANDBOX_SESSION_TEST_SEAMS
             .lock()
@@ -1412,10 +1459,12 @@ impl AuthorityTreeSnapshot {
             .filter(|(target, _)| target == expected_parent)
             .map(|(_, barrier)| barrier.clone())
         {
-            std::fs::create_dir_all(&barrier)
-                .map_err(|error| format!("test-only snapshot parent barrier create failed: {error}"))?;
-            std::fs::write(barrier.join("ready"), b"ready\n")
-                .map_err(|error| format!("test-only snapshot parent barrier arm failed: {error}"))?;
+            std::fs::create_dir_all(&barrier).map_err(|error| {
+                format!("test-only snapshot parent barrier create failed: {error}")
+            })?;
+            std::fs::write(barrier.join("ready"), b"ready\n").map_err(|error| {
+                format!("test-only snapshot parent barrier arm failed: {error}")
+            })?;
             let mut released = false;
             for _ in 0..200 {
                 if barrier.join("release").is_file() {
@@ -1428,8 +1477,8 @@ impl AuthorityTreeSnapshot {
                 return Err("test-only snapshot parent barrier timed out".into());
             }
         }
-        let snapshot_parent =
-            Self::open_directory_at(config_parent.as_raw_fd(), &parent_name).map_err(|error| {
+        let snapshot_parent = Self::open_directory_at(config_parent.as_raw_fd(), &parent_name)
+            .map_err(|error| {
                 format!(
                     "code=authority_snapshot_root_parent_open_failed os_error={}",
                     Self::os_error_code(&error)
@@ -1518,20 +1567,17 @@ impl AuthorityTreeSnapshot {
         let current = Self::open_absolute_directory(path)?;
         let expected = pinned.metadata()?;
         let actual = current.metadata()?;
-        Ok(
-            expected.is_dir()
-                && actual.is_dir()
-                && expected.dev() == actual.dev()
-                && expected.ino() == actual.ino()
-                && expected.uid() == actual.uid(),
-        )
+        Ok(expected.is_dir()
+            && actual.is_dir()
+            && expected.dev() == actual.dev()
+            && expected.ino() == actual.ino()
+            && expected.uid() == actual.uid())
     }
 
     fn read_directory_names(
         directory: &std::fs::File,
     ) -> Result<Vec<std::ffi::OsString>, std::io::Error> {
-        let duplicate =
-            unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+        let duplicate = unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
         if duplicate < 0 {
             return Err(std::io::Error::last_os_error());
         }
@@ -1564,10 +1610,7 @@ impl AuthorityTreeSnapshot {
                 }
                 return Err(error);
             }
-            let name = unsafe {
-                std::ffi::CStr::from_ptr((*entry).d_name.as_ptr())
-            }
-            .to_bytes();
+            let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
             if name == b"." || name == b".." {
                 continue;
             }
@@ -1584,34 +1627,23 @@ impl AuthorityTreeSnapshot {
         let entry = Self::stat_destination_at(destination_parent, destination_name)?;
         match entry.st_mode & libc::S_IFMT {
             libc::S_IFDIR => {
-                let directory = Self::open_directory_at(
-                    destination_parent.as_raw_fd(),
-                    destination_name,
-                )?;
+                let directory =
+                    Self::open_directory_at(destination_parent.as_raw_fd(), destination_name)?;
                 let metadata = directory.metadata()?;
-                if !Self::destination_entry_matches_file(
-                    &entry,
-                    &metadata,
-                    libc::S_IFDIR,
-                ) {
-                    return Err(std::io::Error::other(
-                        "directory entry identity changed",
-                    ));
+                if !Self::destination_entry_matches_file(&entry, &metadata, libc::S_IFDIR) {
+                    return Err(std::io::Error::other("directory entry identity changed"));
                 }
                 for child in Self::read_directory_names(&directory)? {
-                    let child = std::ffi::CString::new(child.as_bytes()).map_err(
-                        |_| {
-                            std::io::Error::new(
-                                std::io::ErrorKind::InvalidInput,
-                                "directory entry contains NUL",
-                            )
-                        },
-                    )?;
+                    let child = std::ffi::CString::new(child.as_bytes()).map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "directory entry contains NUL",
+                        )
+                    })?;
                     Self::remove_tree_at(&directory, &child)?;
                 }
                 directory.sync_all()?;
-                let final_entry =
-                    Self::stat_destination_at(destination_parent, destination_name)?;
+                let final_entry = Self::stat_destination_at(destination_parent, destination_name)?;
                 let final_metadata = directory.metadata()?;
                 if !Self::destination_entry_matches_file(
                     &final_entry,
@@ -1634,10 +1666,7 @@ impl AuthorityTreeSnapshot {
                 }
             }
             libc::S_IFREG | libc::S_IFLNK => {
-                Self::unlink_destination_at(
-                    destination_parent.as_raw_fd(),
-                    destination_name,
-                )?;
+                Self::unlink_destination_at(destination_parent.as_raw_fd(), destination_name)?;
             }
             _ => {
                 return Err(std::io::Error::other(
@@ -1653,8 +1682,7 @@ impl AuthorityTreeSnapshot {
         destination_name: &std::ffi::CStr,
         mode: libc::mode_t,
     ) -> Result<(), std::io::Error> {
-        let result =
-            unsafe { libc::mkdirat(parent_fd, destination_name.as_ptr(), mode) };
+        let result = unsafe { libc::mkdirat(parent_fd, destination_name.as_ptr(), mode) };
         if result == 0 {
             Ok(())
         } else {
@@ -1666,8 +1694,7 @@ impl AuthorityTreeSnapshot {
         parent_fd: i32,
         destination_name: &std::ffi::CStr,
     ) -> Result<(), std::io::Error> {
-        let result =
-            unsafe { libc::unlinkat(parent_fd, destination_name.as_ptr(), 0) };
+        let result = unsafe { libc::unlinkat(parent_fd, destination_name.as_ptr(), 0) };
         if result == 0 {
             Ok(())
         } else {
@@ -1734,7 +1761,7 @@ impl AuthorityTreeSnapshot {
         expected_kind: libc::mode_t,
     ) -> bool {
         u64::try_from(entry.st_dev).ok() == Some(file.dev())
-            && u64::try_from(entry.st_ino).ok() == Some(file.ino())
+            && inode_u64(entry.st_ino) == Some(file.ino())
             && entry.st_mode & libc::S_IFMT == expected_kind
     }
 
@@ -1780,10 +1807,7 @@ impl AuthorityTreeSnapshot {
         if first == "conda" {
             return AuthoritySnapshotCategory::CondaCache;
         }
-        if matches!(
-            first,
-            "runtime" | "seed-assets" | "r-libs" | "sbx-bind-src"
-        ) {
+        if matches!(first, "runtime" | "seed-assets" | "r-libs" | "sbx-bind-src") {
             return AuthoritySnapshotCategory::ScienceRuntime;
         }
         if components
@@ -1828,13 +1852,12 @@ impl AuthorityTreeSnapshot {
             .map(|name| {
                 let name_c = std::ffi::CString::new(name.as_bytes())
                     .map_err(|_| "code=authority_snapshot_source_name_invalid")?;
-                let metadata =
-                    Self::stat_destination_at(directory, &name_c).map_err(|error| {
-                        format!(
-                            "code=authority_snapshot_directory_member_validate_failed os_error={}",
-                            Self::os_error_code(&error)
-                        )
-                    })?;
+                let metadata = Self::stat_destination_at(directory, &name_c).map_err(|error| {
+                    format!(
+                        "code=authority_snapshot_directory_member_validate_failed os_error={}",
+                        Self::os_error_code(&error)
+                    )
+                })?;
                 let kind = match metadata.st_mode & libc::S_IFMT {
                     libc::S_IFREG => 1,
                     libc::S_IFDIR => 2,
@@ -1846,8 +1869,8 @@ impl AuthorityTreeSnapshot {
                     kind,
                     device: u64::try_from(metadata.st_dev)
                         .map_err(|_| "code=authority_snapshot_source_device_invalid")?,
-                    inode: u64::try_from(metadata.st_ino)
-                        .map_err(|_| "code=authority_snapshot_source_inode_invalid")?,
+                    inode: inode_u64(metadata.st_ino)
+                        .ok_or("code=authority_snapshot_source_inode_invalid")?,
                     size: u64::try_from(metadata.st_size)
                         .map_err(|_| "code=authority_snapshot_source_size_invalid")?,
                     mode: u32::from(metadata.st_mode) & 0o777,
@@ -1872,22 +1895,15 @@ impl AuthorityTreeSnapshot {
         let backup_parent = backup
             .parent()
             .ok_or("code=authority_snapshot_destination_parent_missing")?;
-        let backup_parent_file = Self::open_absolute_directory(backup_parent)
-            .map_err(|error| {
-                format!(
-                    "code=authority_snapshot_destination_parent_open_failed scope={} os_error={}",
-                    scope.code(),
-                    Self::os_error_code(&error)
-                )
-            })?;
+        let backup_parent_file = Self::open_absolute_directory(backup_parent).map_err(|error| {
+            format!(
+                "code=authority_snapshot_destination_parent_open_failed scope={} os_error={}",
+                scope.code(),
+                Self::os_error_code(&error)
+            )
+        })?;
         let backup_name = Self::destination_name(&backup)?;
-        Self::capture_scoped_at(
-            scope,
-            source,
-            backup,
-            &backup_parent_file,
-            &backup_name,
-        )
+        Self::capture_scoped_at(scope, source, backup, &backup_parent_file, &backup_name)
     }
 
     fn capture_scoped_at(
@@ -1896,6 +1912,75 @@ impl AuthorityTreeSnapshot {
         backup: PathBuf,
         backup_parent: &std::fs::File,
         backup_name: &std::ffi::CStr,
+    ) -> Result<Self, String> {
+        let mut budget = AuthorityCopyBudget::default();
+        Self::capture_scoped_at_with_budget(
+            scope,
+            source,
+            backup,
+            backup_parent,
+            backup_name,
+            &mut budget,
+        )
+    }
+
+    fn capture_scoped_at_with_budget(
+        scope: AuthoritySnapshotScope,
+        source: PathBuf,
+        backup: PathBuf,
+        backup_parent: &std::fs::File,
+        backup_name: &std::ffi::CStr,
+        budget: &mut AuthorityCopyBudget,
+    ) -> Result<Self, String> {
+        let source_parent_path = source
+            .parent()
+            .ok_or("code=authority_snapshot_source_parent_missing")?;
+        let source_parent = match Self::open_absolute_directory(source_parent_path) {
+            Ok(parent) => parent,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self {
+                    scope,
+                    source,
+                    backup,
+                    existed: false,
+                    source_parent: None,
+                    source_name: None,
+                    backup_identity: None,
+                    backup_parent: None,
+                    backup_name: None,
+                })
+            }
+            Err(error) => {
+                return Err(format!(
+                    "code=authority_snapshot_source_parent_open_failed scope={} os_error={}",
+                    scope.code(),
+                    Self::os_error_code(&error)
+                ))
+            }
+        };
+        let source_name = Self::destination_name(&source)?;
+        Self::capture_scoped_from_parent_with_budget(
+            scope,
+            source,
+            backup,
+            &source_parent,
+            &source_name,
+            backup_parent,
+            backup_name,
+            budget,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn capture_scoped_from_parent_with_budget(
+        scope: AuthoritySnapshotScope,
+        source: PathBuf,
+        backup: PathBuf,
+        source_parent: &std::fs::File,
+        source_name: &std::ffi::CStr,
+        backup_parent: &std::fs::File,
+        backup_name: &std::ffi::CStr,
+        budget: &mut AuthorityCopyBudget,
     ) -> Result<Self, String> {
         #[cfg(test)]
         if SANDBOX_SESSION_TEST_SEAMS
@@ -1913,30 +1998,7 @@ impl AuthorityTreeSnapshot {
         let source_parent_path = source
             .parent()
             .ok_or("code=authority_snapshot_source_parent_missing")?;
-        let source_parent = match Self::open_absolute_directory(source_parent_path) {
-            Ok(parent) => parent,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Self {
-                    scope,
-                    source,
-                    backup,
-                    existed: false,
-                    backup_identity: None,
-                    backup_parent: None,
-                    backup_name: None,
-                })
-            }
-            Err(error) => {
-                return Err(format!(
-                    "code=authority_snapshot_source_parent_open_failed scope={} os_error={}",
-                    scope.code(),
-                    Self::os_error_code(&error)
-                ))
-            }
-        };
-        let source_name = Self::destination_name(&source)?;
-        let backup_identity =
-            match Self::stat_destination_at(&source_parent, &source_name) {
+        let backup_identity = match Self::stat_destination_at(source_parent, source_name) {
             Ok(source_identity) => {
                 if source_identity.st_mode & libc::S_IFMT == libc::S_IFLNK {
                     return Err(format!(
@@ -1944,14 +2006,13 @@ impl AuthorityTreeSnapshot {
                         scope.code()
                     ));
                 }
-                let mut budget = AuthorityCopyBudget::default();
                 Self::copy_tree_from_at(
                     &source,
-                    &source_parent,
-                    &source_name,
+                    source_parent,
+                    source_name,
                     backup_parent,
                     backup_name,
-                    &mut budget,
+                    budget,
                     false,
                     scope,
                     &source,
@@ -1959,7 +2020,7 @@ impl AuthorityTreeSnapshot {
                 let source_parent_still_bound =
                     Self::absolute_directory_binding_matches(
                         source_parent_path,
-                        &source_parent,
+                        source_parent,
                     )
                     .map_err(|error| {
                         format!(
@@ -1993,22 +2054,20 @@ impl AuthorityTreeSnapshot {
                             )
                         })?;
                 Some((
-                    u64::try_from(identity.st_dev).map_err(|_| {
-                        "code=authority_snapshot_root_device_invalid"
-                    })?,
-                    u64::try_from(identity.st_ino).map_err(|_| {
-                        "code=authority_snapshot_root_inode_invalid"
-                    })?,
+                    u64::try_from(identity.st_dev)
+                        .map_err(|_| "code=authority_snapshot_root_device_invalid")?,
+                    inode_u64(identity.st_ino)
+                        .ok_or("code=authority_snapshot_root_inode_invalid")?,
                     identity.st_mode & libc::S_IFMT,
                 ))
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => {
                 return Err(format!(
-                    "code=authority_snapshot_root_metadata_failed scope={} category=other os_error={}",
-                    scope.code(),
-                    Self::os_error_code(&error)
-                ))
+                "code=authority_snapshot_root_metadata_failed scope={} category=other os_error={}",
+                scope.code(),
+                Self::os_error_code(&error)
+            ))
             }
         };
         let backup_parent_handle = if backup_identity.is_some() {
@@ -2022,13 +2081,21 @@ impl AuthorityTreeSnapshot {
         } else {
             None
         };
-        let backup_name_handle =
-            backup_identity.as_ref().map(|_| backup_name.to_owned());
+        let backup_name_handle = backup_identity.as_ref().map(|_| backup_name.to_owned());
+        let source_parent_handle = source_parent.try_clone().map_err(|error| {
+            format!(
+                "code=authority_snapshot_source_parent_pin_failed scope={} os_error={}",
+                scope.code(),
+                Self::os_error_code(&error)
+            )
+        })?;
         Ok(Self {
             scope,
             source,
             backup,
             existed: backup_identity.is_some(),
+            source_parent: Some(source_parent_handle),
+            source_name: Some(source_name.to_owned()),
             backup_identity,
             backup_parent: backup_parent_handle,
             backup_name: backup_name_handle,
@@ -2041,16 +2108,13 @@ impl AuthorityTreeSnapshot {
         scope: AuthoritySnapshotScope,
         category: AuthoritySnapshotCategory,
     ) -> Result<(), String> {
-        budget.entries = budget
-            .entries
-            .checked_add(1)
-            .ok_or_else(|| {
-                format!(
-                    "code=authority_snapshot_entry_overflow scope={} category={}",
-                    scope.code(),
-                    category.code()
-                )
-            })?;
+        budget.entries = budget.entries.checked_add(1).ok_or_else(|| {
+            format!(
+                "code=authority_snapshot_entry_overflow scope={} category={}",
+                scope.code(),
+                category.code()
+            )
+        })?;
         if budget.entries > MAX_AUTHORITY_SNAPSHOT_ENTRIES {
             return Err(format!(
                 "code=authority_snapshot_entry_limit scope={} category={} observed_entries={} entry_limit={MAX_AUTHORITY_SNAPSHOT_ENTRIES}",
@@ -2066,17 +2130,14 @@ impl AuthorityTreeSnapshot {
                 category.code()
             ));
         }
-        budget.bytes = budget
-            .bytes
-            .checked_add(file_bytes)
-            .ok_or_else(|| {
-                format!(
-                    "code=authority_snapshot_total_overflow scope={} category={} observed_entries={}",
-                    scope.code(),
-                    category.code(),
-                    budget.entries
-                )
-            })?;
+        budget.bytes = budget.bytes.checked_add(file_bytes).ok_or_else(|| {
+            format!(
+                "code=authority_snapshot_total_overflow scope={} category={} observed_entries={}",
+                scope.code(),
+                category.code(),
+                budget.entries
+            )
+        })?;
         if budget.bytes > MAX_AUTHORITY_SNAPSHOT_TOTAL_BYTES {
             return Err(format!(
                 "code=authority_snapshot_total_limit scope={} category={} observed_total_bytes={} total_limit={MAX_AUTHORITY_SNAPSHOT_TOTAL_BYTES} observed_entries={}",
@@ -2102,16 +2163,17 @@ impl AuthorityTreeSnapshot {
                 category.code()
             ));
         }
-        budget.full_copy_bytes = budget
-            .full_copy_bytes
-            .checked_add(file_bytes)
-            .ok_or_else(|| {
-                format!(
-                    "code=authority_snapshot_full_copy_overflow scope={} category={}",
-                    scope.code(),
-                    category.code()
-                )
-            })?;
+        budget.full_copy_bytes =
+            budget
+                .full_copy_bytes
+                .checked_add(file_bytes)
+                .ok_or_else(|| {
+                    format!(
+                        "code=authority_snapshot_full_copy_overflow scope={} category={}",
+                        scope.code(),
+                        category.code()
+                    )
+                })?;
         if budget.full_copy_bytes > MAX_AUTHORITY_FULL_COPY_TOTAL_BYTES {
             return Err(format!(
                 "code=authority_snapshot_clone_required scope={} category={} observed_full_copy_bytes={} full_copy_total_limit={MAX_AUTHORITY_FULL_COPY_TOTAL_BYTES}",
@@ -2152,26 +2214,24 @@ impl AuthorityTreeSnapshot {
         let parent = backup
             .parent()
             .ok_or("code=authority_snapshot_destination_parent_missing")?;
-        let parent_file = Self::open_absolute_directory(parent)
-            .map_err(|error| {
-                format!(
-                    "code=authority_snapshot_destination_parent_open_failed scope={} os_error={}",
-                    scope.code(),
-                    Self::os_error_code(&error)
-                )
-            })?;
+        let parent_file = Self::open_absolute_directory(parent).map_err(|error| {
+            format!(
+                "code=authority_snapshot_destination_parent_open_failed scope={} os_error={}",
+                scope.code(),
+                Self::os_error_code(&error)
+            )
+        })?;
         let backup_name = Self::destination_name(backup)?;
         let source_parent_path = source
             .parent()
             .ok_or("code=authority_snapshot_source_parent_missing")?;
-        let source_parent =
-            Self::open_absolute_directory(source_parent_path).map_err(|error| {
-                format!(
-                    "code=authority_snapshot_source_parent_open_failed scope={} os_error={}",
-                    scope.code(),
-                    Self::os_error_code(&error)
-                )
-            })?;
+        let source_parent = Self::open_absolute_directory(source_parent_path).map_err(|error| {
+            format!(
+                "code=authority_snapshot_source_parent_open_failed scope={} os_error={}",
+                scope.code(),
+                Self::os_error_code(&error)
+            )
+        })?;
         let source_name = Self::destination_name(source)?;
         Self::copy_tree_from_at(
             source,
@@ -2186,6 +2246,7 @@ impl AuthorityTreeSnapshot {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn copy_tree_from_at(
         source_logical: &Path,
         source_parent: &std::fs::File,
@@ -2198,16 +2259,14 @@ impl AuthorityTreeSnapshot {
         root: &Path,
     ) -> Result<(), String> {
         let category = Self::category(scope, root, source_logical);
-        let metadata = Self::stat_destination_at(source_parent, source_name).map_err(
-            |error| {
+        let metadata = Self::stat_destination_at(source_parent, source_name).map_err(|error| {
             format!(
                 "code=authority_snapshot_metadata_failed scope={} category={} os_error={}",
                 scope.code(),
                 category.code(),
                 Self::os_error_code(&error)
             )
-            },
-        )?;
+        })?;
         let source_kind = metadata.st_mode & libc::S_IFMT;
         if source_kind == libc::S_IFLNK {
             if !allow_symlink {
@@ -2225,21 +2284,17 @@ impl AuthorityTreeSnapshot {
                 )
             })?;
             let target_bytes =
-                Self::readlink_destination_at(source_parent, source_name, expected_len)
-                    .map_err(|error| {
+                Self::readlink_destination_at(source_parent, source_name, expected_len).map_err(
+                    |error| {
                         format!(
-                            "code=authority_snapshot_symlink_read_failed scope={} category={} os_error={}",
-                            scope.code(),
-                            category.code(),
-                            Self::os_error_code(&error)
-                        )
-                    })?;
-            Self::charge_entry(
-                budget,
-                target_bytes.len() as u64,
-                scope,
-                category,
-            )?;
+                    "code=authority_snapshot_symlink_read_failed scope={} category={} os_error={}",
+                    scope.code(),
+                    category.code(),
+                    Self::os_error_code(&error)
+                )
+                    },
+                )?;
+            Self::charge_entry(budget, target_bytes.len() as u64, scope, category)?;
             let target_name = std::ffi::CString::new(target_bytes.clone())
                 .map_err(|_| "code=authority_snapshot_symlink_target_invalid")?;
             let symlink_result = unsafe {
@@ -2402,11 +2457,7 @@ impl AuthorityTreeSnapshot {
                     )
                 })?;
             if !opened.is_file()
-                || !Self::destination_entry_matches_file(
-                    &metadata,
-                    &opened,
-                    libc::S_IFREG,
-                )
+                || !Self::destination_entry_matches_file(&metadata, &opened, libc::S_IFREG)
                 || opened.len() != source_size
             {
                 return Err(format!(
@@ -2498,9 +2549,7 @@ impl AuthorityTreeSnapshot {
                     }
                 };
                 output
-                    .set_permissions(std::fs::Permissions::from_mode(
-                        source_mode,
-                    ))
+                    .set_permissions(std::fs::Permissions::from_mode(source_mode))
                     .map_err(|error| {
                         format!(
                             "code=authority_snapshot_chmod_failed scope={} category={} os_error={}",
@@ -2539,11 +2588,8 @@ impl AuthorityTreeSnapshot {
                                 Self::os_error_code(&error)
                             )
                         })?;
-                if !Self::destination_entry_matches_file(
-                    &destination_entry,
-                    &saved,
-                    libc::S_IFREG,
-                ) {
+                if !Self::destination_entry_matches_file(&destination_entry, &saved, libc::S_IFREG)
+                {
                     return Err(format!(
                         "code=authority_snapshot_destination_rebound scope={} category={} kind=file",
                         scope.code(),
@@ -2664,19 +2710,15 @@ impl AuthorityTreeSnapshot {
         }
         let source_mode = u32::from(metadata.st_mode) & 0o777;
         Self::charge_entry(budget, 0, scope, category)?;
-        Self::mkdir_destination_at(
-            destination_parent.as_raw_fd(),
-            destination_name,
-            0o700,
-        )
-        .map_err(|error| {
-            format!(
+        Self::mkdir_destination_at(destination_parent.as_raw_fd(), destination_name, 0o700)
+            .map_err(|error| {
+                format!(
                 "code=authority_snapshot_directory_create_failed scope={} category={} os_error={}",
                 scope.code(),
                 category.code(),
                 Self::os_error_code(&error)
             )
-        })?;
+            })?;
         let created_destination_entry =
             Self::stat_destination_at(destination_parent, destination_name)
                 .map_err(|error| {
@@ -2687,18 +2729,17 @@ impl AuthorityTreeSnapshot {
                         Self::os_error_code(&error)
                     )
                 })?;
-        let destination_directory = Self::open_directory_at(
-            destination_parent.as_raw_fd(),
-            destination_name,
-        )
-        .map_err(|error| {
-            format!(
+        let destination_directory =
+            Self::open_directory_at(destination_parent.as_raw_fd(), destination_name).map_err(
+                |error| {
+                    format!(
                 "code=authority_snapshot_directory_open_failed scope={} category={} os_error={}",
                 scope.code(),
                 category.code(),
                 Self::os_error_code(&error)
             )
-        })?;
+                },
+            )?;
         destination_directory
             .set_permissions(std::fs::Permissions::from_mode(0o700))
             .map_err(|error| {
@@ -2742,8 +2783,7 @@ impl AuthorityTreeSnapshot {
                 Self::os_error_code(&error)
             )
         })?;
-        let initial_manifest =
-            Self::directory_manifest_at(&source_directory, &children)?;
+        let initial_manifest = Self::directory_manifest_at(&source_directory, &children)?;
         #[cfg(test)]
         if let Some(barrier) = SANDBOX_SESSION_TEST_SEAMS
             .lock()
@@ -2777,7 +2817,7 @@ impl AuthorityTreeSnapshot {
                     category.code()
                 )
             })?;
-            let child_logical = source_logical.join(&child);
+            let child_logical = source_logical.join(child);
             Self::copy_tree_from_at(
                 &child_logical,
                 &source_directory,
@@ -2799,8 +2839,7 @@ impl AuthorityTreeSnapshot {
                     Self::os_error_code(&error)
                 )
             })?;
-        let final_manifest =
-            Self::directory_manifest_at(&source_directory, &final_children)?;
+        let final_manifest = Self::directory_manifest_at(&source_directory, &final_children)?;
         let final_entry =
             Self::stat_destination_at(source_parent, source_name).map_err(|error| {
                 format!(
@@ -2818,14 +2857,10 @@ impl AuthorityTreeSnapshot {
                 Self::os_error_code(&error)
             )
         })?;
-        let membership_stable =
-            initial_manifest == final_manifest && children == final_children;
+        let membership_stable = initial_manifest == final_manifest && children == final_children;
         let entry_stable = Self::stat_entry_stable(&metadata, &final_entry);
-        let binding_stable = Self::destination_entry_matches_file(
-                &final_entry,
-                &final_metadata,
-                libc::S_IFDIR,
-            );
+        let binding_stable =
+            Self::destination_entry_matches_file(&final_entry, &final_metadata, libc::S_IFDIR);
         let opened_stable = final_metadata.dev() == source_directory_metadata.dev()
             && final_metadata.ino() == source_directory_metadata.ino()
             && final_metadata.uid() == source_directory_metadata.uid()
@@ -2984,9 +3019,7 @@ impl AuthorityTreeSnapshot {
     }
 
     fn validate_backup_identity(&self) -> Result<(), String> {
-        let Some((expected_device, expected_inode, expected_kind)) =
-            self.backup_identity
-        else {
+        let Some((expected_device, expected_inode, expected_kind)) = self.backup_identity else {
             return if self.existed {
                 Err(format!(
                     "code=authority_restore_backup_identity_missing scope={}",
@@ -3012,30 +3045,27 @@ impl AuthorityTreeSnapshot {
             .backup
             .parent()
             .ok_or("code=authority_restore_backup_parent_missing")?;
-        if !Self::absolute_directory_binding_matches(parent_path, parent).map_err(
-            |error| {
-                format!(
-                    "code=authority_restore_backup_parent_revalidate_failed scope={} os_error={}",
-                    self.scope.code(),
-                    Self::os_error_code(&error)
-                )
-            },
-        )? {
+        if !Self::absolute_directory_binding_matches(parent_path, parent).map_err(|error| {
+            format!(
+                "code=authority_restore_backup_parent_revalidate_failed scope={} os_error={}",
+                self.scope.code(),
+                Self::os_error_code(&error)
+            )
+        })? {
             return Err(format!(
                 "code=authority_restore_backup_parent_rebound scope={}",
                 self.scope.code()
             ));
         }
-        let current =
-            Self::stat_destination_at(parent, name).map_err(|error| {
-                format!(
-                    "code=authority_restore_backup_validate_failed scope={} os_error={}",
-                    self.scope.code(),
-                    Self::os_error_code(&error)
-                )
-            })?;
+        let current = Self::stat_destination_at(parent, name).map_err(|error| {
+            format!(
+                "code=authority_restore_backup_validate_failed scope={} os_error={}",
+                self.scope.code(),
+                Self::os_error_code(&error)
+            )
+        })?;
         if u64::try_from(current.st_dev).ok() != Some(expected_device)
-            || u64::try_from(current.st_ino).ok() != Some(expected_inode)
+            || inode_u64(current.st_ino) != Some(expected_inode)
             || current.st_mode & libc::S_IFMT != expected_kind
         {
             return Err(format!(
@@ -3049,23 +3079,51 @@ impl AuthorityTreeSnapshot {
     fn restore(&mut self) -> Result<(), String> {
         self.validate_backup_identity()?;
         let parent_path = self.source.parent().ok_or("隔离 authority 没有父目录")?;
-        let parent = match Self::open_absolute_directory(parent_path) {
-            Ok(parent) => parent,
-            Err(error)
-                if !self.existed && error.kind() == std::io::ErrorKind::NotFound =>
-            {
-                return Ok(())
+        let opened_parent;
+        let parent = match self.source_parent.as_ref() {
+            Some(parent) => {
+                if !Self::absolute_directory_binding_matches(parent_path, parent).map_err(
+                    |error| {
+                        format!(
+                            "code=authority_restore_parent_revalidate_failed scope={} os_error={}",
+                            self.scope.code(),
+                            Self::os_error_code(&error)
+                        )
+                    },
+                )? {
+                    return Err(format!(
+                        "code=authority_restore_parent_rebound scope={}",
+                        self.scope.code()
+                    ));
+                }
+                parent
             }
-            Err(error) => {
-                return Err(format!(
-                    "code=authority_restore_parent_open_failed scope={} os_error={}",
-                    self.scope.code(),
-                    Self::os_error_code(&error)
-                ))
+            None => {
+                opened_parent = match Self::open_absolute_directory(parent_path) {
+                    Ok(parent) => parent,
+                    Err(error) if !self.existed && error.kind() == std::io::ErrorKind::NotFound => {
+                        return Ok(())
+                    }
+                    Err(error) => {
+                        return Err(format!(
+                            "code=authority_restore_parent_open_failed scope={} os_error={}",
+                            self.scope.code(),
+                            Self::os_error_code(&error)
+                        ))
+                    }
+                };
+                &opened_parent
             }
         };
-        let source_name = Self::destination_name(&self.source)?;
-        Self::remove_current_at(self.scope, &parent, &source_name)?;
+        let computed_source_name;
+        let source_name = match self.source_name.as_deref() {
+            Some(name) => name,
+            None => {
+                computed_source_name = Self::destination_name(&self.source)?;
+                &computed_source_name
+            }
+        };
+        Self::remove_current_at(self.scope, parent, source_name)?;
         if self.existed {
             let mut budget = AuthorityCopyBudget::default();
             let backup_root = self.backup.clone();
@@ -3085,25 +3143,23 @@ impl AuthorityTreeSnapshot {
                 &self.backup,
                 backup_parent,
                 backup_name,
-                &parent,
-                &source_name,
+                parent,
+                source_name,
                 &mut budget,
                 false,
                 self.scope,
                 &backup_root,
             )
-                .map_err(|error| format!("无法恢复隔离 authority：{error}"))?;
+            .map_err(|error| format!("无法恢复隔离 authority：{error}"))?;
             self.validate_backup_identity()?;
         }
-        if !Self::absolute_directory_binding_matches(parent_path, &parent)
-            .map_err(|error| {
-                format!(
-                    "code=authority_restore_parent_revalidate_failed scope={} os_error={}",
-                    self.scope.code(),
-                    Self::os_error_code(&error)
-                )
-            })?
-        {
+        if !Self::absolute_directory_binding_matches(parent_path, parent).map_err(|error| {
+            format!(
+                "code=authority_restore_parent_revalidate_failed scope={} os_error={}",
+                self.scope.code(),
+                Self::os_error_code(&error)
+            )
+        })? {
             return Err(format!(
                 "code=authority_restore_parent_rebound scope={}",
                 self.scope.code()
@@ -3155,6 +3211,7 @@ impl AppAuthoritySnapshot {
         }
     }
 
+    #[cfg(test)]
     fn restore(&self, state: &SharedAppState, proxy_action: ProxyAction) -> Result<(), String> {
         let mut current = lock(state);
         if proxy_action == ProxyAction::Restarted {
@@ -3243,7 +3300,11 @@ impl AppAuthoritySnapshot {
 struct OneClickAuthoritySnapshot {
     backup_root: PathBuf,
     cleanup_context: AuthorityCleanupContext,
+    cleanup_ticket: Option<RegisteredAuthorityCleanup>,
     trees: Vec<AuthorityTreeSnapshot>,
+    science_root_path: PathBuf,
+    science_root: Option<std::fs::File>,
+    science_opaque_bindings: [Option<(u64, u64)>; SCIENCE_OWNED_OPAQUE_ROOTS.len()],
     config: config::Config,
     app: AppAuthoritySnapshot,
     preserve_recovery: bool,
@@ -3251,6 +3312,144 @@ struct OneClickAuthoritySnapshot {
 }
 
 impl OneClickAuthoritySnapshot {
+    fn science_opaque_root_bindings(
+        root: Option<&std::fs::File>,
+    ) -> Result<[Option<(u64, u64)>; SCIENCE_OWNED_OPAQUE_ROOTS.len()], String> {
+        let mut bindings = [None; SCIENCE_OWNED_OPAQUE_ROOTS.len()];
+        let Some(root) = root else {
+            return Ok(bindings);
+        };
+        for (index, entry) in SCIENCE_OWNED_OPAQUE_ROOTS.iter().enumerate() {
+            let name = std::ffi::CString::new(*entry)
+                .map_err(|_| "code=science_environment_root_name_invalid")?;
+            match AuthorityTreeSnapshot::stat_destination_at(root, &name) {
+                Ok(identity)
+                    if identity.st_mode & libc::S_IFMT == libc::S_IFDIR
+                        && identity.st_uid == unsafe { libc::geteuid() }
+                        && identity.st_mode & 0o022 == 0 =>
+                {
+                    let device = u64::try_from(identity.st_dev)
+                        .map_err(|_| "code=science_environment_root_device_invalid")?;
+                    let inode = inode_u64(identity.st_ino)
+                        .ok_or("code=science_environment_root_inode_invalid")?;
+                    bindings[index] = Some((device, inode));
+                }
+                Ok(_) => {
+                    return Err(
+                        "code=science_environment_root_identity_failed category=science_runtime"
+                            .into(),
+                    )
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!(
+                        "code=science_environment_root_validate_failed category=science_runtime os_error={}",
+                        AuthorityTreeSnapshot::os_error_code(&error)
+                    ))
+                }
+            }
+        }
+        Ok(bindings)
+    }
+
+    fn pin_science_root_and_validate_opaque_entries(
+        auth_dir: &Path,
+    ) -> Result<Option<std::fs::File>, String> {
+        let root = match AuthorityTreeSnapshot::open_absolute_directory(auth_dir) {
+            Ok(root) => root,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(format!(
+                    "code=science_authority_root_open_failed os_error={}",
+                    AuthorityTreeSnapshot::os_error_code(&error)
+                ))
+            }
+        };
+        let metadata = root.metadata().map_err(|error| {
+            format!(
+                "code=science_authority_root_validate_failed os_error={}",
+                AuthorityTreeSnapshot::os_error_code(&error)
+            )
+        })?;
+        if !metadata.is_dir()
+            || metadata.file_type().is_symlink()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.permissions().mode() & 0o022 != 0
+        {
+            return Err("code=science_authority_root_identity_failed".into());
+        }
+        Self::science_opaque_root_bindings(Some(&root))?;
+        Ok(Some(root))
+    }
+
+    fn revalidate_science_root_binding(
+        auth_dir: &Path,
+        pinned: &Option<std::fs::File>,
+    ) -> Result<(), String> {
+        let Some(pinned) = pinned.as_ref() else {
+            return match AuthorityTreeSnapshot::open_absolute_directory(auth_dir) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Ok(_) => Err("code=science_authority_root_created_during_capture".into()),
+                Err(error) => Err(format!(
+                    "code=science_authority_root_revalidate_failed os_error={}",
+                    AuthorityTreeSnapshot::os_error_code(&error)
+                )),
+            };
+        };
+        let matches = AuthorityTreeSnapshot::absolute_directory_binding_matches(auth_dir, pinned)
+            .map_err(|error| {
+            format!(
+                "code=science_authority_root_revalidate_failed os_error={}",
+                AuthorityTreeSnapshot::os_error_code(&error)
+            )
+        })?;
+        if matches {
+            Ok(())
+        } else {
+            Err("code=science_authority_root_rebound".into())
+        }
+    }
+
+    fn validate_science_restore_root(&self) -> Result<(), String> {
+        let current = Self::pin_science_root_and_validate_opaque_entries(&self.science_root_path)?;
+        if Self::science_opaque_root_bindings(current.as_ref())? != self.science_opaque_bindings {
+            return Err("code=science_environment_root_rebound category=science_runtime".into());
+        }
+        match (self.science_root.as_ref(), current.as_ref()) {
+            (Some(pinned), Some(_)) => {
+                let matches = AuthorityTreeSnapshot::absolute_directory_binding_matches(
+                    &self.science_root_path,
+                    pinned,
+                )
+                .map_err(|error| {
+                    format!(
+                        "code=science_authority_restore_root_revalidate_failed os_error={}",
+                        AuthorityTreeSnapshot::os_error_code(&error)
+                    )
+                })?;
+                if matches {
+                    Ok(())
+                } else {
+                    Err("code=science_authority_restore_root_rebound".into())
+                }
+            }
+            (Some(_), None) => Err("code=science_authority_restore_root_missing".into()),
+            (None, _) => Ok(()),
+        }
+    }
+
+    fn science_opaque_bindings_env(&self) -> String {
+        SCIENCE_OWNED_OPAQUE_ROOTS
+            .iter()
+            .zip(self.science_opaque_bindings)
+            .map(|(name, binding)| match binding {
+                Some((device, inode)) => format!("{name}={device}:{inode}"),
+                None => format!("{name}=absent"),
+            })
+            .collect::<Vec<_>>()
+            .join(";")
+    }
+
     fn capture(
         config_dir: &Path,
         sandbox_home: &Path,
@@ -3310,16 +3509,13 @@ impl OneClickAuthoritySnapshot {
         let sandbox_dir = sandbox_home
             .parent()
             .ok_or("沙箱 HOME 无父目录，无法建立事务快照")?;
-        let mut cleanup_context =
-            AuthorityCleanupContext::new(config_dir, sandbox_home, state)?;
+        let mut cleanup_context = AuthorityCleanupContext::new(config_dir, sandbox_home, state)?;
         let backup_root = cleanup_context.root.clone();
-        let snapshot_parent =
-            AuthorityTreeSnapshot::open_or_create_authority_snapshot_parent(
-                config_dir,
-                sandbox_home,
-            )?;
-        let backup_root_name =
-            AuthorityTreeSnapshot::destination_name(&backup_root)?;
+        let snapshot_parent = AuthorityTreeSnapshot::open_or_create_authority_snapshot_parent(
+            config_dir,
+            sandbox_home,
+        )?;
+        let backup_root_name = AuthorityTreeSnapshot::destination_name(&backup_root)?;
         AuthorityTreeSnapshot::mkdir_destination_at(
             snapshot_parent.as_raw_fd(),
             &backup_root_name,
@@ -3331,19 +3527,17 @@ impl OneClickAuthoritySnapshot {
                 AuthorityTreeSnapshot::os_error_code(&error)
             )
         })?;
-        let created_root_entry = AuthorityTreeSnapshot::stat_destination_at(
-            &snapshot_parent,
-            &backup_root_name,
-        )
-        .map_err(|error| {
-            finalize_failed_authority_snapshot(
-                &cleanup_context,
-                format!(
-                    "code=authority_snapshot_root_entry_validate_failed os_error={}",
-                    AuthorityTreeSnapshot::os_error_code(&error)
-                ),
-            )
-        })?;
+        let created_root_entry =
+            AuthorityTreeSnapshot::stat_destination_at(&snapshot_parent, &backup_root_name)
+                .map_err(|error| {
+                    finalize_failed_authority_snapshot(
+                        &cleanup_context,
+                        format!(
+                            "code=authority_snapshot_root_entry_validate_failed os_error={}",
+                            AuthorityTreeSnapshot::os_error_code(&error)
+                        ),
+                    )
+                })?;
         cleanup_context.bind_root_identity(&created_root_entry)?;
         let backup_root_file = match (|| -> Result<std::fs::File, String> {
             let root = AuthorityTreeSnapshot::open_directory_at(
@@ -3396,18 +3590,118 @@ impl OneClickAuthoritySnapshot {
             Ok(root)
         })() {
             Ok(root) => root,
-            Err(error) => {
-                return Err(finalize_failed_authority_snapshot(
-                    &cleanup_context,
-                    error,
-                ))
-            }
+            Err(error) => return Err(finalize_failed_authority_snapshot(&cleanup_context, error)),
         };
+        let cleanup_ticket = match register_authority_cleanup(&cleanup_context) {
+            Ok(ticket) => ticket,
+            Err(error) => return Err(finalize_failed_authority_snapshot(&cleanup_context, error)),
+        };
+        let science_root = match Self::pin_science_root_and_validate_opaque_entries(auth_dir) {
+            Ok(root) => root,
+            Err(error) => return Err(finalize_failed_authority_snapshot(&cleanup_context, error)),
+        };
+        let science_opaque_bindings =
+            match Self::science_opaque_root_bindings(science_root.as_ref()) {
+                Ok(bindings) => bindings,
+                Err(error) => {
+                    return Err(finalize_failed_authority_snapshot(&cleanup_context, error))
+                }
+            };
+        let science_backup = backup_root.join("0");
+        let science_backup_name = AuthorityTreeSnapshot::destination_name(&science_backup)?;
+        AuthorityTreeSnapshot::mkdir_destination_at(
+            backup_root_file.as_raw_fd(),
+            &science_backup_name,
+            0o700,
+        )
+        .map_err(|error| {
+            finalize_failed_authority_snapshot(
+                &cleanup_context,
+                format!(
+                    "code=science_authority_projection_create_failed os_error={}",
+                    AuthorityTreeSnapshot::os_error_code(&error)
+                ),
+            )
+        })?;
+        let science_backup_file = AuthorityTreeSnapshot::open_directory_at(
+            backup_root_file.as_raw_fd(),
+            &science_backup_name,
+        )
+        .map_err(|error| {
+            finalize_failed_authority_snapshot(
+                &cleanup_context,
+                format!(
+                    "code=science_authority_projection_open_failed os_error={}",
+                    AuthorityTreeSnapshot::os_error_code(&error)
+                ),
+            )
+        })?;
+        let mut trees = Vec::with_capacity(SCIENCE_PROTECTED_AUTHORITY_ENTRIES.len() + 3);
+        let mut science_budget = AuthorityCopyBudget::default();
+        for entry in SCIENCE_PROTECTED_AUTHORITY_ENTRIES {
+            let source = auth_dir.join(entry);
+            let backup = science_backup.join(entry);
+            let source_name = AuthorityTreeSnapshot::destination_name(&source)?;
+            let backup_name = AuthorityTreeSnapshot::destination_name(&backup)?;
+            let capture = match science_root.as_ref() {
+                Some(science_root) => {
+                    AuthorityTreeSnapshot::capture_scoped_from_parent_with_budget(
+                        AuthoritySnapshotScope::ScienceData,
+                        source,
+                        backup,
+                        science_root,
+                        &source_name,
+                        &science_backup_file,
+                        &backup_name,
+                        &mut science_budget,
+                    )
+                }
+                None => AuthorityTreeSnapshot::capture_scoped_at_with_budget(
+                    AuthoritySnapshotScope::ScienceData,
+                    source,
+                    backup,
+                    &science_backup_file,
+                    &backup_name,
+                    &mut science_budget,
+                ),
+            };
+            match capture {
+                Ok(snapshot) => trees.push(snapshot),
+                Err(error) => {
+                    let durability = science_backup_file
+                        .sync_all()
+                        .and_then(|_| backup_root_file.sync_all())
+                        .and_then(|_| snapshot_parent.sync_all());
+                    let primary = match durability {
+                        Ok(()) => error,
+                        Err(sync_error) => format!(
+                            "{error}; code=authority_snapshot_failure_sync_failed os_error={}",
+                            AuthorityTreeSnapshot::os_error_code(&sync_error)
+                        ),
+                    };
+                    return Err(finalize_failed_authority_snapshot(
+                        &cleanup_context,
+                        primary,
+                    ));
+                }
+            }
+        }
+        if let Err(error) = Self::revalidate_science_root_binding(auth_dir, &science_root) {
+            return Err(finalize_failed_authority_snapshot(&cleanup_context, error));
+        }
+        science_backup_file
+            .sync_all()
+            .and_then(|_| backup_root_file.sync_all())
+            .map_err(|error| {
+                finalize_failed_authority_snapshot(
+                    &cleanup_context,
+                    format!(
+                        "code=science_authority_projection_sync_failed os_error={}",
+                        AuthorityTreeSnapshot::os_error_code(&error)
+                    ),
+                )
+            })?;
         let sources = [
-            (
-                AuthoritySnapshotScope::ScienceData,
-                auth_dir.to_path_buf(),
-            ),
             (
                 AuthoritySnapshotScope::SandboxState,
                 sandbox_dir.join("state"),
@@ -3421,8 +3715,8 @@ impl OneClickAuthoritySnapshot {
                 config_dir.join("science-managed-launch.v1.json"),
             ),
         ];
-        let mut trees = Vec::with_capacity(sources.len());
         for (index, (scope, source)) in sources.into_iter().enumerate() {
+            let index = index + 1;
             let backup = backup_root.join(index.to_string());
             let backup_name = AuthorityTreeSnapshot::destination_name(&backup)?;
             match AuthorityTreeSnapshot::capture_scoped_at(
@@ -3434,9 +3728,9 @@ impl OneClickAuthoritySnapshot {
             ) {
                 Ok(snapshot) => trees.push(snapshot),
                 Err(error) => {
-                    let durability = backup_root_file.sync_all().and_then(|_| {
-                        snapshot_parent.sync_all()
-                    });
+                    let durability = backup_root_file
+                        .sync_all()
+                        .and_then(|_| snapshot_parent.sync_all());
                     let primary = match durability {
                         Ok(()) => error,
                         Err(sync_error) => format!(
@@ -3463,36 +3757,32 @@ impl OneClickAuthoritySnapshot {
                     AuthorityTreeSnapshot::os_error_code(&error)
                 ),
             )
-        })?
-        {
+        })? {
             return Err(finalize_failed_authority_snapshot(
                 &cleanup_context,
                 "code=authority_snapshot_root_parent_rebound".into(),
             ));
         }
-        let final_root_metadata =
-            backup_root_file.metadata().map_err(|error| {
-                finalize_failed_authority_snapshot(
-                    &cleanup_context,
-                    format!(
-                        "code=authority_snapshot_root_validate_failed os_error={}",
-                        AuthorityTreeSnapshot::os_error_code(&error)
-                    ),
-                )
-            })?;
-        let final_root_entry = AuthorityTreeSnapshot::stat_destination_at(
-            &snapshot_parent,
-            &backup_root_name,
-        )
-        .map_err(|error| {
+        let final_root_metadata = backup_root_file.metadata().map_err(|error| {
             finalize_failed_authority_snapshot(
                 &cleanup_context,
                 format!(
-                    "code=authority_snapshot_root_entry_revalidate_failed os_error={}",
+                    "code=authority_snapshot_root_validate_failed os_error={}",
                     AuthorityTreeSnapshot::os_error_code(&error)
                 ),
             )
         })?;
+        let final_root_entry =
+            AuthorityTreeSnapshot::stat_destination_at(&snapshot_parent, &backup_root_name)
+                .map_err(|error| {
+                    finalize_failed_authority_snapshot(
+                        &cleanup_context,
+                        format!(
+                            "code=authority_snapshot_root_entry_revalidate_failed os_error={}",
+                            AuthorityTreeSnapshot::os_error_code(&error)
+                        ),
+                    )
+                })?;
         if !AuthorityTreeSnapshot::destination_entry_matches_file(
             &final_root_entry,
             &final_root_metadata,
@@ -3503,23 +3793,24 @@ impl OneClickAuthoritySnapshot {
                 "code=authority_snapshot_root_rebound".into(),
             ));
         }
-        AuthorityTreeSnapshot::sync_snapshot_completion(
-            &backup_root_file,
-            &snapshot_parent,
-        )
-        .map_err(|error| {
-            finalize_failed_authority_snapshot(
-                &cleanup_context,
-                format!(
-                    "code=authority_snapshot_completion_sync_failed os_error={}",
-                    AuthorityTreeSnapshot::os_error_code(&error)
-                ),
-            )
-        })?;
+        AuthorityTreeSnapshot::sync_snapshot_completion(&backup_root_file, &snapshot_parent)
+            .map_err(|error| {
+                finalize_failed_authority_snapshot(
+                    &cleanup_context,
+                    format!(
+                        "code=authority_snapshot_completion_sync_failed os_error={}",
+                        AuthorityTreeSnapshot::os_error_code(&error)
+                    ),
+                )
+            })?;
         Ok(Self {
             backup_root,
             cleanup_context,
+            cleanup_ticket: Some(cleanup_ticket),
             trees,
+            science_root_path: auth_dir.to_path_buf(),
+            science_root,
+            science_opaque_bindings,
             config: config.clone(),
             app: AppAuthoritySnapshot::capture(state),
             preserve_recovery: false,
@@ -3527,6 +3818,7 @@ impl OneClickAuthoritySnapshot {
         })
     }
 
+    #[cfg(test)]
     fn restore(
         &mut self,
         config_dir: &Path,
@@ -3534,7 +3826,17 @@ impl OneClickAuthoritySnapshot {
         proxy_action: ProxyAction,
     ) -> Result<(), String> {
         let mut errors = Vec::new();
+        let science_restore_allowed = match self.validate_science_restore_root() {
+            Ok(()) => true,
+            Err(error) => {
+                errors.push(error);
+                false
+            }
+        };
         for tree in &mut self.trees {
+            if tree.scope == AuthoritySnapshotScope::ScienceData && !science_restore_allowed {
+                continue;
+            }
             if let Err(error) = tree.restore() {
                 errors.push(error);
             }
@@ -3567,7 +3869,17 @@ impl OneClickAuthoritySnapshot {
             lock(state).stop_proxy();
         }
         let mut errors = Vec::new();
+        let science_restore_allowed = match self.validate_science_restore_root() {
+            Ok(()) => true,
+            Err(error) => {
+                errors.push(error);
+                false
+            }
+        };
         for tree in &mut self.trees {
+            if tree.scope == AuthoritySnapshotScope::ScienceData && !science_restore_allowed {
+                continue;
+            }
             if let Err(error) = tree.restore() {
                 errors.push(error);
             }
@@ -3603,8 +3915,20 @@ impl OneClickAuthoritySnapshot {
 
     fn cleanup_when_expendable(&mut self) -> Result<(), String> {
         self.preserve_recovery = true;
-        let ticket = register_authority_cleanup(&self.cleanup_context)?;
-        match finalize_registered_authority_cleanup(&self.cleanup_context, &ticket) {
+        if self.cleanup_ticket.is_none() {
+            self.cleanup_ticket = Some(register_authority_cleanup(&self.cleanup_context)?);
+        }
+        let ticket = self
+            .cleanup_ticket
+            .as_ref()
+            .ok_or("cleanup_register_failed：事务快照清理票据缺失。")?;
+        let cleanup_ticket = prepare_registered_authority_cleanup(&self.cleanup_context, ticket)?;
+        self.cleanup_ticket = Some(cleanup_ticket);
+        let ticket = self
+            .cleanup_ticket
+            .as_ref()
+            .ok_or("cleanup_register_failed：cleanup-only 票据缺失。")?;
+        match finalize_registered_authority_cleanup(&self.cleanup_context, ticket) {
             Ok(()) => {
                 self.preserve_recovery = false;
                 self.cleanup_prepared = true;
@@ -3614,10 +3938,7 @@ impl OneClickAuthoritySnapshot {
         }
     }
 
-    fn prepare_success(
-        &mut self,
-        value: &mut Value,
-    ) -> Result<(), String> {
+    fn prepare_success(&mut self, value: &mut Value) -> Result<(), String> {
         match self.cleanup_when_expendable() {
             Ok(()) => Ok(()),
             Err(error) if error.contains("recovery_status=cleanup_required") => {
@@ -3635,9 +3956,7 @@ impl OneClickAuthoritySnapshot {
                     );
                     object.insert(
                         "cleanup_message".into(),
-                        Value::String(
-                            "one-click 已完成，但私有事务快照需要稍后安全清理。".into(),
-                        ),
+                        Value::String("one-click 已完成，但私有事务快照需要稍后安全清理。".into()),
                     );
                 }
                 Ok(())
@@ -3658,9 +3977,10 @@ impl OneClickAuthoritySnapshot {
 
 impl Drop for OneClickAuthoritySnapshot {
     fn drop(&mut self) {
-        if !self.preserve_recovery && !self.cleanup_prepared {
-            let _ = self.cleanup_when_expendable();
-        }
+        // Drop can run during panic unwinding after protected state changed.
+        // Only explicit success or fully successful compensation may publish
+        // ActiveRecovery -> CleanupOnly and remove the recovery snapshot.
+        self.preserve_recovery = true;
     }
 }
 
@@ -3733,6 +4053,18 @@ fn prevalidate_one_click_system_ssh<R: Runtime>(
     Ok(expected_hosts)
 }
 
+const SCIENCE_CANONICAL_ROLE_MODEL_IDS: [&str; 5] = [
+    "claude-opus-5",
+    "claude-sonnet-5",
+    "claude-opus-4-8",
+    "claude-sonnet-4-6",
+    "claude-haiku-4-5-20251001",
+];
+
+fn is_science_canonical_role_model(id: &str) -> bool {
+    SCIENCE_CANONICAL_ROLE_MODEL_IDS.contains(&id)
+}
+
 fn verify_gateway_model_catalog(
     port: u16,
     secret: &str,
@@ -3746,28 +4078,45 @@ fn verify_gateway_model_catalog(
         return Err(format!("gateway 模型目录探活返回 {status}"));
     }
     let value: Value = serde_json::from_str(&body).map_err(|_| "gateway 模型目录不是合法 JSON")?;
-    let ids: Vec<&str> = value
+    let models = value
         .get("data")
         .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|model| model.get("id").and_then(Value::as_str))
-        .collect();
+        .ok_or("gateway 模型目录缺少 data array")?;
+    let mut ids = Vec::with_capacity(models.len());
+    let mut unique = std::collections::BTreeSet::new();
+    for model in models {
+        let id = model
+            .as_object()
+            .and_then(|model| model.get("id"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or("gateway 模型目录包含 malformed id row")?;
+        if !unique.insert(id) {
+            return Err("gateway 模型目录包含 duplicate id".into());
+        }
+        ids.push(id);
+    }
     if profile.model_policy == crate::provider_contracts::ModelPolicy::DynamicCatalog {
-        if ids.is_empty()
-            || ids
+        if !ids
+            .iter()
+            .any(|id| id.starts_with("claude-csswitch-codex-"))
+            || ids.iter().any(|id| {
+                !id.starts_with("claude-csswitch-codex-") && !is_science_canonical_role_model(id)
+            })
+            || SCIENCE_CANONICAL_ROLE_MODEL_IDS
                 .iter()
-                .any(|id| !id.starts_with("claude-csswitch-codex-"))
+                .any(|canonical| !unique.contains(canonical))
         {
             return Err("Codex published model snapshot 为空或包含非法 alias".into());
         }
         return Ok(());
     }
-    let expected: std::collections::BTreeSet<&str> = profile
+    let mut expected: std::collections::BTreeSet<&str> = profile
         .model_catalog
         .iter()
         .map(|route| route.selector_id.as_str())
         .collect();
+    expected.extend(SCIENCE_CANONICAL_ROLE_MODEL_IDS);
     let actual: std::collections::BTreeSet<&str> = ids.iter().copied().collect();
     if actual != expected || ids.first().copied() != Some(profile.default_model_route_id.as_str()) {
         return Err("gateway 模型目录与已提交白名单/default selector 不一致".into());
@@ -3807,6 +4156,16 @@ fn verify_gateway_model_catalog_traced(
         trace.stage(OperationStage::CatalogVerify, "outcome=test_error");
         trace.finish("error=test_catalog_verify_after_gateway_restart");
         return Err("test-only healthy reopen catalog failure after Gateway restart".into());
+    }
+    #[cfg(test)]
+    if SANDBOX_SESSION_TEST_SEAMS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .catalog_bypass_port
+        == Some(port)
+    {
+        trace.stage(OperationStage::CatalogVerify, "outcome=test_bypass");
+        return Ok(());
     }
     match verify_gateway_model_catalog(port, secret, profile) {
         Ok(()) => {
@@ -3993,26 +4352,37 @@ enum PriorScienceDisposition {
     #[default]
     RestartRequired,
     Restored,
+    EnvironmentUncertain,
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub(crate) enum ReconcileScienceError {
     PriorScienceRestored { cause: String },
+    EnvironmentUncertain { cause: String },
     RestartRequired { cause: String },
 }
 
+#[allow(dead_code)]
 impl ReconcileScienceError {
     pub(crate) fn cause(&self) -> &str {
         match self {
-            Self::PriorScienceRestored { cause } | Self::RestartRequired { cause } => cause,
+            Self::PriorScienceRestored { cause }
+            | Self::EnvironmentUncertain { cause }
+            | Self::RestartRequired { cause } => cause,
         }
     }
 
     pub(crate) fn prior_science_restored(&self) -> bool {
         matches!(self, Self::PriorScienceRestored { .. })
     }
+
+    pub(crate) fn environment_uncertain(&self) -> bool {
+        matches!(self, Self::EnvironmentUncertain { .. })
+    }
 }
 
+#[allow(dead_code)]
 pub(crate) fn reconcile_science_for_active<R: Runtime>(
     app: tauri::AppHandle<R>,
     state: SharedAppState,
@@ -4030,8 +4400,9 @@ pub(crate) fn reconcile_science_for_active<R: Runtime>(
         Some(&mut disposition),
     )
     .map_err(|cause| match disposition {
-        PriorScienceDisposition::Restored => {
-            ReconcileScienceError::PriorScienceRestored { cause }
+        PriorScienceDisposition::Restored => ReconcileScienceError::PriorScienceRestored { cause },
+        PriorScienceDisposition::EnvironmentUncertain => {
+            ReconcileScienceError::EnvironmentUncertain { cause }
         }
         PriorScienceDisposition::RestartRequired => {
             ReconcileScienceError::RestartRequired { cause }
@@ -4044,6 +4415,7 @@ pub(crate) fn reconcile_science_for_active<R: Runtime>(
 /// reuse: a healthy process may actually have loaded the failed candidate
 /// catalog. Stop only the exact in-memory Science identity and start the
 /// committed chain again from a clean process.
+#[allow(dead_code)]
 pub(crate) fn force_restart_science_for_active<R: Runtime>(
     app: tauri::AppHandle<R>,
     state: SharedAppState,
@@ -4111,17 +4483,297 @@ fn advance_runtime_transaction(
     .map_err(|error| error.to_string())
 }
 
+const SCIENCE_ENVIRONMENT_PENDING_STAGE_PREFIX: &str = "start_science_environment_pending:";
+const AUTHORITY_SNAPSHOT_ACTIVE_STAGE_PREFIX: &str = "authority_snapshot_active:";
+const LEGACY_SCIENCE_ENVIRONMENT_STAGE: &str = "start_science";
+const LEGACY_SCIENCE_ENVIRONMENT_PENDING_STAGE: &str = "start_science_environment_pending";
+
+pub(crate) fn interrupted_science_environment_runtime_id(stage: &str) -> Option<&str> {
+    let runtime_id = stage
+        .strip_prefix(SCIENCE_ENVIRONMENT_PENDING_STAGE_PREFIX)
+        .or_else(|| stage.strip_prefix(AUTHORITY_SNAPSHOT_ACTIVE_STAGE_PREFIX))?;
+    (runtime_id.len() == 64
+        && runtime_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')))
+    .then_some(runtime_id)
+}
+
+pub(crate) fn runtime_transaction_requires_snapshot_preservation(stage: &str) -> bool {
+    stage == LEGACY_SCIENCE_ENVIRONMENT_STAGE
+        || stage == LEGACY_SCIENCE_ENVIRONMENT_PENDING_STAGE
+        || stage.starts_with(SCIENCE_ENVIRONMENT_PENDING_STAGE_PREFIX)
+        || stage.starts_with(AUTHORITY_SNAPSHOT_ACTIVE_STAGE_PREFIX)
+}
+
+fn validate_interrupted_science_transaction_entry(
+    stage: Option<&str>,
+    runtime_id: Option<&str>,
+) -> Result<(), String> {
+    if stage.is_some_and(runtime_transaction_requires_snapshot_preservation) && runtime_id.is_none()
+    {
+        return Err(
+            "检测到旧版或无法识别的 Science 启动中断记录；无法证明当时使用的 runtime，已拒绝自动清理快照或再次启动；environment_uncertain；newer_runtime_required；recovery_status=manual_recovery_required"
+                .into(),
+        );
+    }
+    if stage.is_some_and(|stage| stage.starts_with(AUTHORITY_SNAPSHOT_ACTIVE_STAGE_PREFIX)) {
+        return Err(
+            "检测到 authority 快照已登记但受保护状态写入未完成；已保留恢复快照并拒绝把部分写入态作为新基线；recovery_status=manual_recovery_required"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_interrupted_science_environment_runtime(
+    expected_runtime_id: Option<&str>,
+    runtime: &ScienceRuntimeIdentity,
+) -> Result<(), String> {
+    let Some(expected_runtime_id) = expected_runtime_id else {
+        return Ok(());
+    };
+    if runtime.environment_transaction_id() == expected_runtime_id {
+        Ok(())
+    } else {
+        Err(
+            "上次启动在 Science 环境暴露边界中断，当前 executable 与中断事务不一致；已拒绝自动启动旧版或其他 runtime；environment_uncertain；newer_runtime_required；recovery_status=manual_recovery_required"
+                .into(),
+        )
+    }
+}
+
 #[derive(Clone)]
 struct OneClickRollbackContext {
     proxy_action: ProxyAction,
+    sandbox_port: u16,
     launch_runtime: ScienceRuntimeIdentity,
     launch_token: Option<ScienceManagedLaunchToken>,
+    launch_attempted: bool,
+    launch_confirmed_stopped: bool,
+    candidate_stop_proof: ManagedScienceCandidateStopProof,
     ssh_stub_transaction: Option<crate::runtime::settings::ManagedSshStubTransaction>,
+}
+
+const SCIENCE_LAUNCH_ENVIRONMENT_EXPOSED_EXIT_CODE: i32 = 70;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum ManagedScienceCandidateStopProof {
+    #[default]
+    NotRequired,
+    ConfirmedStopped,
+    Unproven,
+}
+
+struct ManagedScienceRestartError {
+    message: String,
+    candidate_stop_proof: ManagedScienceCandidateStopProof,
+}
+
+impl ManagedScienceRestartError {
+    fn before_spawn(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            candidate_stop_proof: ManagedScienceCandidateStopProof::NotRequired,
+        }
+    }
+
+    fn after_spawn_unproven(message: impl Into<String>) -> Self {
+        Self {
+            message: format!("{}；code=science_candidate_stop_unproven", message.into()),
+            candidate_stop_proof: ManagedScienceCandidateStopProof::Unproven,
+        }
+    }
+
+    fn after_exact_cleanup(message: impl Into<String>, cleanup: Result<(), String>) -> Self {
+        match cleanup {
+            Ok(()) => Self {
+                message: message.into(),
+                candidate_stop_proof: ManagedScienceCandidateStopProof::ConfirmedStopped,
+            },
+            Err(error) => {
+                Self::after_spawn_unproven(format!("{}；candidate_cleanup={error}", message.into()))
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for ManagedScienceRestartError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl From<String> for ManagedScienceRestartError {
+    fn from(message: String) -> Self {
+        Self::before_spawn(message)
+    }
+}
+
+impl From<&str> for ManagedScienceRestartError {
+    fn from(message: &str) -> Self {
+        Self::before_spawn(message)
+    }
 }
 
 struct OneClickFailure {
     message: String,
     rollback: OneClickRollbackContext,
+}
+
+// Science 0.1.25 gives boot quick_check a 300s query timeout. Its own warning
+// says the subsequently unblocked migration can take about 30 minutes, so the
+// recovery restart has a separate finite ceiling instead of the ordinary 8s
+// launch budget.
+const SCIENCE_DB_REVERIFY_BUDGET_MS: u64 = 305_000;
+const SCIENCE_DB_RECOVERY_RESTART_BUDGET_MS: u64 = 30 * 60 * 1_000 + 10_000;
+const SCIENCE_HEALTH_BOOTSTRAP_BUDGET_MS: u64 = 20_000;
+
+fn science_db_reverify_budget_ms() -> u64 {
+    #[cfg(test)]
+    if let Ok(value) = std::env::var("CSSWITCH_TEST_DB_REVERIFY_BUDGET_MS") {
+        if let Ok(value) = value.parse::<u64>() {
+            return value.max(POLL_INTERVAL_MS);
+        }
+    }
+    SCIENCE_DB_REVERIFY_BUDGET_MS
+}
+
+fn science_db_recovery_restart_budget_ms() -> u64 {
+    #[cfg(test)]
+    if let Ok(value) = std::env::var("CSSWITCH_TEST_DB_RECOVERY_RESTART_BUDGET_MS") {
+        if let Ok(value) = value.parse::<u64>() {
+            return value.max(POLL_INTERVAL_MS);
+        }
+    }
+    SCIENCE_DB_RECOVERY_RESTART_BUDGET_MS
+}
+
+fn open_authenticated_science_health_session(
+    port: u16,
+    runtime: &ScienceRuntimeIdentity,
+    token: &ScienceManagedLaunchToken,
+    deadline: Instant,
+) -> Result<ScienceHealthSession, String> {
+    if !crate::runtime::science::managed_launch_token_is_current_for_runtime(token, runtime) {
+        return Err("science_db_listener_identity_changed".into());
+    }
+    let context = runtime
+        .skill_install_host_context(port)
+        .map_err(|_| "science_api_health_control_context_invalid".to_string())?;
+    let session = open_science_health_session_before(&context, deadline)
+        .map_err(science_health_control_error)?;
+    if !crate::runtime::science::managed_launch_token_is_current_for_runtime(token, runtime) {
+        return Err("science_db_listener_identity_changed".into());
+    }
+    Ok(session)
+}
+
+fn science_health_control_error(error: csswitch_skill_install_core::AttachError) -> String {
+    if error.retryable
+        && matches!(
+            error.code.as_str(),
+            "SCIENCE_HEALTH_UNREACHABLE"
+                | "SCIENCE_HEALTH_TIMEOUT"
+                | "SCIENCE_CONTROL_TIMEOUT"
+                | "SCIENCE_HEALTH_HTTP_STATUS"
+        )
+    {
+        "science_api_health_unreachable".into()
+    } else {
+        format!("science_api_health_control_failed code={}", error.code)
+    }
+}
+
+fn authenticated_science_db_health(
+    session: &ScienceHealthSession,
+    timeout: Duration,
+) -> Result<proc::ScienceDbHealth, String> {
+    let body = session
+        .read_health_with_timeout(timeout)
+        .map_err(science_health_control_error)?;
+    let body =
+        std::str::from_utf8(&body).map_err(|_| "science_api_health_malformed".to_string())?;
+    proc::science_db_health_from_body(body)
+}
+
+fn wait_for_science_db_reverify(
+    port: u16,
+    runtime: &ScienceRuntimeIdentity,
+    token: &ScienceManagedLaunchToken,
+) -> Result<proc::ScienceDbHealth, String> {
+    let deadline = Instant::now() + Duration::from_millis(science_db_reverify_budget_ms());
+    let bootstrap_deadline =
+        deadline.min(Instant::now() + Duration::from_millis(SCIENCE_HEALTH_BOOTSTRAP_BUDGET_MS));
+    let session = loop {
+        let remaining = bootstrap_deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("science_api_health_bootstrap_timeout".into());
+        }
+        match open_authenticated_science_health_session(port, runtime, token, bootstrap_deadline) {
+            Ok(session) => break session,
+            Err(error)
+                if error == "science_api_health_unreachable"
+                    && Instant::now() < bootstrap_deadline =>
+            {
+                std::thread::sleep(
+                    Duration::from_millis(POLL_INTERVAL_MS)
+                        .min(bootstrap_deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("science_db_reverify_timeout".into());
+        }
+        if !crate::runtime::science::managed_launch_token_is_current_for_runtime(token, runtime) {
+            return Err("science_db_listener_identity_changed".into());
+        }
+        match authenticated_science_db_health(&session, remaining.min(Duration::from_secs(5))) {
+            Ok(state) => {
+                if !crate::runtime::science::managed_launch_token_is_current_for_runtime(
+                    token, runtime,
+                ) {
+                    return Err("science_db_listener_identity_changed".into());
+                }
+                match state {
+                    proc::ScienceDbHealth::ReverifyPending if Instant::now() < deadline => {
+                        std::thread::sleep(
+                            Duration::from_millis(POLL_INTERVAL_MS)
+                                .min(deadline.saturating_duration_since(Instant::now())),
+                        );
+                    }
+                    proc::ScienceDbHealth::ReverifyPending => {
+                        return Err("science_db_reverify_timeout".into())
+                    }
+                    other => return Ok(other),
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.as_str(),
+                    "science_api_health_unreachable" | "science_api_health_incomplete"
+                ) && Instant::now() < deadline =>
+            {
+                std::thread::sleep(
+                    Duration::from_millis(POLL_INTERVAL_MS)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            Err(error)
+                if matches!(
+                    error.as_str(),
+                    "science_api_health_unreachable" | "science_api_health_incomplete"
+                ) =>
+            {
+                return Err("science_db_reverify_timeout".into())
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -4145,6 +4797,7 @@ impl OneClickRollbackContext {
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn one_click_step<T, E: std::fmt::Display>(
     result: Result<T, E>,
     rollback: &OneClickRollbackContext,
@@ -4155,10 +4808,29 @@ fn one_click_step<T, E: std::fmt::Display>(
 fn restart_prior_science<R: Runtime>(
     app: &tauri::AppHandle<R>,
     state: &SharedAppState,
+    lifecycle: &lifecycle::Lifecycle,
+    auth_proof: Option<&crate::codex_auth_supervisor::CodexAuthReadyProof>,
+    prior: &PriorScienceContext,
+) -> Result<(), String> {
+    restart_managed_science_with_budget(
+        app,
+        state,
+        lifecycle,
+        auth_proof,
+        prior,
+        operation::SANDBOX_HEALTH_BUDGET_MS,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn restart_managed_science_with_budget<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &SharedAppState,
     _lifecycle: &lifecycle::Lifecycle,
     _auth_proof: Option<&crate::codex_auth_supervisor::CodexAuthReadyProof>,
     prior: &PriorScienceContext,
-) -> Result<(), String> {
+    health_budget_ms: u64,
+) -> Result<(), ManagedScienceRestartError> {
     let dir = config::default_dir();
     let cfg = config::load_from(&dir).map_err(|error| error.to_string())?;
     if cfg.sandbox_port != prior.port {
@@ -4191,7 +4863,8 @@ fn restart_prior_science<R: Runtime>(
     let logf = open_log("sandbox.log").map_err(|error| error.to_string())?;
     let logf2 = logf.try_clone().map_err(|error| error.to_string())?;
     let proxy_url = format!("http://127.0.0.1:{proxy_port}/{secret}");
-    let status = Command::new("zsh")
+    let deadline = Instant::now() + Duration::from_millis(health_budget_ms.max(POLL_INTERVAL_MS));
+    let mut launch_child = Command::new("zsh")
         .arg(&launch)
         .arg("--port")
         .arg(prior.port.to_string())
@@ -4207,31 +4880,80 @@ fn restart_prior_science<R: Runtime>(
         .env("CSSWITCH_SYSTEM_SSH_HOSTS", ssh_hosts.join(" "))
         .stdout(Stdio::from(logf))
         .stderr(Stdio::from(logf2))
-        .status()
-        .map_err(|error| format!("恢复 prior Science 启动失败：{error}"))?;
+        .spawn()
+        .map_err(|error| {
+            ManagedScienceRestartError::before_spawn(format!(
+                "恢复 prior Science 启动失败：{error}"
+            ))
+        })?;
+    let status = loop {
+        match launch_child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(
+                    Duration::from_millis(POLL_INTERVAL_MS)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            Ok(None) => {
+                let _ = launch_child.kill();
+                let _ = launch_child.wait();
+                return Err(ManagedScienceRestartError::after_spawn_unproven(
+                    "恢复 prior Science 启动脚本超过 absolute deadline",
+                ));
+            }
+            Err(error) => {
+                let _ = launch_child.kill();
+                let _ = launch_child.wait();
+                return Err(ManagedScienceRestartError::after_spawn_unproven(format!(
+                    "恢复 prior Science 启动脚本状态未知：{error}"
+                )));
+            }
+        }
+    };
     if !status.success() {
-        return Err(format!(
+        return Err(ManagedScienceRestartError::after_spawn_unproven(format!(
             "恢复 prior Science 启动脚本非零退出（{:?}）",
             status.code()
-        ));
+        )));
     }
     let mut healthy = false;
-    for _ in 0..(operation::SANDBOX_HEALTH_BUDGET_MS / POLL_INTERVAL_MS) {
-        std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
-        if proc::http_health(prior.port, None, operation::LOCAL_HEALTH_TIMEOUT_MS) {
+    while Instant::now() < deadline {
+        std::thread::sleep(
+            Duration::from_millis(POLL_INTERVAL_MS)
+                .min(deadline.saturating_duration_since(Instant::now())),
+        );
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let probe_timeout_ms = operation::LOCAL_HEALTH_TIMEOUT_MS.min(
+            u64::try_from(remaining.as_millis())
+                .unwrap_or(u64::MAX)
+                .max(1),
+        );
+        if proc::http_health(prior.port, None, probe_timeout_ms) {
             healthy = true;
             break;
         }
     }
-    if !healthy || !sandbox_listener_matches_runtime(prior.port, &prior.runtime) {
-        return Err("恢复 prior Science 后 listener 健康或 runtime 身份不一致".into());
+    if !healthy
+        || Instant::now() > deadline
+        || !sandbox_listener_matches_runtime(prior.port, &prior.runtime)
+    {
+        return Err(ManagedScienceRestartError::after_spawn_unproven(
+            "恢复 prior Science 后 listener 健康或 runtime 身份不一致",
+        ));
     }
-    let _candidate_token =
-        crate::runtime::science::uncommitted_managed_science_launch_token(
-            prior.port,
-            &prior.runtime,
+    let _candidate_token = crate::runtime::science::uncommitted_managed_science_launch_token(
+        prior.port,
+        &prior.runtime,
+    )
+    .ok_or_else(|| {
+        ManagedScienceRestartError::after_spawn_unproven(
+            "恢复 prior Science 后无法建立精确的未提交启动身份",
         )
-        .ok_or("恢复 prior Science 后无法建立精确的未提交启动身份")?;
+    })?;
     #[cfg(test)]
     {
         let mut seams = SANDBOX_SESSION_TEST_SEAMS
@@ -4254,50 +4976,52 @@ fn restart_prior_science<R: Runtime>(
                 Some(&prior.runtime),
                 Some(&_candidate_token),
             );
-            return match cleanup {
-                Ok(()) => Err("test-only prior Science post-spawn validation failure".into()),
-                Err(_) => Err(
-                    "prior_science_post_spawn_cleanup_failed：恢复 prior Science 的候选进程未能安全清理。"
-                        .into(),
-                ),
-            };
-        }
-    }
-    let token = match crate::runtime::science::record_managed_science_launch(
-        prior.port,
-        &prior.runtime,
-    ) {
-        Ok(token) => token,
-        Err(error) => {
-            let mut sandbox = None;
-            let mut url = None;
-            let cleanup = stop_sandbox_with_launch_token(
-                app,
-                &mut sandbox,
-                &mut url,
-                Some(&prior.runtime),
-                error.token(),
-            );
-            return Err(format!(
-                "恢复 prior Science 时 fresh managed receipt 提交失败：{}；cleanup={cleanup:?}",
-                error.message()
+            return Err(ManagedScienceRestartError::after_exact_cleanup(
+                "test-only prior Science post-spawn validation failure",
+                cleanup,
             ));
         }
-    };
-    if !crate::runtime::science::managed_launch_token_is_current_for_runtime(
-        &token,
-        &prior.runtime,
-    ) {
+    }
+    let token =
+        match crate::runtime::science::record_managed_science_launch(prior.port, &prior.runtime) {
+            Ok(token) => token,
+            Err(error) => {
+                let mut sandbox = None;
+                let mut url = None;
+                let token_present = error.token().is_some();
+                let cleanup = stop_sandbox_with_launch_token(
+                    app,
+                    &mut sandbox,
+                    &mut url,
+                    Some(&prior.runtime),
+                    error.token(),
+                );
+                let message = format!(
+                    "恢复 prior Science 时 fresh managed receipt 提交失败：{}",
+                    error.message()
+                );
+                return Err(if token_present {
+                    ManagedScienceRestartError::after_exact_cleanup(message, cleanup)
+                } else {
+                    ManagedScienceRestartError::after_spawn_unproven(message)
+                });
+            }
+        };
+    if !crate::runtime::science::managed_launch_token_is_current_for_runtime(&token, &prior.runtime)
+    {
         let mut sandbox = None;
         let mut url = None;
-        let _ = stop_sandbox_with_launch_token(
+        let cleanup = stop_sandbox_with_launch_token(
             app,
             &mut sandbox,
             &mut url,
             Some(&prior.runtime),
             Some(&token),
         );
-        return Err("恢复 prior Science 后 fresh managed receipt 回读不一致".into());
+        return Err(ManagedScienceRestartError::after_exact_cleanup(
+            "恢复 prior Science 后 fresh managed receipt 回读不一致",
+            cleanup,
+        ));
     }
     let url = sandbox_url(prior.port, &prior.runtime);
     let mut current = lock(state);
@@ -4308,6 +5032,7 @@ fn restart_prior_science<R: Runtime>(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn capture_authority_after_science_quiesce<R: Runtime>(
     app: &tauri::AppHandle<R>,
     state: &SharedAppState,
@@ -4319,13 +5044,7 @@ fn capture_authority_after_science_quiesce<R: Runtime>(
     config: &config::Config,
     prior_science: Option<&PriorScienceContext>,
 ) -> Result<OneClickAuthoritySnapshot, AuthorityCaptureAfterQuiesceError> {
-    match OneClickAuthoritySnapshot::capture(
-        config_dir,
-        sandbox_home,
-        auth_dir,
-        config,
-        state,
-    ) {
+    match OneClickAuthoritySnapshot::capture(config_dir, sandbox_home, auth_dir, config, state) {
         Ok(snapshot) => Ok(snapshot),
         Err(capture_error) => {
             if let Some(prior) = prior_science {
@@ -4333,11 +5052,9 @@ fn capture_authority_after_science_quiesce<R: Runtime>(
                     Ok(()) => Err(AuthorityCaptureAfterQuiesceError::PriorScienceRestored(
                         capture_error,
                     )),
-                    Err(restart_error) => {
-                        Err(AuthorityCaptureAfterQuiesceError::RestartRequired(format!(
-                            "{capture_error}；prior_science_restart={restart_error}"
-                        )))
-                    }
+                    Err(restart_error) => Err(AuthorityCaptureAfterQuiesceError::RestartRequired(
+                        format!("{capture_error}；prior_science_restart={restart_error}"),
+                    )),
                 }
             } else {
                 Err(AuthorityCaptureAfterQuiesceError::RestartRequired(
@@ -4372,10 +5089,7 @@ fn clear_runtime_transaction(dir: &Path) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-fn commit_runtime_binding(
-    dir: &Path,
-    binding: config::RuntimeBindingCommit,
-) -> Result<(), String> {
+fn commit_runtime_binding(dir: &Path, binding: config::RuntimeBindingCommit) -> Result<(), String> {
     config::update(dir, |current| {
         current.runtime_binding = Some(binding.clone());
         current.runtime_transaction = None;
@@ -4415,6 +5129,7 @@ fn history_recovery_choices(
     Ok((choices, visible))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compensate_one_click_failure<R: Runtime>(
     app: &tauri::AppHandle<R>,
     state: &SharedAppState,
@@ -4425,9 +5140,34 @@ fn compensate_one_click_failure<R: Runtime>(
     authority_snapshot: &mut OneClickAuthoritySnapshot,
     prior_science: Option<&PriorScienceContext>,
     failure: OneClickFailure,
-    reconcile_disposition: Option<&mut PriorScienceDisposition>,
+    mut reconcile_disposition: Option<&mut PriorScienceDisposition>,
 ) -> Result<Value, String> {
-    let cleanup = {
+    let environment_uncertain = failure.rollback.launch_attempted;
+    let cross_runtime_environment = environment_uncertain
+        && prior_science.is_some_and(|prior| prior.runtime != failure.rollback.launch_runtime);
+    let cleanup = if failure.rollback.candidate_stop_proof
+        == ManagedScienceCandidateStopProof::Unproven
+    {
+        Err("code=science_candidate_stop_unproven".into())
+    } else if !failure.rollback.launch_attempted && failure.rollback.launch_token.is_none() {
+        Ok(())
+    } else if failure.rollback.launch_confirmed_stopped {
+        let receipt = dir.join("science-managed-launch.v1.json");
+        if proc::loopback_port_in_use(
+            failure.rollback.sandbox_port,
+            operation::LOCAL_HEALTH_TIMEOUT_MS,
+        ) || failure
+            .rollback
+            .launch_token
+            .as_ref()
+            .is_some_and(crate::runtime::science::managed_launch_token_process_is_alive)
+            || receipt.exists()
+        {
+            Err("DB recovery restart 前已停止的 Science 身份重新出现；拒绝恢复 authority".into())
+        } else {
+            Ok(())
+        }
+    } else {
         let mut current = lock(state);
         let AppState {
             sandbox,
@@ -4443,11 +5183,34 @@ fn compensate_one_click_failure<R: Runtime>(
         );
         if result.is_ok() {
             current.science_runtime = None;
-            current.science_confirmed_stopped =
-                Some(failure.rollback.launch_runtime.clone());
+            current.science_confirmed_stopped = Some(failure.rollback.launch_runtime.clone());
         }
         result
     };
+    if let Err(cleanup_error) = cleanup.as_ref() {
+        if environment_uncertain {
+            if let Some(disposition) = reconcile_disposition.as_deref_mut() {
+                *disposition = PriorScienceDisposition::EnvironmentUncertain;
+            }
+        }
+        authority_snapshot.preserve_recovery = true;
+        trace.finish("error=compensation_restore_blocked_science_cleanup_unproven");
+        let environment_codes = if cross_runtime_environment {
+            "；environment_uncertain；newer_runtime_required"
+        } else if environment_uncertain {
+            "；environment_uncertain"
+        } else {
+            ""
+        };
+        return Err(cleanup_required_error(
+            &format!(
+                "{}；compensation_science_cleanup_failed；compensation_restore_blocked_science_candidate；{cleanup_error}{environment_codes}",
+                failure.message,
+            ),
+            &authority_snapshot.backup_root,
+            "science_candidate_stop_unproven",
+        ));
+    }
     let ssh_cleanup = match failure.rollback.ssh_stub_transaction.as_ref() {
         Some(transaction) => transaction.compensate(&sandbox_home()),
         None => crate::runtime::settings::remove_managed_sandbox_ssh_stub(&sandbox_home()),
@@ -4460,9 +5223,8 @@ fn compensate_one_click_failure<R: Runtime>(
         auth_proof,
         failure.rollback.proxy_action,
     );
-    let prior_restart = if rollback.is_ok() {
-        prior_science
-            .map(|prior| restart_prior_science(app, state, lifecycle, auth_proof, prior))
+    let prior_restart = if rollback.is_ok() && !cross_runtime_environment {
+        prior_science.map(|prior| restart_prior_science(app, state, lifecycle, auth_proof, prior))
     } else {
         None
     };
@@ -4473,8 +5235,10 @@ fn compensate_one_click_failure<R: Runtime>(
     let prior_science_restored = authorities_restored
         && prior_science.is_some()
         && prior_restart.as_ref().is_some_and(Result::is_ok);
-    if prior_science_restored {
-        if let Some(disposition) = reconcile_disposition {
+    if let Some(disposition) = reconcile_disposition {
+        if environment_uncertain {
+            *disposition = PriorScienceDisposition::EnvironmentUncertain;
+        } else if prior_science_restored {
             *disposition = PriorScienceDisposition::Restored;
         }
     }
@@ -4484,8 +5248,10 @@ fn compensate_one_click_failure<R: Runtime>(
         authority_snapshot.preserve_recovery = true;
         None
     };
-    trace.finish(if authorities_restored {
-        "error=one_click_transaction_compensated"
+    trace.finish(if authorities_restored && environment_uncertain {
+        "error=one_click_transaction_compensated environment=uncertain"
+    } else if authorities_restored {
+        "error=one_click_transaction_compensated environment=not_exposed"
     } else {
         "error=one_click_compensation_incomplete"
     });
@@ -4498,6 +5264,12 @@ fn compensate_one_click_failure<R: Runtime>(
     }
     if rollback.is_err() {
         codes.push("compensation_restore_failed".to_string());
+    }
+    if environment_uncertain {
+        codes.push("environment_uncertain".to_string());
+    }
+    if cross_runtime_environment {
+        codes.push("newer_runtime_required".to_string());
     }
     if let Some(Err(error)) = prior_restart {
         #[cfg(test)]
@@ -4523,6 +5295,7 @@ fn compensate_one_click_failure<R: Runtime>(
     Err(format!("{}{}", failure.message, suffix.unwrap_or_default()))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn healthy_reopen_with_gateway_rollback<R: Runtime>(
     app: &tauri::AppHandle<R>,
     state: &SharedAppState,
@@ -4548,12 +5321,7 @@ fn healthy_reopen_with_gateway_rollback<R: Runtime>(
             Some(trace),
             auth_proof,
         )?;
-        verify_gateway_model_catalog_traced(
-            trace,
-            cfg.proxy_port,
-            &secret,
-            active_profile,
-        )?;
+        verify_gateway_model_catalog_traced(trace, cfg.proxy_port, &secret, active_profile)?;
         let installer_bridge = skill_install_bridge_dir(&secret)?;
         let refreshed_cfg = config::load_from(dir).map_err(|error| error.to_string())?;
         let committed = crate::runtime::provider::desired_runtime_binding(
@@ -4569,12 +5337,9 @@ fn healthy_reopen_with_gateway_rollback<R: Runtime>(
         })
         .map_err(|error| error.to_string())?;
         let installer = match current_skill_install_bridge_key() {
-            Ok(installer_key) => inspect_while_science_running(
-                app,
-                auth_dir,
-                &installer_bridge,
-                &installer_key,
-            ),
+            Ok(installer_key) => {
+                inspect_while_science_running(app, auth_dir, &installer_bridge, &installer_key)
+            }
             Err(error) => RegistrationStatus::Warning(error),
         };
         let installer = configure_third_party_best_effort(
@@ -4654,6 +5419,7 @@ fn healthy_reopen_with_gateway_rollback<R: Runtime>(
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn one_click_login_with_options<R: Runtime>(
     app: tauri::AppHandle<R>,
     state: SharedAppState,
@@ -4666,6 +5432,18 @@ fn one_click_login_with_options<R: Runtime>(
     let trace = OperationTrace::start(OperationKind::OneClickLogin, "command=one_click_login");
     let dir = config::default_dir();
     let cfg = config::load_from(&dir).map_err(|e| e.to_string())?;
+    let interrupted_environment_stage = cfg
+        .runtime_transaction
+        .as_ref()
+        .map(|journal| journal.stage.as_str());
+    let interrupted_environment_runtime_id = cfg
+        .runtime_transaction
+        .as_ref()
+        .and_then(|journal| interrupted_science_environment_runtime_id(&journal.stage));
+    validate_interrupted_science_transaction_entry(
+        interrupted_environment_stage,
+        interrupted_environment_runtime_id,
+    )?;
     let active_profile = cfg
         .active_profile()
         .ok_or("未配置生效 profile，请先在面板选择或新建一条配置。")?;
@@ -4719,6 +5497,10 @@ fn one_click_login_with_options<R: Runtime>(
         SandboxScienceState::RunningHealthy => {
             let running_runtime =
                 running_runtime.ok_or("Science 状态为运行中，但无法确认其 binary 身份")?;
+            validate_interrupted_science_environment_runtime(
+                interrupted_environment_runtime_id,
+                &running_runtime,
+            )?;
             let desired_binding = crate::runtime::provider::desired_runtime_binding(
                 &cfg,
                 active_profile,
@@ -4740,7 +5522,7 @@ fn one_click_login_with_options<R: Runtime>(
                     &sbx_home,
                 )
                 .map_err(|error| format!("补齐历史恢复标记失败：{error}"))?;
-                return healthy_reopen_with_gateway_rollback(
+                let mut reopened = healthy_reopen_with_gateway_rollback(
                     &app,
                     &state,
                     lifecycle,
@@ -4753,14 +5535,20 @@ fn one_click_login_with_options<R: Runtime>(
                     sport,
                     &running_runtime,
                     open_surface,
-                );
+                )?;
+                if interrupted_environment_runtime_id.is_some() {
+                    reopened["recovery_status"] = json!("environment_uncertain");
+                    reopened["environment_status"] = json!("uncertain");
+                }
+                return Ok(reopened);
             }
+            let prior_runtime = running_runtime.clone();
             let selected = if login_intact {
                 running_runtime
             } else {
                 select_science_runtime_cached(runtime_choice, &version_cache)?
             };
-            running_runtime_to_stop = Some(selected.clone());
+            running_runtime_to_stop = Some(prior_runtime);
             selected
         }
         SandboxScienceState::Stopped => {
@@ -4768,26 +5556,37 @@ fn one_click_login_with_options<R: Runtime>(
         }
         SandboxScienceState::Unknown => {
             trace.finish("error=sandbox_state_unknown_before_start");
+            if interrupted_environment_runtime_id.is_some() {
+                return Err(
+                    "上次启动在 Science 环境暴露边界中断，且当前 listener/runtime 身份无法确认；已拒绝自动恢复；environment_uncertain；recovery_status=manual_recovery_required"
+                        .into(),
+                );
+            }
             return Err(format!(
                 "无法确认隔离 Science 状态（端口 {sport} 或 data-dir 状态不一致）。请先停止占用该端口的进程后重试。"
             ));
         }
     };
+    validate_interrupted_science_environment_runtime(
+        interrupted_environment_runtime_id,
+        &launch_runtime,
+    )?;
     let mut rollback_context = OneClickRollbackContext {
         proxy_action: ProxyAction::Reused,
+        sandbox_port: sport,
         launch_runtime: launch_runtime.clone(),
         launch_token: None,
+        launch_attempted: false,
+        launch_confirmed_stopped: false,
+        candidate_stop_proof: ManagedScienceCandidateStopProof::NotRequired,
         ssh_stub_transaction,
     };
     let prior_science = match running_runtime_to_stop.as_ref() {
         Some(runtime) => Some(PriorScienceContext {
             runtime: runtime.clone(),
             port: sport,
-            launch_token: crate::runtime::science::managed_launch_token_for_runtime(
-                sport,
-                runtime,
-            )
-            .ok_or("prior Science managed launch 身份无法确认，拒绝停止或快照")?,
+            launch_token: crate::runtime::science::managed_launch_token_for_runtime(sport, runtime)
+                .ok_or("prior Science managed launch 身份无法确认，拒绝停止或快照")?,
         }),
         None => None,
     };
@@ -4811,24 +5610,20 @@ fn one_click_login_with_options<R: Runtime>(
         }
         let receipt = dir.join("science-managed-launch.v1.json");
         if proc::loopback_port_in_use(sport, operation::LOCAL_HEALTH_TIMEOUT_MS)
-            || crate::runtime::science::managed_launch_token_process_is_alive(
-                &prior.launch_token,
-            )
+            || crate::runtime::science::managed_launch_token_process_is_alive(&prior.launch_token)
             || receipt.exists()
         {
-            let restart = restart_prior_science(
-                &app,
-                &state,
-                lifecycle,
-                auth_proof,
-                prior,
-            );
+            let restart = restart_prior_science(&app, &state, lifecycle, auth_proof, prior);
             return Err(format!(
                 "prior Science 未完成 verified stop，拒绝建立 authority 快照；restart={restart:?}"
             ));
         }
     }
     let prior_science_for_compensation = prior_science.as_ref();
+    trace.stage(
+        OperationStage::AuthoritySnapshot,
+        "phase=capture_begin scope=protected_state",
+    );
     let mut authority_snapshot = match capture_authority_after_science_quiesce(
         &app,
         &state,
@@ -4840,14 +5635,28 @@ fn one_click_login_with_options<R: Runtime>(
         &cfg,
         prior_science_for_compensation,
     ) {
-        Ok(snapshot) => snapshot,
+        Ok(snapshot) => {
+            trace.stage(
+                OperationStage::AuthoritySnapshot,
+                "phase=capture_end outcome=ok",
+            );
+            snapshot
+        }
         Err(AuthorityCaptureAfterQuiesceError::PriorScienceRestored(cause)) => {
+            trace.stage(
+                OperationStage::AuthoritySnapshot,
+                "phase=capture_end outcome=error prior_science=restored",
+            );
             if let Some(disposition) = reconcile_disposition.as_deref_mut() {
                 *disposition = PriorScienceDisposition::Restored;
             }
             return Err(cause);
         }
         Err(AuthorityCaptureAfterQuiesceError::RestartRequired(cause)) => {
+            trace.stage(
+                OperationStage::AuthoritySnapshot,
+                "phase=capture_end outcome=error prior_science=restart_required",
+            );
             return Err(cause);
         }
     };
@@ -4862,8 +5671,7 @@ fn one_click_login_with_options<R: Runtime>(
                 &rollback_context,
             )?;
         }
-        let transaction_cfg =
-            one_click_step(config::load_from(&dir), &rollback_context)?;
+        let transaction_cfg = one_click_step(config::load_from(&dir), &rollback_context)?;
         one_click_step(
             advance_runtime_transaction(
                 &dir,
@@ -4876,8 +5684,9 @@ fn one_click_login_with_options<R: Runtime>(
         let preview_port = match sport.checked_add(1) {
             Some(port) => port,
             None => {
-                return Err(rollback_context
-                    .failure("沙箱端口必须小于 65535，才能分配隔离预览端口。"))
+                return Err(
+                    rollback_context.failure("沙箱端口必须小于 65535，才能分配隔离预览端口。")
+                )
             }
         };
         if proc::loopback_port_in_use(preview_port, operation::LOCAL_HEALTH_TIMEOUT_MS) {
@@ -4886,6 +5695,23 @@ fn one_click_login_with_options<R: Runtime>(
             )));
         }
         lock(&state).science_confirmed_stopped = None;
+        one_click_step(
+            authority_snapshot.validate_science_restore_root(),
+            &rollback_context,
+        )?;
+        let authority_active_stage = format!(
+            "{AUTHORITY_SNAPSHOT_ACTIVE_STAGE_PREFIX}{}",
+            launch_runtime.environment_transaction_id()
+        );
+        one_click_step(
+            advance_runtime_transaction(
+                &dir,
+                &active_profile.id,
+                transaction_cfg.runtime_binding.clone(),
+                &authority_active_stage,
+            ),
+            &rollback_context,
+        )?;
 
         trace.stage(OperationStage::SandboxLogin, "ensure_virtual_login");
         let (forged, login_action) = match oauth_forge::ensure_virtual_login(
@@ -4895,10 +5721,8 @@ fn one_click_login_with_options<R: Runtime>(
         ) {
             Ok(result) => result,
             Err(oauth_forge::EnsureVirtualLoginError::HistoryChoiceRequired(candidates)) => {
-                let (choices, visible_choices) = one_click_step(
-                    history_recovery_choices(candidates),
-                    &rollback_context,
-                )?;
+                let (choices, visible_choices) =
+                    one_click_step(history_recovery_choices(candidates), &rollback_context)?;
                 {
                     let mut app_state = lock(&state);
                     app_state.science_confirmed_stopped = Some(launch_runtime.clone());
@@ -4947,9 +5771,22 @@ fn one_click_login_with_options<R: Runtime>(
         };
         let launch = root.join("scripts/launch-virtual-sandbox.sh");
         if !launch.is_file() {
-            return Err(
-                rollback_context.failure("找不到 scripts/launch-virtual-sandbox.sh。")
-            );
+            return Err(rollback_context.failure("找不到 scripts/launch-virtual-sandbox.sh。"));
+        }
+        #[cfg(test)]
+        if let Some(hosts) = std::env::var_os("CSSWITCH_TEST_SSH_HOSTS_AFTER_CAPTURE") {
+            let config = one_click_step(
+                crate::runtime::settings::system_ssh_config_path(),
+                &rollback_context,
+            )?;
+            one_click_step(
+                std::fs::write(&config, format!("Host {}\n", hosts.to_string_lossy())),
+                &rollback_context,
+            )?;
+            one_click_step(
+                std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)),
+                &rollback_context,
+            )?;
         }
         let ssh_hosts = if cfg.reuse_system_ssh {
             one_click_step(
@@ -4963,6 +5800,14 @@ fn one_click_login_with_options<R: Runtime>(
             )?;
             Vec::new()
         };
+        if cfg.reuse_system_ssh {
+            if let Some(transaction) = rollback_context.ssh_stub_transaction.as_ref() {
+                one_click_step(
+                    transaction.validate_prepared_hosts(&ssh_hosts),
+                    &rollback_context,
+                )?;
+            }
+        }
         let (pport, secret, proxy_action) = one_click_step(
             ensure_proxy(
                 &app,
@@ -4979,12 +5824,16 @@ fn one_click_login_with_options<R: Runtime>(
             verify_gateway_model_catalog_traced(&trace, pport, &secret, active_profile),
             &rollback_context,
         )?;
+        let environment_pending_stage = format!(
+            "{SCIENCE_ENVIRONMENT_PENDING_STAGE_PREFIX}{}",
+            launch_runtime.environment_transaction_id()
+        );
         one_click_step(
             advance_runtime_transaction(
                 &dir,
                 &active_profile.id,
                 transaction_cfg.runtime_binding.clone(),
-                "start_science",
+                &environment_pending_stage,
             ),
             &rollback_context,
         )?;
@@ -4999,9 +5848,7 @@ fn one_click_login_with_options<R: Runtime>(
         let proxy_url = format!("http://127.0.0.1:{pport}/{secret}");
         let logf = match open_log("sandbox.log") {
             Ok(file) => file,
-            Err(error) => {
-                return Err(rollback_context.failure(format!("建日志失败：{error}")))
-            }
+            Err(error) => return Err(rollback_context.failure(format!("建日志失败：{error}"))),
         };
         {
             use std::io::Write;
@@ -5019,6 +5866,10 @@ fn one_click_login_with_options<R: Runtime>(
                 rollback_context.failure("Science runtime 在预检后发生变化；已拒绝启动，请重试")
             );
         }
+        one_click_step(
+            authority_snapshot.validate_science_restore_root(),
+            &rollback_context,
+        )?;
         #[cfg(test)]
         if let Some(foreign_stub) =
             std::env::var_os("CSSWITCH_TEST_SSH_LATE_FOREIGN_STUB").map(std::path::PathBuf::from)
@@ -5026,9 +5877,7 @@ fn one_click_login_with_options<R: Runtime>(
             let parent = match foreign_stub.parent() {
                 Some(parent) => parent,
                 None => {
-                    return Err(
-                        rollback_context.failure("SSH late-failure test stub has no parent")
-                    )
+                    return Err(rollback_context.failure("SSH late-failure test stub has no parent"))
                 }
             };
             one_click_step(std::fs::create_dir_all(parent), &rollback_context)?;
@@ -5045,15 +5894,16 @@ fn one_click_login_with_options<R: Runtime>(
                 &rollback_context,
             )?;
             one_click_step(
-                std::io::Write::write_all(
-                    &mut file,
-                    b"foreign-test-stub-must-survive\n",
-                ),
+                std::io::Write::write_all(&mut file, b"foreign-test-stub-must-survive\n"),
                 &rollback_context,
             )?;
             one_click_step(file.sync_all(), &rollback_context)?;
         }
-        let status_result = Command::new("zsh")
+        one_click_step(
+            authority_snapshot.validate_science_restore_root(),
+            &rollback_context,
+        )?;
+        let launch_child = Command::new("zsh")
             .arg(&launch)
             .arg("--port")
             .arg(sport.to_string())
@@ -5061,6 +5911,10 @@ fn one_click_login_with_options<R: Runtime>(
             .env("SANDBOX_HOME", sandbox_home())
             .env("SCIENCE_BIN", &launch_runtime.path)
             .env("CSSWITCH_RUNTIME_VERSION_PRECHECKED", "1")
+            .env(
+                "CSSWITCH_SCIENCE_OPAQUE_BINDINGS",
+                authority_snapshot.science_opaque_bindings_env(),
+            )
             .env("CSSWITCH_PROXY_URL", &proxy_url)
             .env(
                 "CSSWITCH_REUSE_SYSTEM_SSH",
@@ -5069,23 +5923,32 @@ fn one_click_login_with_options<R: Runtime>(
             .env("CSSWITCH_SYSTEM_SSH_HOSTS", ssh_hosts.join(" "))
             .stdout(Stdio::from(logf))
             .stderr(Stdio::from(logf2))
-            .status();
-        if status_result.is_ok() {
-            if let Some(transaction) = rollback_context.ssh_stub_transaction.as_mut() {
-                transaction.observe_after_launch(&sbx_home);
-            }
-        }
-        let status = match status_result {
-            Ok(status) => status,
+            .spawn();
+        let status = match launch_child {
+            Ok(mut child) => match child.wait() {
+                Ok(status) => status,
+                Err(error) => {
+                    rollback_context.launch_attempted = true;
+                    rollback_context.candidate_stop_proof =
+                        ManagedScienceCandidateStopProof::Unproven;
+                    return Err(rollback_context.failure(format!(
+                        "起沙箱状态未知：{error}；code=science_candidate_stop_unproven"
+                    )));
+                }
+            },
             Err(error) => {
-                return Err(rollback_context.failure(format!("起沙箱失败：{error}")))
+                return Err(rollback_context.failure(format!("起沙箱失败：{error}")));
             }
         };
+        rollback_context.launch_attempted = status.success()
+            || status.code() == Some(SCIENCE_LAUNCH_ENVIRONMENT_EXPOSED_EXIT_CODE)
+            || status.code().is_none();
+        if let Some(transaction) = rollback_context.ssh_stub_transaction.as_mut() {
+            transaction.observe_after_launch(&sbx_home);
+        }
         if !status.success() {
             let tail = redact(&tail_file(&log_path("sandbox.log"), 600), &secret);
-            return Err(
-                rollback_context.failure(format!("起沙箱脚本失败。\n{tail}"))
-            );
+            return Err(rollback_context.failure(format!("起沙箱脚本失败。\n{tail}")));
         }
         {
             let mut current = lock(&state);
@@ -5107,9 +5970,9 @@ fn one_click_login_with_options<R: Runtime>(
         );
         if !healthy {
             let tail = redact(&tail_file(&log_path("sandbox.log"), 600), &secret);
-            return Err(rollback_context.failure(format!(
-                "沙箱起后探活超时（端口 {sport}）。\n{tail}"
-            )));
+            return Err(
+                rollback_context.failure(format!("沙箱起后探活超时（端口 {sport}）。\n{tail}"))
+            );
         }
         if !sandbox_listener_matches_runtime(sport, &launch_runtime) {
             return Err(rollback_context.failure(format!(
@@ -5124,6 +5987,118 @@ fn one_click_login_with_options<R: Runtime>(
                     "Science 已启动但受管启动身份无法安全提交：{}",
                     error.message()
                 )));
+            }
+        }
+        one_click_step(
+            advance_runtime_transaction(
+                &dir,
+                &active_profile.id,
+                transaction_cfg.runtime_binding.clone(),
+                "wait_science_db_reverify",
+            ),
+            &rollback_context,
+        )?;
+        let first_token = match rollback_context.launch_token.clone() {
+            Some(token) => token,
+            None => {
+                return Err(rollback_context.failure("Science DB 检查缺少受管启动身份"));
+            }
+        };
+        match one_click_step(
+            wait_for_science_db_reverify(sport, &launch_runtime, &first_token),
+            &rollback_context,
+        )? {
+            proc::ScienceDbHealth::Ready => {}
+            proc::ScienceDbHealth::ReverifyPending => unreachable!(),
+            proc::ScienceDbHealth::RestartRequired => {
+                {
+                    let mut current = lock(&state);
+                    let AppState {
+                        sandbox,
+                        sandbox_url,
+                        ..
+                    } = &mut *current;
+                    one_click_step(
+                        stop_sandbox_with_launch_token(
+                            &app,
+                            sandbox,
+                            sandbox_url,
+                            Some(&launch_runtime),
+                            Some(&first_token),
+                        ),
+                        &rollback_context,
+                    )?;
+                    current.science_runtime = None;
+                    current.science_confirmed_stopped = Some(launch_runtime.clone());
+                }
+                rollback_context.launch_confirmed_stopped = true;
+                if proc::loopback_port_in_use(sport, operation::LOCAL_HEALTH_TIMEOUT_MS)
+                    || crate::runtime::science::managed_launch_token_process_is_alive(&first_token)
+                    || dir.join("science-managed-launch.v1.json").exists()
+                {
+                    return Err(rollback_context
+                        .failure("Science DB recovery 的首次受管进程未完成 verified stop"));
+                }
+                one_click_step(
+                    advance_runtime_transaction(
+                        &dir,
+                        &active_profile.id,
+                        transaction_cfg.runtime_binding.clone(),
+                        "restart_science_after_db_heal",
+                    ),
+                    &rollback_context,
+                )?;
+                let recovery = PriorScienceContext {
+                    runtime: launch_runtime.clone(),
+                    port: sport,
+                    // restart_managed_science_with_budget does not consume the
+                    // stopped token; retaining it gives compensation an exact
+                    // absence proof until the fresh receipt is committed.
+                    launch_token: first_token.clone(),
+                };
+                if let Err(error) = restart_managed_science_with_budget(
+                    &app,
+                    &state,
+                    lifecycle,
+                    auth_proof,
+                    &recovery,
+                    science_db_recovery_restart_budget_ms(),
+                ) {
+                    rollback_context.candidate_stop_proof = error.candidate_stop_proof;
+                    return Err(rollback_context.failure(error.to_string()));
+                }
+                let second_token = one_click_step(
+                    crate::runtime::science::managed_launch_token_for_runtime(
+                        sport,
+                        &launch_runtime,
+                    )
+                    .ok_or("Science DB recovery restart 缺少 fresh managed receipt"),
+                    &rollback_context,
+                )?;
+                rollback_context.launch_token = Some(second_token.clone());
+                rollback_context.launch_confirmed_stopped = false;
+                one_click_step(
+                    advance_runtime_transaction(
+                        &dir,
+                        &active_profile.id,
+                        transaction_cfg.runtime_binding.clone(),
+                        "verify_science_db_after_restart",
+                    ),
+                    &rollback_context,
+                )?;
+                let second_state = one_click_step(
+                    wait_for_science_db_reverify(sport, &launch_runtime, &second_token),
+                    &rollback_context,
+                )?;
+                if !crate::runtime::science::managed_launch_token_is_current_for_runtime(
+                    &second_token,
+                    &launch_runtime,
+                ) || second_state != proc::ScienceDbHealth::Ready
+                {
+                    return Err(rollback_context.failure(format!(
+                        "Science DB recovery 的第二次启动未达到 clear/clear：{second_state:?}"
+                    )));
+                }
             }
         }
         one_click_step(
@@ -5155,13 +6130,10 @@ fn one_click_login_with_options<R: Runtime>(
             oauth_forge::LoginAction::Created => "已启动",
             _ => "沙箱已重新启动，沿用原有对话",
         };
-        let refreshed_cfg =
-            one_click_step(config::load_from(&dir), &rollback_context)?;
+        let refreshed_cfg = one_click_step(config::load_from(&dir), &rollback_context)?;
         let refreshed_profile = match refreshed_cfg.active_profile() {
             Some(profile) => profile,
-            None => {
-                return Err(rollback_context.failure("生效 profile 在启动期间消失"))
-            }
+            None => return Err(rollback_context.failure("生效 profile 在启动期间消失")),
         };
         let committed = one_click_step(
             crate::runtime::provider::desired_runtime_binding(
@@ -5171,10 +6143,7 @@ fn one_click_login_with_options<R: Runtime>(
             ),
             &rollback_context,
         )?;
-        one_click_step(
-            commit_runtime_binding(&dir, committed),
-            &rollback_context,
-        )?;
+        one_click_step(commit_runtime_binding(&dir, committed), &rollback_context)?;
         let (message, fallback_url) = if open_surface {
             match open_science_surface(&app, &url) {
                 Ok("webview") => (format!("{started}，已打开 Science 窗口。"), None),
@@ -5202,6 +6171,10 @@ fn one_click_login_with_options<R: Runtime>(
             "fallback_url": fallback_url,
             "external_skill_installer": installer_status_json(&installer)
         });
+        if interrupted_environment_runtime_id.is_some() {
+            value["recovery_status"] = json!("environment_uncertain");
+            value["environment_status"] = json!("uncertain");
+        }
         one_click_step(
             authority_snapshot.prepare_success(&mut value),
             &rollback_context,
@@ -5231,29 +6204,31 @@ fn one_click_login_with_options<R: Runtime>(
 #[cfg(test)]
 mod transaction_tests {
     use super::{
-        advance_runtime_transaction, cleanup_tombstone_path,
-        gateway_model_catalog_timeout_ms,
-        finalize_registered_authority_cleanup, parse_pending_cleanup_manifest,
-        prevalidate_one_click_system_ssh,
+        advance_runtime_transaction, cleanup_tombstone_path, clear_runtime_transaction,
+        finalize_registered_authority_cleanup, gateway_model_catalog_timeout_ms,
+        interrupted_science_environment_runtime_id, parse_pending_cleanup_manifest,
+        prevalidate_one_click_system_ssh, retry_pending_authority_cleanup,
+        runtime_transaction_requires_snapshot_preservation, science_health_control_error,
         test_arm_authority_cleanup_parent_sync_failure,
-        test_arm_authority_snapshot_capture_failure,
-        test_arm_authority_snapshot_cleanup_fault,
+        test_arm_authority_snapshot_capture_failure, test_arm_authority_snapshot_cleanup_fault,
         test_arm_authority_snapshot_clone_errno,
         test_arm_authority_snapshot_completion_sync_failure,
         test_arm_authority_snapshot_directory_barrier,
         test_arm_authority_snapshot_fallback_create_failure,
-        test_arm_authority_snapshot_parent_barrier, verify_gateway_model_catalog,
-        AuthorityCopyBudget, AuthoritySnapshotCategory, AuthoritySnapshotScope,
-        AuthorityTreeSnapshot, OneClickAuthoritySnapshot, PendingCleanupEntry,
-        RegisteredAuthorityCleanup, PENDING_CLEANUP_MARKER_FILE,
-        MAX_AUTHORITY_FULL_COPY_FILE_BYTES,
-        MAX_AUTHORITY_FULL_COPY_TOTAL_BYTES, MAX_AUTHORITY_SNAPSHOT_ENTRIES,
-        MAX_AUTHORITY_SNAPSHOT_FILE_BYTES, MAX_AUTHORITY_SNAPSHOT_TOTAL_BYTES,
+        test_arm_authority_snapshot_parent_barrier, validate_interrupted_science_transaction_entry,
+        verify_gateway_model_catalog, AuthorityCopyBudget, AuthoritySnapshotCategory,
+        AuthoritySnapshotScope, AuthorityTreeSnapshot, OneClickAuthoritySnapshot,
+        PendingCleanupEntry, RegisteredAuthorityCleanup, AUTHORITY_SNAPSHOT_ACTIVE_STAGE_PREFIX,
+        MAX_AUTHORITY_FULL_COPY_FILE_BYTES, MAX_AUTHORITY_FULL_COPY_TOTAL_BYTES,
+        MAX_AUTHORITY_SNAPSHOT_ENTRIES, MAX_AUTHORITY_SNAPSHOT_FILE_BYTES,
+        MAX_AUTHORITY_SNAPSHOT_TOTAL_BYTES, PENDING_CLEANUP_MARKER_FILE,
+        SCIENCE_ENVIRONMENT_PENDING_STAGE_PREFIX, SCIENCE_OWNED_OPAQUE_ROOTS,
     };
     use crate::config::{self, Config, RuntimeBindingCommit};
     use crate::provider_contracts::ModelPolicy;
     use crate::runtime::proxy::ProxyAction;
     use crate::{AppState, SharedAppState};
+    use csswitch_skill_install_core::AttachError;
     use std::collections::BTreeMap;
     use std::fs;
     use std::io::{Read, Write};
@@ -5295,6 +6270,34 @@ mod transaction_tests {
                     None => std::env::remove_var(key),
                 }
             }
+        }
+    }
+
+    #[test]
+    fn health_bootstrap_retries_only_explicit_transport_failures() {
+        let transient = science_health_control_error(AttachError {
+            code: "SCIENCE_HEALTH_UNREACHABLE".into(),
+            message: "safe transport failure".into(),
+            retryable: true,
+            uncertain: false,
+        });
+        assert_eq!(transient, "science_api_health_unreachable");
+
+        for code in [
+            "SCIENCE_RUNTIME_CHANGED",
+            "SCIENCE_CONTROL_FAILED",
+            "SCIENCE_NOT_READY",
+        ] {
+            let hard_failure = science_health_control_error(AttachError {
+                code: code.into(),
+                message: "safe hard failure".into(),
+                retryable: true,
+                uncertain: false,
+            });
+            assert!(
+                hard_failure.starts_with("science_api_health_control_failed"),
+                "{code} must never enter the transient bootstrap retry lane"
+            );
         }
     }
 
@@ -5376,7 +6379,9 @@ mod transaction_tests {
 
     #[test]
     fn authority_snapshot_uses_independent_inodes_and_restores_in_place_mutation() {
-        let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _env_lock = TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let mut science_0125_budget = AuthorityCopyBudget::default();
         AuthorityTreeSnapshot::charge_entry(
             &mut science_0125_budget,
@@ -5502,8 +6507,7 @@ mod transaction_tests {
         .unwrap();
         let before = tree(&source);
 
-        let mut snapshot =
-            AuthorityTreeSnapshot::capture(source.clone(), backup.clone()).unwrap();
+        let mut snapshot = AuthorityTreeSnapshot::capture(source.clone(), backup.clone()).unwrap();
         for relative in [Path::new("database.db"), Path::new("nested/state.json")] {
             let live = fs::metadata(source.join(relative)).unwrap();
             let saved = fs::metadata(backup.join(relative)).unwrap();
@@ -5569,8 +6573,7 @@ mod transaction_tests {
             .expect_err("restore backup roots that become symlinks must remain fail-closed");
         assert!(
             restore_error.contains("code=authority_restore_backup_identity_changed")
-                || restore_error
-                    .contains("code=authority_restore_backup_validate_failed")
+                || restore_error.contains("code=authority_restore_backup_validate_failed")
         );
 
         for (label, errno) in [("enotsup", libc::ENOTSUP), ("exdev", libc::EXDEV)] {
@@ -5580,11 +6583,8 @@ mod transaction_tests {
             fs::write(fallback_source.join("state"), b"fallback-bytes\n").unwrap();
             {
                 let _clone_seam = test_arm_authority_snapshot_clone_errno(errno);
-                AuthorityTreeSnapshot::capture(
-                    fallback_source.clone(),
-                    fallback_backup.clone(),
-                )
-                .expect("ENOTSUP and EXDEV must use the bounded independent-copy fallback");
+                AuthorityTreeSnapshot::capture(fallback_source.clone(), fallback_backup.clone())
+                    .expect("ENOTSUP and EXDEV must use the bounded independent-copy fallback");
             }
             assert_eq!(
                 fs::read(fallback_backup.join("state")).unwrap(),
@@ -5604,12 +6604,10 @@ mod transaction_tests {
         fs::write(unexpected_source.join("state"), b"unchanged\n").unwrap();
         {
             let _clone_seam = test_arm_authority_snapshot_clone_errno(libc::EIO);
-            let error = AuthorityTreeSnapshot::capture(
-                unexpected_source,
-                unexpected_backup.clone(),
-            )
-            .err()
-            .expect("unexpected clone errors must fail closed");
+            let error =
+                AuthorityTreeSnapshot::capture(unexpected_source, unexpected_backup.clone())
+                    .err()
+                    .expect("unexpected clone errors must fail closed");
             assert!(error.contains("code=authority_snapshot_clone_failed"));
             assert!(error.contains("os_error=5"));
         }
@@ -5625,12 +6623,9 @@ mod transaction_tests {
         {
             let _clone_seam = test_arm_authority_snapshot_clone_errno(libc::ENOTSUP);
             let _copy_seam = test_arm_authority_snapshot_fallback_create_failure();
-            let error = AuthorityTreeSnapshot::capture(
-                injected_source,
-                injected_backup.clone(),
-            )
-            .err()
-            .expect("fallback failure after create must fail closed");
+            let error = AuthorityTreeSnapshot::capture(injected_source, injected_backup.clone())
+                .err()
+                .expect("fallback failure after create must fail closed");
             assert!(error.contains("code=authority_snapshot_copy_injected_failure"));
         }
         assert!(
@@ -5650,12 +6645,9 @@ mod transaction_tests {
             .unwrap();
         {
             let _clone_seam = test_arm_authority_snapshot_clone_errno(libc::ENOTSUP);
-            let error = AuthorityTreeSnapshot::capture(
-                per_file_source,
-                per_file_backup.clone(),
-            )
-            .err()
-            .expect("fallback above the per-file copy budget must fail closed");
+            let error = AuthorityTreeSnapshot::capture(per_file_source, per_file_backup.clone())
+                .err()
+                .expect("fallback above the per-file copy budget must fail closed");
             assert!(error.contains("code=authority_snapshot_clone_required"));
         }
         assert!(!per_file_backup.join("large").exists());
@@ -5712,16 +6704,11 @@ mod transaction_tests {
         fs::create_dir_all(&rebound_source).unwrap();
         fs::create_dir(&rebound_foreign).unwrap();
         fs::write(rebound_source.join("state"), b"prior-pinned\n").unwrap();
-        let mut rebound_snapshot = AuthorityTreeSnapshot::capture(
-            rebound_source.clone(),
-            rebound_backup.clone(),
-        )
-        .unwrap();
+        let mut rebound_snapshot =
+            AuthorityTreeSnapshot::capture(rebound_source.clone(), rebound_backup.clone()).unwrap();
         fs::write(rebound_source.join("state"), b"mutated\n").unwrap();
-        let rebound_seam = test_arm_authority_snapshot_directory_barrier(
-            rebound_backup,
-            rebound_barrier.clone(),
-        );
+        let rebound_seam =
+            test_arm_authority_snapshot_directory_barrier(rebound_backup, rebound_barrier.clone());
         let restore_worker = thread::spawn(move || rebound_snapshot.restore());
         for _ in 0..200 {
             if rebound_barrier.join("ready").is_file() {
@@ -5755,8 +6742,7 @@ mod transaction_tests {
         let backup_parent_rebind_source = tmp.join("backup-parent-rebind-live");
         let backup_parent_rebind_parent = tmp.join("backup-parent-rebind-root");
         let backup_parent_displaced = tmp.join("backup-parent-rebind-displaced");
-        let backup_parent_rebind_backup =
-            backup_parent_rebind_parent.join("authority");
+        let backup_parent_rebind_backup = backup_parent_rebind_parent.join("authority");
         fs::create_dir(&backup_parent_rebind_source).unwrap();
         fs::create_dir(&backup_parent_rebind_parent).unwrap();
         fs::write(
@@ -5769,16 +6755,8 @@ mod transaction_tests {
             backup_parent_rebind_backup.clone(),
         )
         .unwrap();
-        fs::write(
-            backup_parent_rebind_source.join("state"),
-            b"live-mutated\n",
-        )
-        .unwrap();
-        fs::rename(
-            &backup_parent_rebind_parent,
-            &backup_parent_displaced,
-        )
-        .unwrap();
+        fs::write(backup_parent_rebind_source.join("state"), b"live-mutated\n").unwrap();
+        fs::rename(&backup_parent_rebind_parent, &backup_parent_displaced).unwrap();
         fs::create_dir_all(&backup_parent_rebind_backup).unwrap();
         fs::write(
             backup_parent_rebind_backup.join("state"),
@@ -5789,11 +6767,9 @@ mod transaction_tests {
             .restore()
             .expect_err("backup parent rebind must fail closed");
         assert!(
-            backup_parent_rebind_error
-                .contains("code=authority_restore_backup_parent_rebound")
-                || backup_parent_rebind_error.contains(
-                    "code=authority_restore_backup_parent_revalidate_failed"
-                )
+            backup_parent_rebind_error.contains("code=authority_restore_backup_parent_rebound")
+                || backup_parent_rebind_error
+                    .contains("code=authority_restore_backup_parent_revalidate_failed")
         );
         assert_eq!(
             fs::read(backup_parent_rebind_source.join("state")).unwrap(),
@@ -5874,7 +6850,10 @@ mod transaction_tests {
             let live = fs::metadata(entry.path()).unwrap();
             let saved = fs::metadata(backup.join(entry.file_name())).unwrap();
             assert_eq!(live.len(), saved.len());
-            assert_eq!(live.permissions().mode() & 0o777, saved.permissions().mode() & 0o777);
+            assert_eq!(
+                live.permissions().mode() & 0o777,
+                saved.permissions().mode() & 0o777
+            );
             assert_eq!(live.dev(), saved.dev());
             assert_ne!(live.ino(), saved.ino());
         }
@@ -5901,8 +6880,7 @@ mod transaction_tests {
             .create_new(true)
             .open(&path)
             .unwrap();
-        file.set_len(MAX_AUTHORITY_SNAPSHOT_FILE_BYTES + 1)
-            .unwrap();
+        file.set_len(MAX_AUTHORITY_SNAPSHOT_FILE_BYTES + 1).unwrap();
 
         let error = AuthorityTreeSnapshot::capture_scoped(
             AuthoritySnapshotScope::ScienceData,
@@ -5940,7 +6918,9 @@ mod transaction_tests {
 
     #[test]
     fn authority_snapshot_fails_closed_when_directory_membership_changes_mid_capture() {
-        let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _env_lock = TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let tmp = isolated_tmpdir("directory-membership-race");
         let source = tmp.join("authority");
         let backup = tmp.join("rollback/authority");
@@ -5954,8 +6934,7 @@ mod transaction_tests {
             fs::Permissions::from_mode(0o600),
         )
         .unwrap();
-        let _seam =
-            test_arm_authority_snapshot_directory_barrier(source.clone(), barrier.clone());
+        let _seam = test_arm_authority_snapshot_directory_barrier(source.clone(), barrier.clone());
 
         let capture_source = source.clone();
         let capture_backup = backup.clone();
@@ -6021,9 +7000,7 @@ mod transaction_tests {
             .err()
             .expect("destination entry rebind must fail closed");
         drop(rebound_seam);
-        assert!(
-            rebound_error.contains("code=authority_snapshot_destination_rebound")
-        );
+        assert!(rebound_error.contains("code=authority_snapshot_destination_rebound"));
         assert!(
             !foreign.join("state").exists(),
             "dirfd-anchored copy must never write through a rebound destination symlink"
@@ -6037,9 +7014,14 @@ mod transaction_tests {
 
     #[test]
     fn fresh_authority_snapshot_parent_is_private_and_cleanup_safe() {
-        let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _env_lock = TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut env = ScopedEnv::new();
         let tmp = isolated_tmpdir("fresh-authority-parent");
-        let config_dir = tmp.join("config");
+        let home = tmp.join("home");
+        env.set("HOME", &home);
+        let config_dir = config::default_dir();
         let sandbox_home = config_dir.join("sandbox/home");
         let auth_dir = sandbox_home.join(".claude-science");
         let config = Config::default();
@@ -6067,6 +7049,31 @@ mod transaction_tests {
             "fresh snapshot parent must be an owned private directory"
         );
         let backup_root = snapshot.backup_root.clone();
+        let registered = config::read_pending_authority_cleanup_manifest(&config_dir)
+            .unwrap()
+            .unwrap();
+        let registered: serde_json::Value = serde_json::from_slice(&registered).unwrap();
+        assert_eq!(
+            registered["entries"].as_array().map(Vec::len),
+            Some(1),
+            "a complete authority snapshot must be durably registered before protected writes"
+        );
+        let runtime_id = "b".repeat(64);
+        advance_runtime_transaction(
+            &config_dir,
+            "snapshot-crash-fixture",
+            None,
+            &format!("{AUTHORITY_SNAPSHOT_ACTIVE_STAGE_PREFIX}{runtime_id}"),
+        )
+        .unwrap();
+        let retry_error = retry_pending_authority_cleanup(&state)
+            .expect_err("an active authority transaction must preserve its recovery snapshot");
+        assert!(
+            retry_error.contains("code=authority_snapshot_recovery_required")
+                && backup_root.is_dir(),
+            "active crash recovery must preserve the exact registered root: {retry_error}"
+        );
+        clear_runtime_transaction(&config_dir).unwrap();
         snapshot
             .restore(&config_dir, &state, ProxyAction::Reused)
             .expect("fresh missing authority parents must already satisfy prior absence");
@@ -6081,12 +7088,274 @@ mod transaction_tests {
                 && manifest["entries"].as_array().is_some_and(Vec::is_empty),
             "restore must retain the private sandbox parent, preserve prior HOME absence, and durably clear rollback state"
         );
+        let panic_snapshot = OneClickAuthoritySnapshot::capture(
+            &config_dir,
+            &sandbox_home,
+            &auth_dir,
+            &config,
+            &state,
+        )
+        .unwrap();
+        let panic_recovery_root = panic_snapshot.backup_root.clone();
+        fs::create_dir_all(&auth_dir).unwrap();
+        fs::set_permissions(&auth_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(
+            auth_dir.join("active-org.json"),
+            b"partial-protected-write\n",
+        )
+        .unwrap();
+        advance_runtime_transaction(
+            &config_dir,
+            "snapshot-panic-fixture",
+            None,
+            &format!("{AUTHORITY_SNAPSHOT_ACTIVE_STAGE_PREFIX}{runtime_id}"),
+        )
+        .unwrap();
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _held_snapshot = panic_snapshot;
+            panic!("test-only panic after protected mutation");
+        }));
+        assert!(unwind.is_err());
+        let panic_retry = retry_pending_authority_cleanup(&state)
+            .expect_err("panic unwind must not convert ActiveRecovery to cleanup-only");
+        assert!(
+            panic_retry.contains("cleanup_code=authority_snapshot_recovery_required")
+                && panic_retry.contains(&panic_recovery_root.to_string_lossy().to_string())
+                && panic_recovery_root.is_dir(),
+            "panic unwind must preserve the exact registered recovery root: {panic_retry}"
+        );
         let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
+    fn one_click_snapshot_does_not_descend_or_restore_science_owned_environment() {
+        let _env_lock = TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let tmp = isolated_tmpdir("science-owned-environment-boundary");
+        let config_dir = tmp.join("config");
+        let sandbox_home = config_dir.join("sandbox/home");
+        let auth_dir = sandbox_home.join(".claude-science");
+        let org_db = auth_dir.join("orgs/org-test/history.db");
+        let conda_sentinel = auth_dir.join("conda/candidate-state");
+        let unknown_sentinel = auth_dir.join("future-science-state/candidate-state");
+        let config = Config::default();
+        config::save_to(&config_dir, &config).unwrap();
+        fs::create_dir_all(org_db.parent().unwrap()).unwrap();
+        fs::create_dir_all(conda_sentinel.parent().unwrap()).unwrap();
+        fs::create_dir_all(unknown_sentinel.parent().unwrap()).unwrap();
+        fs::write(
+            auth_dir.join("active-org.json"),
+            b"{\"org_uuid\":\"org-test\"}\n",
+        )
+        .unwrap();
+        fs::write(&org_db, b"prior-history\n").unwrap();
+        fs::write(&conda_sentinel, b"prior-environment\n").unwrap();
+        fs::write(&unknown_sentinel, b"prior-unknown\n").unwrap();
+        for root in SCIENCE_OWNED_OPAQUE_ROOTS {
+            let sparse_path = auth_dir.join(root).join("large-environment");
+            fs::create_dir_all(sparse_path.parent().unwrap()).unwrap();
+            let sparse = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&sparse_path)
+                .unwrap();
+            sparse.set_len(4 * 1024 * 1024 * 1024).unwrap();
+        }
+        let state: SharedAppState = Arc::new(Mutex::new(AppState::default()));
+        let _clone_fallback = test_arm_authority_snapshot_clone_errno(libc::ENOTSUP);
+
+        let mut snapshot = OneClickAuthoritySnapshot::capture(
+            &config_dir,
+            &sandbox_home,
+            &auth_dir,
+            &config,
+            &state,
+        )
+        .expect("opaque Science environment must not enter snapshot copy budgets");
+        fs::write(
+            auth_dir.join("active-org.json"),
+            b"{\"org_uuid\":\"candidate\"}\n",
+        )
+        .unwrap();
+        fs::write(&org_db, b"candidate-history\n").unwrap();
+        fs::write(&conda_sentinel, b"candidate-environment\n").unwrap();
+        fs::write(&unknown_sentinel, b"candidate-unknown\n").unwrap();
+
+        snapshot
+            .restore(&config_dir, &state, ProxyAction::Reused)
+            .expect("protected authority projection must restore independently");
+        assert_eq!(
+            fs::read(auth_dir.join("active-org.json")).unwrap(),
+            b"{\"org_uuid\":\"org-test\"}\n"
+        );
+        assert_eq!(fs::read(&org_db).unwrap(), b"prior-history\n");
+        assert_eq!(
+            fs::read(&conda_sentinel).unwrap(),
+            b"candidate-environment\n",
+            "CSSwitch rollback must preserve Science-owned environment in place"
+        );
+        assert_eq!(fs::read(&unknown_sentinel).unwrap(), b"candidate-unknown\n");
+        for root in SCIENCE_OWNED_OPAQUE_ROOTS {
+            assert_eq!(
+                fs::metadata(auth_dir.join(root).join("large-environment"))
+                    .unwrap()
+                    .len(),
+                4 * 1024 * 1024 * 1024,
+                "CSSwitch must neither copy nor delete opaque environment objects"
+            );
+        }
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn one_click_snapshot_rejects_opaque_root_symlink_without_touching_target() {
+        let tmp = isolated_tmpdir("science-owned-environment-symlink");
+        let config_dir = tmp.join("config");
+        let sandbox_home = config_dir.join("sandbox/home");
+        let auth_dir = sandbox_home.join(".claude-science");
+        let foreign = tmp.join("foreign");
+        let config = Config::default();
+        config::save_to(&config_dir, &config).unwrap();
+        fs::create_dir_all(&auth_dir).unwrap();
+        fs::create_dir(&foreign).unwrap();
+        fs::write(foreign.join("canary"), b"must-not-change\n").unwrap();
+        symlink(&foreign, auth_dir.join("conda")).unwrap();
+        let state: SharedAppState = Arc::new(Mutex::new(AppState::default()));
+
+        let error = OneClickAuthoritySnapshot::capture(
+            &config_dir,
+            &sandbox_home,
+            &auth_dir,
+            &config,
+            &state,
+        )
+        .err()
+        .expect("opaque root symlink must fail closed");
+        assert!(error.contains("code=science_environment_root_identity_failed"));
+        assert_eq!(
+            fs::read(foreign.join("canary")).unwrap(),
+            b"must-not-change\n"
+        );
+        assert!(fs::symlink_metadata(auth_dir.join("conda"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn one_click_snapshot_blocks_protected_restore_after_opaque_root_rebind() {
+        let _env_lock = TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let tmp = isolated_tmpdir("science-owned-environment-restore-rebind");
+        let config_dir = tmp.join("config");
+        let sandbox_home = config_dir.join("sandbox/home");
+        let auth_dir = sandbox_home.join(".claude-science");
+        let foreign = tmp.join("foreign");
+        let config = Config::default();
+        config::save_to(&config_dir, &config).unwrap();
+        fs::create_dir_all(auth_dir.join("conda")).unwrap();
+        fs::create_dir(&foreign).unwrap();
+        fs::write(auth_dir.join("active-org.json"), b"prior\n").unwrap();
+        fs::write(foreign.join("canary"), b"must-not-change\n").unwrap();
+        let state: SharedAppState = Arc::new(Mutex::new(AppState::default()));
+
+        let mut snapshot = OneClickAuthoritySnapshot::capture(
+            &config_dir,
+            &sandbox_home,
+            &auth_dir,
+            &config,
+            &state,
+        )
+        .expect("safe top-level opaque directory must allow capture");
+        fs::rename(auth_dir.join("conda"), auth_dir.join("conda-displaced")).unwrap();
+        symlink(&foreign, auth_dir.join("conda")).unwrap();
+        fs::write(auth_dir.join("active-org.json"), b"candidate\n").unwrap();
+
+        let error = snapshot
+            .restore(&config_dir, &state, ProxyAction::Reused)
+            .expect_err("opaque-root rebind must block protected Science restore");
+        assert!(error.contains("code=science_environment_root_identity_failed"));
+        assert_eq!(
+            fs::read(auth_dir.join("active-org.json")).unwrap(),
+            b"candidate\n",
+            "protected authority must not be restored after the root contract changes"
+        );
+        assert_eq!(
+            fs::read(foreign.join("canary")).unwrap(),
+            b"must-not-change\n"
+        );
+        drop(snapshot);
+        let _ = fs::remove_dir_all(&tmp);
+
+        let race_tmp = isolated_tmpdir("science-owned-environment-capture-rebind");
+        let race_config_dir = race_tmp.join("config");
+        let race_sandbox_home = race_config_dir.join("sandbox/home");
+        let race_auth_dir = race_sandbox_home.join(".claude-science");
+        let race_orgs = race_auth_dir.join("orgs");
+        let displaced_auth = race_tmp.join("displaced-auth");
+        let replacement_auth = race_tmp.join("replacement-auth");
+        let barrier = race_tmp.join("barrier");
+        let race_config = Config::default();
+        config::save_to(&race_config_dir, &race_config).unwrap();
+        fs::create_dir_all(race_orgs.join("org-test")).unwrap();
+        fs::write(race_orgs.join("org-test/history.db"), b"captured-prior\n").unwrap();
+        let race_state: SharedAppState = Arc::new(Mutex::new(AppState::default()));
+        let _barrier =
+            test_arm_authority_snapshot_directory_barrier(race_orgs.clone(), barrier.clone());
+        let worker_config_dir = race_config_dir.clone();
+        let worker_sandbox_home = race_sandbox_home.clone();
+        let worker_auth_dir = race_auth_dir.clone();
+        let worker_state = race_state.clone();
+        let worker = thread::spawn(move || {
+            OneClickAuthoritySnapshot::capture(
+                &worker_config_dir,
+                &worker_sandbox_home,
+                &worker_auth_dir,
+                &race_config,
+                &worker_state,
+            )
+        });
+        for _ in 0..200 {
+            if barrier.join("ready").is_file() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(barrier.join("ready").is_file());
+        fs::rename(&race_auth_dir, &displaced_auth).unwrap();
+        fs::create_dir_all(replacement_auth.join("orgs/org-test")).unwrap();
+        fs::write(
+            replacement_auth.join("orgs/org-test/replacement-canary"),
+            b"replacement-must-not-be-read-or-changed\n",
+        )
+        .unwrap();
+        fs::rename(&replacement_auth, &race_auth_dir).unwrap();
+        fs::write(barrier.join("release"), b"release\n").unwrap();
+        let capture_error = worker
+            .join()
+            .unwrap()
+            .err()
+            .expect("root rebind during capture must fail closed");
+        assert!(
+            capture_error.contains("code=science_authority_root_rebound")
+                || capture_error.contains("code=authority_snapshot_source_parent_rebound"),
+            "unexpected capture rebind refusal: {capture_error}"
+        );
+        assert_eq!(
+            fs::read(race_auth_dir.join("orgs/org-test/replacement-canary")).unwrap(),
+            b"replacement-must-not-be-read-or-changed\n"
+        );
+        let _ = fs::remove_dir_all(&race_tmp);
+    }
+
+    #[test]
     fn fresh_authority_snapshot_parent_refuses_symlink_without_touching_target() {
-        let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _env_lock = TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let tmp = isolated_tmpdir("fresh-authority-parent-symlink");
         let config_dir = tmp.join("config");
         let sandbox_home = config_dir.join("sandbox/home");
@@ -6158,7 +7427,9 @@ mod transaction_tests {
 
     #[test]
     fn fresh_authority_snapshot_parent_rebind_fails_before_mutating_replacement() {
-        let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _env_lock = TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let tmp = isolated_tmpdir("fresh-authority-parent-rebind");
         let config_dir = tmp.join("config");
         let sandbox_home = config_dir.join("sandbox/home");
@@ -6226,24 +7497,25 @@ mod transaction_tests {
 
     #[test]
     fn one_shot_commit_cleanup_fault_is_retried_before_success() {
-        let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _env_lock = TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let tmp = isolated_tmpdir("commit-cleanup-once");
         let config_dir = tmp.join("config");
         let sandbox_home = config_dir.join("sandbox/home");
         let auth_dir = sandbox_home.join(".claude-science");
         let cleanup_log = tmp.join("cleanup.log");
         fs::create_dir_all(&auth_dir).unwrap();
-        fs::write(auth_dir.join("auth.json"), b"private-authority\n").unwrap();
+        fs::write(auth_dir.join("active-org.json"), b"private-authority\n").unwrap();
         fs::set_permissions(
-            auth_dir.join("auth.json"),
+            auth_dir.join("active-org.json"),
             fs::Permissions::from_mode(0o600),
         )
         .unwrap();
         let config = Config::default();
         let state: SharedAppState = Arc::new(Mutex::new(AppState::default()));
         {
-            let _sync_seam =
-                test_arm_authority_snapshot_completion_sync_failure();
+            let _sync_seam = test_arm_authority_snapshot_completion_sync_failure();
             let error = OneClickAuthoritySnapshot::capture(
                 &config_dir,
                 &sandbox_home,
@@ -6258,17 +7530,15 @@ mod transaction_tests {
                 "unexpected completion-sync failure: {error}"
             );
         }
-        let rollback_residue = fs::read_dir(
-            sandbox_home.parent().unwrap(),
-        )
-        .unwrap()
-        .filter_map(Result::ok)
-        .any(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".one-click-rollback-")
-        });
+        let rollback_residue = fs::read_dir(sandbox_home.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".one-click-rollback-")
+            });
         assert!(
             !rollback_residue,
             "completion fsync failure must register and finish rollback cleanup"
@@ -6282,50 +7552,34 @@ mod transaction_tests {
         )
         .unwrap();
         let cleanup_sync_root = cleanup_sync_snapshot.backup_root.clone();
-        let cleanup_sync_tombstone = cleanup_tombstone_path(
-            &PendingCleanupEntry {
-                managed_id: cleanup_sync_root
-                    .file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned(),
-                path: cleanup_sync_root.clone(),
-                device: 0,
-                inode: 0,
-                marker: String::new(),
-            },
-        );
+        let cleanup_sync_tombstone = cleanup_tombstone_path(&PendingCleanupEntry {
+            managed_id: cleanup_sync_root
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            path: cleanup_sync_root.clone(),
+            device: 0,
+            inode: 0,
+            marker: String::new(),
+        });
         {
-            let _cleanup_sync_seam =
-                test_arm_authority_cleanup_parent_sync_failure();
+            let _cleanup_sync_seam = test_arm_authority_cleanup_parent_sync_failure();
             let error = cleanup_sync_snapshot
                 .cleanup_when_expendable()
                 .expect_err("cleanup parent fsync failure must remain pending");
             assert!(error.contains("recovery_status=cleanup_required"));
-            let manifest = config::read_pending_authority_cleanup_manifest(
-                &config_dir,
-            )
+            let manifest = config::read_pending_authority_cleanup_manifest(&config_dir)
+                .unwrap()
+                .unwrap();
+            let manifest: serde_json::Value = serde_json::from_slice(&manifest).unwrap();
+            assert_eq!(manifest["entries"].as_array().map(Vec::len), Some(1));
+            assert!(cleanup_sync_tombstone.is_dir());
+        }
+        fs::remove_file(cleanup_sync_tombstone.join(PENDING_CLEANUP_MARKER_FILE)).unwrap();
+        let pending_raw = config::read_pending_authority_cleanup_manifest(&config_dir)
             .unwrap()
             .unwrap();
-            let manifest: serde_json::Value =
-                serde_json::from_slice(&manifest).unwrap();
-            assert_eq!(
-                manifest["entries"].as_array().map(Vec::len),
-                Some(1)
-            );
-            assert!(
-                cleanup_sync_tombstone.is_dir()
-            );
-        }
-        fs::remove_file(
-            cleanup_sync_tombstone.join(PENDING_CLEANUP_MARKER_FILE),
-        )
-        .unwrap();
-        let pending_raw = config::read_pending_authority_cleanup_manifest(
-            &config_dir,
-        )
-        .unwrap()
-        .unwrap();
         let pending = parse_pending_cleanup_manifest(&pending_raw).unwrap();
         let retry_ticket = RegisteredAuthorityCleanup {
             manifest_raw: pending_raw,
@@ -6336,11 +7590,9 @@ mod transaction_tests {
             &retry_ticket,
         )
         .unwrap();
-        let cleared = config::read_pending_authority_cleanup_manifest(
-            &config_dir,
-        )
-        .unwrap()
-        .unwrap();
+        let cleared = config::read_pending_authority_cleanup_manifest(&config_dir)
+            .unwrap()
+            .unwrap();
         let cleared: serde_json::Value = serde_json::from_slice(&cleared).unwrap();
         assert_eq!(cleared["entries"].as_array().map(Vec::len), Some(0));
         cleanup_sync_snapshot.cleanup_prepared = true;
@@ -6361,9 +7613,15 @@ mod transaction_tests {
         fs::set_permissions(&rebound_root, fs::Permissions::from_mode(0o700)).unwrap();
         let rebound_error = rebound_cleanup_snapshot
             .cleanup_when_expendable()
-            .expect_err("cleanup registration must reject a replacement root");
-        assert!(rebound_error.contains("cleanup_register_failed"));
-        assert!(rebound_root.is_dir(), "replacement root must not be deleted");
+            .expect_err("registered cleanup ticket must reject a replacement root");
+        assert!(
+            rebound_error.contains("cleanup_manifest_identity_mismatch"),
+            "unexpected registered-ticket identity refusal: {rebound_error}"
+        );
+        assert!(
+            rebound_root.is_dir(),
+            "replacement root must not be deleted"
+        );
         assert!(
             displaced_root.is_dir(),
             "original rollback root must remain recoverable"
@@ -6372,28 +7630,24 @@ mod transaction_tests {
             !rebound_root.join(PENDING_CLEANUP_MARKER_FILE).exists(),
             "replacement root must not receive a cleanup marker"
         );
-        let rebound_manifest = config::read_pending_authority_cleanup_manifest(
-            &config_dir,
-        )
-        .unwrap()
-        .unwrap();
+        let rebound_manifest = config::read_pending_authority_cleanup_manifest(&config_dir)
+            .unwrap()
+            .unwrap();
         let rebound_manifest: serde_json::Value =
             serde_json::from_slice(&rebound_manifest).unwrap();
         assert_eq!(
             rebound_manifest["entries"].as_array().map(Vec::len),
-            Some(0),
-            "replacement root must not be blessed into the cleanup manifest"
+            Some(1),
+            "the exact pre-mutation cleanup ticket must remain registered"
         );
-        rebound_cleanup_snapshot.cleanup_prepared = true;
-        drop(rebound_cleanup_snapshot);
         fs::remove_dir(&rebound_root).unwrap();
-        fs::remove_dir_all(&displaced_root).unwrap();
+        fs::rename(&displaced_root, &rebound_root).unwrap();
+        rebound_cleanup_snapshot
+            .cleanup_when_expendable()
+            .expect("restored exact root identity must consume the registered ticket");
 
-        let _seam = test_arm_authority_snapshot_cleanup_fault(
-            tmp.clone(),
-            "once",
-            cleanup_log.clone(),
-        );
+        let _seam =
+            test_arm_authority_snapshot_cleanup_fault(tmp.clone(), "once", cleanup_log.clone());
         let mut snapshot = OneClickAuthoritySnapshot::capture(
             &config_dir,
             &sandbox_home,
@@ -6514,16 +7768,18 @@ mod transaction_tests {
 
     #[test]
     fn partial_capture_cleanup_failure_returns_tracked_degraded_recovery() {
-        let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _env_lock = TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let tmp = isolated_tmpdir("partial-capture-cleanup");
         let config_dir = tmp.join("config");
         let sandbox_home = config_dir.join("sandbox/home");
         let auth_dir = sandbox_home.join(".claude-science");
         let cleanup_log = tmp.join("cleanup.log");
         fs::create_dir_all(&auth_dir).unwrap();
-        fs::write(auth_dir.join("auth.json"), b"private-authority\n").unwrap();
+        fs::write(auth_dir.join("active-org.json"), b"private-authority\n").unwrap();
         fs::set_permissions(
-            auth_dir.join("auth.json"),
+            auth_dir.join("active-org.json"),
             fs::Permissions::from_mode(0o600),
         )
         .unwrap();
@@ -6576,8 +7832,14 @@ mod transaction_tests {
 
     #[test]
     fn rollback_refusal_restores_independent_authorities_and_preserves_recovery_snapshot() {
+        let _env_lock = TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut env = ScopedEnv::new();
         let tmp = isolated_tmpdir("rollback-refusal");
-        let config_dir = tmp.join("config");
+        let home = tmp.join("home");
+        env.set("HOME", &home);
+        let config_dir = config::default_dir();
         let sandbox_home = config_dir.join("sandbox/home");
         let auth_dir = sandbox_home.join(".claude-science");
         let private_state = sandbox_home.parent().unwrap().join("state");
@@ -6586,12 +7848,13 @@ mod transaction_tests {
         fs::create_dir_all(&auth_dir).unwrap();
         fs::create_dir_all(&private_state).unwrap();
         fs::create_dir_all(&runtime_dir).unwrap();
-        fs::write(auth_dir.join("auth.json"), b"prior-auth\n").unwrap();
+        fs::set_permissions(&auth_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(auth_dir.join("active-org.json"), b"prior-auth\n").unwrap();
         fs::write(private_state.join("private.json"), b"prior-private\n").unwrap();
         fs::write(runtime_dir.join("bridge.key"), b"prior-runtime\n").unwrap();
         fs::write(&receipt, b"prior-receipt\n").unwrap();
         for path in [
-            auth_dir.join("auth.json"),
+            auth_dir.join("active-org.json"),
             private_state.join("private.json"),
             runtime_dir.join("bridge.key"),
             receipt.clone(),
@@ -6646,7 +7909,10 @@ mod transaction_tests {
         let error = snapshot
             .restore(&config_dir, &state, ProxyAction::Reused)
             .unwrap_err();
-        let refused_without_following = error.contains("code=authority_restore_root_symlink")
+        let refused_without_following = (error
+            .contains("code=science_authority_restore_root_revalidate_failed")
+            || error.contains("code=science_authority_restore_root_rebound")
+            || error.contains("code=science_authority_root_open_failed"))
             && fs::read(&foreign).unwrap() == b"foreign-must-not-change\n"
             && fs::symlink_metadata(&auth_dir)
                 .unwrap()
@@ -6682,6 +7948,11 @@ mod transaction_tests {
         let recovery_has_no_symlink = tree(&backup_root)
             .values()
             .all(|entry| entry.kind != "symlink");
+        let retry_error = retry_pending_authority_cleanup(&state)
+            .expect_err("an incomplete compensation snapshot must never become cleanup-only");
+        let recovery_survives_retry = retry_error
+            .contains("cleanup_code=authority_snapshot_recovery_required")
+            && backup_root.is_dir();
         assert!(
             refused_without_following
                 && independent_authorities_restored
@@ -6689,8 +7960,9 @@ mod transaction_tests {
                 && app_restored
                 && recovery_root_preserved
                 && immutable_recovery_complete
-                && recovery_has_no_symlink,
-            "rollback refusal must aggregate safely: error={error}; independent={independent_authorities_restored}; config={config_restored}; app={app_restored}; recovery_root={recovery_root_preserved}; recovery_complete={immutable_recovery_complete}; no_symlink={recovery_has_no_symlink}"
+                && recovery_has_no_symlink
+                && recovery_survives_retry,
+            "rollback refusal must aggregate safely: error={error}; independent={independent_authorities_restored}; config={config_restored}; app={app_restored}; recovery_root={recovery_root_preserved}; recovery_complete={immutable_recovery_complete}; no_symlink={recovery_has_no_symlink}; retry={retry_error}"
         );
         let _ = fs::remove_dir_all(tmp);
     }
@@ -6698,7 +7970,9 @@ mod transaction_tests {
     #[test]
     #[ignore = "explicit Acceptance-boundary optional SSH feature-off smoke; temp HOME only"]
     fn reuse_system_ssh_false_does_not_require_packaged_wrapper_or_system_home() {
-        let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _env_lock = TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let mut env = ScopedEnv::new();
         let tmp = isolated_tmpdir("ssh-feature-off");
         let missing_wrapper = tmp.join("missing-wrapper");
@@ -6712,8 +7986,7 @@ mod transaction_tests {
         let app = tauri::test::mock_builder()
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .unwrap();
-        let result =
-            prevalidate_one_click_system_ssh(&app.handle().clone(), &cfg, &sandbox_home);
+        let result = prevalidate_one_click_system_ssh(&app.handle().clone(), &cfg, &sandbox_home);
         assert!(
             result.is_ok(),
             "disabled SSH must not require HOME, system config, host parsing, or packaged wrapper: {result:?}"
@@ -6724,7 +7997,9 @@ mod transaction_tests {
     #[test]
     #[ignore = "explicit Acceptance-boundary SSH write-authority prevalidation; temp HOME only"]
     fn enabled_ssh_prevalidation_rejects_unwritable_science_authority() {
-        let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _env_lock = TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let mut env = ScopedEnv::new();
         let tmp = isolated_tmpdir("ssh-unwritable-authority");
         let home = tmp.join("home");
@@ -6732,11 +8007,7 @@ mod transaction_tests {
         let science_data = sandbox_home.join(".claude-science");
         fs::create_dir_all(home.join(".ssh")).unwrap();
         fs::write(home.join(".ssh/config"), b"Host isolated-test-host\n").unwrap();
-        fs::set_permissions(
-            home.join(".ssh/config"),
-            fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
+        fs::set_permissions(home.join(".ssh/config"), fs::Permissions::from_mode(0o600)).unwrap();
         fs::create_dir_all(&science_data).unwrap();
         fs::write(science_data.join("config.toml"), b"quiet_logs = true\n").unwrap();
         fs::set_permissions(
@@ -6760,8 +8031,7 @@ mod transaction_tests {
         let system_before = tree(&home.join(".ssh"));
         let science_before = tree(&science_data);
         let sandbox_stub_before = tree(&sandbox_home.join(".ssh"));
-        let result =
-            prevalidate_one_click_system_ssh(&app.handle().clone(), &cfg, &sandbox_home);
+        let result = prevalidate_one_click_system_ssh(&app.handle().clone(), &cfg, &sandbox_home);
         let system_after = tree(&home.join(".ssh"));
         let science_after = tree(&science_data);
         let sandbox_stub_after = tree(&sandbox_home.join(".ssh"));
@@ -6799,8 +8069,9 @@ mod transaction_tests {
 
     fn serve_models_after(
         delay: Duration,
-        body: &'static str,
+        body: impl Into<String>,
     ) -> (u16, Arc<AtomicUsize>, thread::JoinHandle<()>) {
+        let body = body.into();
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         assert_ne!(port, 8765);
@@ -6839,7 +8110,14 @@ mod transaction_tests {
 
     #[test]
     fn dynamic_catalog_cold_response_uses_one_long_local_request() {
-        let body = r#"{"data":[{"id":"claude-csswitch-codex-gpt-5"}]}"#;
+        let body = r#"{"data":[
+            {"id":"claude-csswitch-codex-gpt-5"},
+            {"id":"claude-opus-5"},
+            {"id":"claude-sonnet-5"},
+            {"id":"claude-opus-4-8"},
+            {"id":"claude-sonnet-4-6"},
+            {"id":"claude-haiku-4-5-20251001"}
+        ]}"#;
         let (port, requests, server) = serve_models_after(Duration::from_millis(600), body);
         let profile = profile_with_policy(ModelPolicy::DynamicCatalog);
 
@@ -6850,13 +8128,86 @@ mod transaction_tests {
 
     #[test]
     fn dynamic_catalog_still_rejects_empty_or_non_codex_aliases() {
-        for body in [r#"{"data":[]}"#, r#"{"data":[{"id":"gpt-5"}]}"#] {
+        for body in [
+            r#"{"data":[]}"#,
+            r#"{"data":[{"id":"gpt-5"}]}"#,
+            r#"{"data":[{"id":"claude-sonnet-5"}]}"#,
+            r#"{"data":[{"id":"claude-csswitch-codex-gpt-5"},{"id":"unknown-alias"}]}"#,
+            r#"{"data":[
+                {"id":"claude-csswitch-codex-gpt-5"},
+                {"id":"claude-opus-5"},
+                {"id":"claude-sonnet-5"},
+                {"id":"claude-opus-4-8"},
+                {"id":"claude-sonnet-4-6"}
+            ]}"#,
+        ] {
             let (port, _requests, server) = serve_models_after(Duration::ZERO, body);
             let profile = profile_with_policy(ModelPolicy::DynamicCatalog);
             let error = verify_gateway_model_catalog(port, "test-secret", &profile).unwrap_err();
             assert!(error.contains("Codex published model snapshot"));
             server.join().unwrap();
         }
+    }
+
+    #[test]
+    fn gateway_catalog_rejects_malformed_or_duplicate_rows_without_filtering_them() {
+        for body in [
+            r#"{"data":[{"id":"claude-csswitch-codex-gpt-5"},{}]}"#,
+            r#"{"data":[{"id":"claude-csswitch-codex-gpt-5"},{"id":7}]}"#,
+            r#"{"data":[{"id":"claude-csswitch-codex-gpt-5"},"ignored-before-flow3"]}"#,
+            r#"{"data":[{"id":"claude-csswitch-codex-gpt-5"},{"id":"claude-csswitch-codex-gpt-5"}]}"#,
+        ] {
+            let (port, _requests, server) = serve_models_after(Duration::ZERO, body);
+            let profile = profile_with_policy(ModelPolicy::DynamicCatalog);
+            let error = verify_gateway_model_catalog(port, "test-secret", &profile).unwrap_err();
+            assert!(
+                error.contains("malformed") || error.contains("duplicate"),
+                "strict catalog parser must reject the exact malformed row: {error}"
+            );
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn saved_catalog_requires_exact_selectors_plus_science_canonical_roles() {
+        let selector = "claude-csswitch-relay-mock-model-0123456789ab";
+        let profile = config::Profile {
+            model_policy: ModelPolicy::SavedCatalog,
+            model_catalog: vec![crate::model_catalog::ModelRoute {
+                selector_id: selector.into(),
+                display_name: "Mock model".into(),
+                upstream_model: "mock-model".into(),
+                supports_tools: Some(true),
+                ..Default::default()
+            }],
+            default_model_route_id: selector.into(),
+            ..Default::default()
+        };
+        let body = r#"{"data":[
+            {"id":"claude-csswitch-relay-mock-model-0123456789ab"},
+            {"id":"claude-opus-5"},
+            {"id":"claude-sonnet-5"},
+            {"id":"claude-opus-4-8"},
+            {"id":"claude-sonnet-4-6"},
+            {"id":"claude-haiku-4-5-20251001"}
+        ]}"#;
+        let (port, _requests, server) = serve_models_after(Duration::ZERO, body);
+        verify_gateway_model_catalog(port, "test-secret", &profile).unwrap();
+        server.join().unwrap();
+
+        let unknown = r#"{"data":[
+            {"id":"claude-csswitch-relay-mock-model-0123456789ab"},
+            {"id":"claude-opus-5"},
+            {"id":"claude-sonnet-5"},
+            {"id":"claude-opus-4-8"},
+            {"id":"claude-sonnet-4-6"},
+            {"id":"claude-haiku-4-5-20251001"},
+            {"id":"claude-csswitch-stale-provider"}
+        ]}"#;
+        let (port, _requests, server) = serve_models_after(Duration::ZERO, unknown);
+        let error = verify_gateway_model_catalog(port, "test-secret", &profile).unwrap_err();
+        assert!(error.contains("白名单/default selector"));
+        server.join().unwrap();
     }
 
     #[test]
@@ -6890,13 +8241,58 @@ mod transaction_tests {
         assert_eq!(first.stage, "start_gateway");
         assert_eq!(first.previous_binding, Some(previous.clone()));
 
-        advance_runtime_transaction(&dir, "new", Some(previous.clone()), "start_science").unwrap();
+        let runtime_id = "a".repeat(64);
+        let environment_stage = format!("{SCIENCE_ENVIRONMENT_PENDING_STAGE_PREFIX}{runtime_id}");
+        advance_runtime_transaction(&dir, "new", Some(previous.clone()), &environment_stage)
+            .unwrap();
         let second = config::load_from(&dir)
             .unwrap()
             .runtime_transaction
             .unwrap();
         assert_eq!(second.transaction_id, first.transaction_id);
-        assert_eq!(second.stage, "start_science");
+        assert_eq!(second.stage, environment_stage);
+        assert_eq!(
+            interrupted_science_environment_runtime_id(&second.stage),
+            Some(runtime_id.as_str())
+        );
+        assert!(interrupted_science_environment_runtime_id(
+            "start_science_environment_pending:not-a-fingerprint"
+        )
+        .is_none());
+        assert!(
+            runtime_transaction_requires_snapshot_preservation("start_science")
+                && runtime_transaction_requires_snapshot_preservation(
+                    "start_science_environment_pending"
+                )
+                && runtime_transaction_requires_snapshot_preservation(&environment_stage)
+                && !runtime_transaction_requires_snapshot_preservation(
+                    "recover_interrupted_gateway"
+                ),
+            "legacy and fingerprinted environment-exposure stages must fail closed"
+        );
+        for listener_state in [
+            "stopped-no-gateway",
+            "running-no-gateway",
+            "stopped-managed-gateway",
+            "running-managed-gateway",
+        ] {
+            let legacy =
+                validate_interrupted_science_transaction_entry(Some("start_science"), None)
+                    .expect_err(
+                        "legacy 0.8.3 start_science must never authorize an automatic spawn",
+                    );
+            assert!(
+                legacy.contains("environment_uncertain")
+                    && legacy.contains("newer_runtime_required")
+                    && legacy.contains("manual_recovery_required"),
+                "legacy oracle {listener_state} must fail closed: {legacy}"
+            );
+        }
+        let authority_stage = format!("{AUTHORITY_SNAPSHOT_ACTIVE_STAGE_PREFIX}{runtime_id}");
+        assert_eq!(
+            interrupted_science_environment_runtime_id(&authority_stage),
+            Some(runtime_id.as_str())
+        );
 
         advance_runtime_transaction(&dir, "newer", Some(previous), "start_gateway").unwrap();
         let retargeted = config::load_from(&dir)
@@ -7087,6 +8483,8 @@ mod transaction_tests {
         let file = syn::parse_file(product_source).expect("product Rust source must parse");
         let one_click = top_level(&file, "one_click_login_with_options")
             .expect("one-click product function must remain module-level");
+        let recovery_restart = top_level(&file, "restart_managed_science_with_budget")
+            .expect("DB recovery restart must remain a module-level bounded helper");
         assert!(
             top_level(&file, "compensate_one_click_failure").is_some(),
             "one-click must expose one release-visible failure compensation helper"
@@ -7116,7 +8514,9 @@ mod transaction_tests {
             {
                 local
             }
-            _ => panic!("authority_snapshot must be followed immediately by let transaction_result"),
+            _ => {
+                panic!("authority_snapshot must be followed immediately by let transaction_result")
+            }
         };
         let mut transaction_locals = TransactionLocalCount::default();
         transaction_locals.visit_item_fn(one_click);
@@ -7163,8 +8563,44 @@ mod transaction_tests {
             );
         }
         assert!(
-            transaction.methods.iter().any(|method| method == "status"),
-            "the single mutation closure must own the shell spawn/nonzero status edge"
+            transaction.methods.iter().any(|method| method == "spawn")
+                && transaction.methods.iter().any(|method| method == "wait")
+                && !transaction.methods.iter().any(|method| method == "status"),
+            "the single mutation closure must own explicit shell spawn/wait and distinguish spawn from wait failure"
+        );
+        assert!(
+            transaction
+                .methods
+                .iter()
+                .filter(|method| *method == "validate_science_restore_root")
+                .count()
+                >= 3,
+            "one-click must revalidate exact Science/opaque-root bindings before protected writes and immediately before spawn"
+        );
+        let mut recovery_restart_flow = FlowFacts::default();
+        recovery_restart_flow.visit_item_fn(recovery_restart);
+        assert!(
+            recovery_restart_flow
+                .methods
+                .iter()
+                .any(|method| method == "spawn")
+                && recovery_restart_flow
+                    .methods
+                    .iter()
+                    .any(|method| method == "try_wait")
+                && recovery_restart_flow
+                    .methods
+                    .iter()
+                    .any(|method| method == "saturating_duration_since")
+                && recovery_restart_flow
+                    .calls
+                    .iter()
+                    .any(|call| call == "http_health")
+                && !recovery_restart_flow
+                    .methods
+                    .iter()
+                    .any(|method| method == "status"),
+            "DB recovery restart must enforce one absolute deadline across explicit shell try_wait and remaining-time-capped health"
         );
         assert!(
             !transaction.methods.iter().any(|method| method == "commit")
@@ -7243,12 +8679,7 @@ mod transaction_tests {
         );
 
         let failure_expression = match peel_expr(&failure.body) {
-            Expr::Block(block)
-                if matches!(
-                    block.block.stmts.as_slice(),
-                    [Stmt::Expr(_, None)]
-                ) =>
-            {
+            Expr::Block(block) if matches!(block.block.stmts.as_slice(), [Stmt::Expr(_, None)]) => {
                 match &block.block.stmts[0] {
                     Stmt::Expr(expression, None) => expression,
                     _ => unreachable!(),
@@ -7418,14 +8849,12 @@ mod transaction_tests {
             let Expr::Closure(closure) = peel_expression(&call.func) else {
                 return None;
             };
-            closure
-                .inputs
-                .is_empty()
-                .then_some(&closure.body)
-                .and_then(|body| match peel_expression(body) {
+            closure.inputs.is_empty().then_some(&closure.body).and_then(
+                |body| match peel_expression(body) {
                     Expr::Block(block) => Some(&block.block),
                     _ => None,
-                })
+                },
+            )
         }
 
         fn direct_call(expression: &Expr) -> Option<&ExprCall> {
@@ -7539,9 +8968,11 @@ mod transaction_tests {
                 .args
                 .iter()
                 .filter_map(|argument| match argument {
-                    GenericArgument::Type(Type::Path(path)) => {
-                        path.path.segments.last().map(|segment| segment.ident.to_string())
-                    }
+                    GenericArgument::Type(Type::Path(path)) => path
+                        .path
+                        .segments
+                        .last()
+                        .map(|segment| segment.ident.to_string()),
                     _ => None,
                 })
                 .collect::<Vec<_>>();
@@ -7598,7 +9029,10 @@ mod transaction_tests {
 
             fn visit_macro(&mut self, invocation: &'ast syn::Macro) {
                 if invocation.path.segments.last().is_some_and(|segment| {
-                    matches!(segment.ident.to_string().as_str(), "panic" | "todo" | "unreachable")
+                    matches!(
+                        segment.ident.to_string().as_str(),
+                        "panic" | "todo" | "unreachable"
+                    )
                 }) || token_stream_contains_any(
                     invocation.tokens.clone(),
                     &["return", "break", "continue"],
@@ -7636,10 +9070,7 @@ mod transaction_tests {
             }
         }
 
-        fn token_stream_contains_any(
-            tokens: proc_macro2::TokenStream,
-            expected: &[&str],
-        ) -> bool {
+        fn token_stream_contains_any(tokens: proc_macro2::TokenStream, expected: &[&str]) -> bool {
             tokens.into_iter().any(|token| match token {
                 proc_macro2::TokenTree::Ident(ident) => {
                     expected.iter().any(|value| ident == *value)
@@ -7900,10 +9331,13 @@ mod transaction_tests {
             product_environment.environment_paths,
             [
                 "std::env::var".to_string(),
+                "std::env::var".to_string(),
+                "std::env::var".to_string(),
+                "std::env::var_os".to_string(),
                 "std::env::var_os".to_string(),
                 "std::env::var_os".to_string(),
             ],
-            "product SSH transaction source may reference only the existing spike seam, exact wrapper override, and exact late-failure seam environment APIs"
+            "product transaction source may reference only the existing spike seam, DB reverify/restart-budget seams, exact wrapper override, host-proof seam, and exact late-failure seam environment APIs"
         );
 
         for (name, function) in [
@@ -7915,9 +9349,13 @@ mod transaction_tests {
             reject_cfg(&function.attrs, name);
         }
 
-        for (name, function) in [("running SSH validator", running)] {
+        {
+            let (name, function) = ("running SSH validator", running);
             let facts = function_facts(function);
-            assert!(!facts.has_cfg, "{name} must not contain cfg-gated call sites");
+            assert!(
+                !facts.has_cfg,
+                "{name} must not contain cfg-gated call sites"
+            );
         }
         let prevalidation_facts = function_facts(prevalidation);
         assert!(
@@ -7943,7 +9381,8 @@ mod transaction_tests {
             );
         }
 
-        for (name, function) in [("running SSH validator", running)] {
+        {
+            let (name, function) = ("running SSH validator", running);
             let shared_call_positions = function
                 .block
                 .stmts
@@ -8099,8 +9538,8 @@ mod transaction_tests {
         one_click_cfg.visit_block(&one_click.block);
         assert_eq!(
             one_click_cfg.0,
-            ["test".to_string()],
-            "one-click may contain only the exact late-failure cfg(test) seam"
+            ["test".to_string(), "test".to_string()],
+            "one-click may contain only the exact host-proof and late-failure cfg(test) seams"
         );
         let late_seam_statements = transaction_body
             .stmts
@@ -8162,7 +9601,9 @@ mod transaction_tests {
             "test wrapper_override must be the sole cfg(test) var_os literal mapped through PathBuf::from"
         );
         assert!(
-            wrapper_locals.iter().any(|local| exact_release_override(local)),
+            wrapper_locals
+                .iter()
+                .any(|local| exact_release_override(local)),
             "release wrapper_override must be exactly cfg(not(test)) Option<PathBuf> = None"
         );
         let mut validator_facts = ValidatorFacts::default();
@@ -8203,9 +9644,7 @@ mod transaction_tests {
         impl Drop for RestoreWrapperOverride {
             fn drop(&mut self) {
                 match self.0.take() {
-                    Some(value) => {
-                        std::env::set_var("CSSWITCH_TEST_SSH_WRAPPER_OVERRIDE", value)
-                    }
+                    Some(value) => std::env::set_var("CSSWITCH_TEST_SSH_WRAPPER_OVERRIDE", value),
                     None => std::env::remove_var("CSSWITCH_TEST_SSH_WRAPPER_OVERRIDE"),
                 }
             }
@@ -8251,30 +9690,18 @@ mod transaction_tests {
         );
         let wrapper_directory = root.join("ssh-directory");
         std::fs::create_dir(&wrapper_directory).unwrap();
-        std::fs::set_permissions(
-            &wrapper_directory,
-            std::fs::Permissions::from_mode(0o700),
-        )
-        .unwrap();
-        std::env::set_var(
-            "CSSWITCH_TEST_SSH_WRAPPER_OVERRIDE",
-            &wrapper_directory,
-        );
+        std::fs::set_permissions(&wrapper_directory, std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        std::env::set_var("CSSWITCH_TEST_SSH_WRAPPER_OVERRIDE", &wrapper_directory);
         assert_eq!(
             super::validate_system_ssh_wrapper_path(app.handle()).unwrap_err(),
             "打包的 CSSwitch SSH bridge 不是安全的可执行文件"
         );
         let oversized_wrapper = root.join("ssh-oversized");
         std::fs::write(&oversized_wrapper, vec![b'x'; 128 * 1024 + 1]).unwrap();
-        std::fs::set_permissions(
-            &oversized_wrapper,
-            std::fs::Permissions::from_mode(0o700),
-        )
-        .unwrap();
-        std::env::set_var(
-            "CSSWITCH_TEST_SSH_WRAPPER_OVERRIDE",
-            &oversized_wrapper,
-        );
+        std::fs::set_permissions(&oversized_wrapper, std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        std::env::set_var("CSSWITCH_TEST_SSH_WRAPPER_OVERRIDE", &oversized_wrapper);
         assert_eq!(
             super::validate_system_ssh_wrapper_path(app.handle()).unwrap_err(),
             "打包的 CSSwitch SSH bridge 不是安全的可执行文件"

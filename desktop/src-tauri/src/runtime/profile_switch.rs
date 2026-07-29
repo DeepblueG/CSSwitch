@@ -66,6 +66,7 @@ pub(crate) fn scratch_validate_candidate(
     nonactive_probe_verdict(&outcome)
 }
 
+#[allow(dead_code)]
 fn apply_candidate_transaction(
     current: &mut config::Config,
     candidate: &config::Profile,
@@ -89,6 +90,7 @@ fn apply_candidate_transaction(
     });
 }
 
+#[allow(dead_code)]
 fn current_gateway_journal_identity(
     state: &SharedAppState,
     cfg: &config::Config,
@@ -133,6 +135,7 @@ fn current_gateway_journal_identity(
 /// committed profile instead of leaving old config paired with a new gateway.
 ///
 /// Callers must hold the command serializer lock.
+#[allow(dead_code)]
 pub(crate) fn set_active_profile_txn<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     state: &SharedAppState,
@@ -355,6 +358,7 @@ pub(crate) fn set_active_profile_txn<R: tauri::Runtime>(
             auth_proof,
         ) {
             let prior_science_restored = error.prior_science_restored();
+            let environment_uncertain = error.environment_uncertain();
             let error_message = error.cause().to_string();
             trace.stage(OperationStage::Rollback, "reason=science_reconcile_failed");
             let config_restored = config::save_to(&dir, &cfg).is_ok();
@@ -370,26 +374,29 @@ pub(crate) fn set_active_profile_txn<R: tauri::Runtime>(
                 );
             let recovered_prior_is_healthy = config_restored
                 && proxy_restored
-                && prior_science_restored
-                && science_runtime_before.as_ref().is_some_and(|prior_runtime| {
-                    let current_runtime = { lock(state).science_runtime.clone() };
-                    current_runtime.as_ref() == Some(prior_runtime)
-                        && crate::runtime::science::probe_known_runtime(
-                            cfg.sandbox_port,
-                            prior_runtime,
-                        ) == crate::runtime::science::SandboxScienceState::RunningHealthy
-                        && crate::runtime::science::managed_launch_token_for_runtime(
-                            cfg.sandbox_port,
-                            prior_runtime,
-                        )
-                        .is_some()
-                });
+                && (prior_science_restored || environment_uncertain)
+                && science_runtime_before
+                    .as_ref()
+                    .is_some_and(|prior_runtime| {
+                        let current_runtime = { lock(state).science_runtime.clone() };
+                        current_runtime.as_ref() == Some(prior_runtime)
+                            && crate::runtime::science::probe_known_runtime(
+                                cfg.sandbox_port,
+                                prior_runtime,
+                            ) == crate::runtime::science::SandboxScienceState::RunningHealthy
+                            && crate::runtime::science::managed_launch_token_for_runtime(
+                                cfg.sandbox_port,
+                                prior_runtime,
+                            )
+                            .is_some()
+                    });
             // A typed pre-mutation or complete-compensation outcome proves the
             // exact prior Science was already restored. Revalidate its runtime,
             // managed receipt, and health before reusing it. Other failures may
             // have loaded the candidate catalog, so retain the forced restart.
             let science_restored = recovered_prior_is_healthy
-                || (config_restored
+                || (!environment_uncertain
+                    && config_restored
                     && crate::runtime::sandbox_session::force_restart_science_for_active(
                         app.clone(),
                         state.clone(),
@@ -405,7 +412,7 @@ pub(crate) fn set_active_profile_txn<R: tauri::Runtime>(
                 OperationStage::Rollback,
                 format!("old_proxy_direct_restore={proxy_restored}"),
             );
-            let restored = config_restored && science_restored;
+            let restored = config_restored && science_restored && !environment_uncertain;
             let recovery_status = if restored { "restored" } else { "degraded" };
             trace.finish(format!(
                 "error=science_reconcile_failed recovery_status={recovery_status}"
@@ -415,6 +422,7 @@ pub(crate) fn set_active_profile_txn<R: tauri::Runtime>(
                 "stage": "science_start",
                 "status": "error",
                 "recovery_status": recovery_status,
+                "environment_status": if environment_uncertain { "uncertain" } else { "not_exposed" },
                 "message": format!("新模型目录未能加载到 Science：{error_message}"),
                 "fallback_url": null,
             }));
@@ -466,6 +474,7 @@ pub(crate) fn set_active_profile_txn<R: tauri::Runtime>(
     }))
 }
 
+#[allow(dead_code)]
 fn restore_proxy_for_active<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     state: &SharedAppState,

@@ -113,23 +113,32 @@ fn read_exact_v2_managed_stub(
 }
 
 impl ManagedSshStubTransaction {
-    pub(crate) fn capture(
-        sandbox_home: &Path,
-        expected_hosts: &[String],
-    ) -> Result<Self, String> {
+    pub(crate) fn capture(sandbox_home: &Path, expected_hosts: &[String]) -> Result<Self, String> {
         let expected_system_config = system_ssh_config_path()?;
-        let before =
-            match read_exact_v2_managed_stub(sandbox_home, &expected_system_config, expected_hosts)?
-            {
-                Some(snapshot) => ManagedSshStubBefore::Present(snapshot),
-                None => ManagedSshStubBefore::Absent,
-            };
+        let before = match read_exact_v2_managed_stub(
+            sandbox_home,
+            &expected_system_config,
+            expected_hosts,
+        )? {
+            Some(snapshot) => ManagedSshStubBefore::Present(snapshot),
+            None => ManagedSshStubBefore::Absent,
+        };
         Ok(Self {
             before,
             candidate: None,
             expected_system_config,
             expected_hosts: expected_hosts.to_vec(),
         })
+    }
+
+    pub(crate) fn validate_prepared_hosts(&self, prepared_hosts: &[String]) -> Result<(), String> {
+        if self.expected_hosts != prepared_hosts {
+            return Err(
+                "系统 SSH Host authority 在预检后发生变化；请重试（code=ssh_authority_changed_retry）"
+                    .into(),
+            );
+        }
+        Ok(())
     }
 
     pub(crate) fn observe_after_launch(&mut self, sandbox_home: &Path) {
@@ -161,9 +170,7 @@ impl ManagedSshStubTransaction {
                     || current.inode != candidate.inode
                     || current.bytes != candidate.bytes
                 {
-                    return Err(
-                        "隔离 SSH config 已不是本次事务创建的精确文件，拒绝删除".into(),
-                    );
+                    return Err("隔离 SSH config 已不是本次事务创建的精确文件，拒绝删除".into());
                 }
                 std::fs::remove_file(sandbox_home.join(".ssh/config"))
                     .map_err(|error| format!("撤销本次事务创建的隔离 SSH config 失败：{error}"))?;
@@ -438,8 +445,8 @@ mod tests {
 
     use super::{
         remove_managed_sandbox_ssh_stub_for_config, system_ssh_config_path_for_home,
-        validate_managed_sandbox_ssh_stub_for_config, validate_runtime_ports, SSH_STUB_MARKER,
-        SSH_STUB_MARKER_V2,
+        validate_managed_sandbox_ssh_stub_for_config, validate_runtime_ports, ManagedSshStubBefore,
+        ManagedSshStubTransaction, SSH_STUB_MARKER, SSH_STUB_MARKER_V2,
     };
 
     #[test]
@@ -559,6 +566,47 @@ mod tests {
             &expected
         )
         .is_err());
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn ssh_stub_transaction_rejects_host_proof_drift_before_launch() {
+        let home = std::env::temp_dir().join(format!(
+            "csswitch-system-ssh-transaction-drift-test-{}",
+            crate::config::new_id()
+        ));
+        let ssh_dir = home.join(".ssh");
+        std::fs::create_dir_all(&ssh_dir).unwrap();
+        std::fs::set_permissions(&ssh_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let expected_system_config = home.join("real-home/.ssh/config");
+        let config = ssh_dir.join("config");
+        std::fs::write(
+            &config,
+            format!(
+                "{SSH_STUB_MARKER_V2}\nHost beta\nInclude \"{}\"\n",
+                expected_system_config.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let transaction = ManagedSshStubTransaction {
+            before: ManagedSshStubBefore::Absent,
+            candidate: None,
+            expected_system_config,
+            expected_hosts: vec!["alpha".to_string()],
+        };
+
+        assert!(
+            transaction
+                .validate_prepared_hosts(&["beta".to_string()])
+                .is_err(),
+            "a beta host proof must be rejected before an alpha transaction launches"
+        );
+        assert!(transaction
+            .validate_prepared_hosts(&["alpha".to_string()])
+            .is_ok());
+        assert!(config.is_file(), "the proof check must not mutate the stub");
         let _ = std::fs::remove_dir_all(home);
     }
 

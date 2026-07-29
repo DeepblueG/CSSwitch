@@ -512,8 +512,7 @@ pub(crate) fn prevalidate_science_ssh_bridge(
     if let Some(state) = &prior {
         if !current_matches_owned_state(current.as_deref(), state) {
             return Err(
-                "隔离 Science ssh_hosts 在授权期间被外部修改；已保持原样，请先人工确认冲突"
-                    .into(),
+                "隔离 Science ssh_hosts 在授权期间被外部修改；已保持原样，请先人工确认冲突".into(),
             );
         }
     }

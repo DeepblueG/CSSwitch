@@ -102,6 +102,14 @@ fn recover_interrupted_gateway_from_dir<R: Runtime>(
                 .into(),
         );
     }
+    if crate::runtime::sandbox_session::runtime_transaction_requires_snapshot_preservation(
+        &journal.stage,
+    ) {
+        return Err(
+            "检测到中断的 Science authority/environment 事务；已保留 Gateway、事务 journal 与恢复快照，拒绝自动探测、停止或改写其身份；recovery_status=manual_recovery_required"
+                .into(),
+        );
+    }
     {
         let st = lock(state);
         if st.proxy.is_some()
@@ -162,7 +170,11 @@ fn recover_interrupted_gateway_from_dir<R: Runtime>(
     let binary = gateway_bin_path(app).ok_or("未找到本次应用打包的 Gateway，无法安全恢复事务")?;
     config::update(dir, |current| {
         if let Some(current_journal) = current.runtime_transaction.as_mut() {
-            if current_journal.transaction_id == journal.transaction_id {
+            if current_journal.transaction_id == journal.transaction_id
+                && !crate::runtime::sandbox_session::runtime_transaction_requires_snapshot_preservation(
+                    &current_journal.stage,
+                )
+            {
                 current_journal.stage = "recover_interrupted_gateway".into();
             }
         }
@@ -890,12 +902,7 @@ pub(crate) fn start_proxy_for<R: Runtime>(
         }
         #[cfg(test)]
         if let Some(path) = std::env::var_os("CSSWITCH_TEST_GATEWAY_PUBLISH_LOG") {
-            if let Ok(mut log) = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .append(true)
-                .open(path)
-            {
+            if let Ok(mut log) = OpenOptions::new().create(true).append(true).open(path) {
                 let _ = writeln!(
                     log,
                     "{} {} {} {} {}",
@@ -1068,6 +1075,30 @@ mod tests {
         assert_eq!(
             crate::config::load_from(&dir).unwrap().runtime_transaction,
             Some(journal)
+        );
+        assert_eq!(listener.accept().unwrap_err().kind(), ErrorKind::WouldBlock);
+
+        let mut legacy_cfg = crate::config::load_from(&dir).unwrap();
+        let legacy_journal = crate::config::RuntimeTransactionJournal {
+            transaction_id: "tx-legacy-science".into(),
+            target_profile_id: legacy_cfg.active_id.clone(),
+            stage: "start_science".into(),
+            previous_binding: None,
+            previous_gateway: None,
+        };
+        legacy_cfg.runtime_transaction = Some(legacy_journal.clone());
+        crate::config::save_to(&dir, &legacy_cfg).unwrap();
+        let legacy_before = fs::read(dir.join("config.json")).unwrap();
+        let legacy_error =
+            recover_interrupted_gateway_from_dir(app.handle(), &state, &dir).unwrap_err();
+        assert!(
+            legacy_error.contains("manual_recovery_required"),
+            "legacy Science exposure must fail before listener probing: {legacy_error}"
+        );
+        assert_eq!(fs::read(dir.join("config.json")).unwrap(), legacy_before);
+        assert_eq!(
+            crate::config::load_from(&dir).unwrap().runtime_transaction,
+            Some(legacy_journal)
         );
         assert_eq!(listener.accept().unwrap_err().kind(), ErrorKind::WouldBlock);
 

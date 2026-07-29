@@ -409,14 +409,12 @@ impl OneClickGatewayPreflightSnapshot {
         if child
             .try_wait()
             .map_err(|_| {
-                "gateway_identity_retry：无法确认先前 Gateway child 状态，请重试。"
-                    .to_string()
+                "gateway_identity_retry：无法确认先前 Gateway child 状态，请重试。".to_string()
             })?
             .is_some()
         {
             return Err(
-                "gateway_identity_retry：先前 Gateway child 已退出，请先恢复运行态后重试。"
-                    .into(),
+                "gateway_identity_retry：先前 Gateway child 已退出，请先恢复运行态后重试。".into(),
             );
         }
         let child_pid = child.id();
@@ -446,8 +444,7 @@ impl OneClickGatewayPreflightSnapshot {
             Some(child) if child.id() == self.child_pid => child
                 .try_wait()
                 .map_err(|_| {
-                    "gateway_identity_retry：无法复核先前 Gateway child 状态，请重试。"
-                        .to_string()
+                    "gateway_identity_retry：无法复核先前 Gateway child 状态，请重试。".to_string()
                 })?
                 .is_none(),
             _ => false,
@@ -490,10 +487,7 @@ impl OneClickCandidateConfigSnapshot {
         if current == self.config {
             Ok(())
         } else {
-            Err(
-                "config_changed_retry：候选启动配置在认证检查期间发生变化，请重试。"
-                    .into(),
-            )
+            Err("config_changed_retry：候选启动配置在认证检查期间发生变化，请重试。".into())
         }
     }
 }
@@ -599,7 +593,7 @@ pub(crate) async fn restore_history_choice(
             let active_profile_id = cfg
                 .active_profile()
                 .map(|profile| profile.id.clone())
-                .ok_or("当前生效配置已变化，本次历史恢复选择已作废")?;
+                .ok_or("当前选择已变化，本次历史恢复选择已作废")?;
             let (auth_dir, sandbox_root, candidate, expected_port) = {
                 let app_state = lock(&state);
                 let session = app_state
@@ -693,17 +687,23 @@ pub(crate) async fn restore_history_choice(
 }
 
 fn one_click_failure_value(message: String) -> serde_json::Value {
-    let recovery_status = config::load_from(&config::default_dir())
-        .ok()
-        .and_then(|cfg| cfg.runtime_transaction)
-        .map(|_| "degraded")
-        .unwrap_or("not_needed");
+    let environment_uncertain = message.contains("environment_uncertain");
+    let recovery_status = if environment_uncertain {
+        "environment_uncertain"
+    } else {
+        config::load_from(&config::default_dir())
+            .ok()
+            .and_then(|cfg| cfg.runtime_transaction)
+            .map(|_| "degraded")
+            .unwrap_or("not_needed")
+    };
     let stage = science_failure_stage(&message);
     json!({
         "action": "failed",
         "stage": stage,
         "status": "error",
         "recovery_status": recovery_status,
+        "environment_status": if environment_uncertain { "uncertain" } else { "not_exposed" },
         "message": message,
         "fallback_url": null,
     })
@@ -719,7 +719,11 @@ fn science_failure_stage(message: &str) -> &'static str {
         "catalog_verify"
     } else if message.contains("代理") || message.contains("gateway") {
         "gateway_start"
-    } else if message.contains("沙箱") || message.contains("Science") {
+    } else if message.contains("沙箱")
+        || message.contains("Science")
+        || message.contains("science_api_")
+        || message.contains("science_db_")
+    {
         "science_start"
     } else {
         "prepare"
@@ -1002,7 +1006,7 @@ mod tests {
             Arc, Mutex,
         },
         thread,
-        time::{Instant, SystemTime, UNIX_EPOCH},
+        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
     use tauri::{Listener, Manager};
 
@@ -1074,6 +1078,14 @@ mod tests {
             "catalog_verify"
         );
         assert_eq!(science_failure_stage("沙箱起后超时"), "science_start");
+        assert_eq!(
+            science_failure_stage("science_api_health_status_401"),
+            "science_start"
+        );
+        assert_eq!(
+            science_failure_stage("science_db_reverify_timeout"),
+            "science_start"
+        );
         assert_eq!(science_failure_stage("配置不可用"), "prepare");
     }
 
@@ -1144,10 +1156,7 @@ mod tests {
                 continue;
             }
             let preview_port = sandbox_port + 1;
-            if preview_port == 8765
-                || proxy_port == sandbox_port
-                || proxy_port == preview_port
-            {
+            if preview_port == 8765 || proxy_port == sandbox_port || proxy_port == preview_port {
                 continue;
             }
             return (proxy_port, sandbox_port);
@@ -1222,19 +1231,133 @@ case "$cmd" in
       fi
       exit 23
     fi
+    if [ "$count" -eq 2 ] && [ -n "${CSSWITCH_FAKE_SCIENCE_SECOND_BOOT_BLOCKS:-}" ]; then
+      trap '' HUP
+      printf '%s\n' "mutated-by-blocked-second-candidate" > "$CSSWITCH_FAKE_SCIENCE_UNBOUND_MUTATION"
+      printf '%s' "$$" > "$CSSWITCH_FAKE_SCIENCE_UNBOUND_PID"
+      while :; do sleep 60; done
+    fi
+    if [ "$count" -eq 2 ] && [ -n "${CSSWITCH_FAKE_SCIENCE_SECOND_BOOT_NO_LISTENER:-}" ]; then
+      python3 - "$CSSWITCH_FAKE_SCIENCE_UNBOUND_PID" "$CSSWITCH_FAKE_SCIENCE_UNBOUND_MUTATION" >/dev/null 2>&1 <<'PY' &
+import os
+import sys
+import time
+pidfile = sys.argv[1]
+mutation = sys.argv[2]
+with open(mutation, "w", encoding="utf-8") as f:
+    f.write("mutated-by-unbound-second-candidate\n")
+with open(pidfile, "w", encoding="utf-8") as f:
+    f.write(str(os.getpid()))
+while True:
+    time.sleep(60)
+PY
+      for _ in 1 2 3 4 5 6 7 8 9 10; do
+        [ -s "$CSSWITCH_FAKE_SCIENCE_UNBOUND_PID" ] && break
+        sleep 0.02
+      done
+      exit 0
+    fi
     printf '%s' "$port" > "$state/port"
-    python3 - "$port" "$state/pid" >/dev/null 2>&1 <<'PY' &
+    python3 - "$port" "$state/pid" "$data_dir" "$count" >/dev/null 2>&1 <<'PY' &
 import http.server
 import os
 import socketserver
 import sys
+import time
+import urllib.parse
 port = int(sys.argv[1])
 pidfile = sys.argv[2]
+data_dir = sys.argv[3]
+generation = sys.argv[4]
+origin = f"http://127.0.0.1:{port}"
+auth_cookie = generation.zfill(64)
+db_health = os.environ.get("CSSWITCH_FAKE_SCIENCE_DB_HEALTH", "clear")
+verdict = os.path.join(data_dir, "fake-db-damage-verdict")
+boot_skipped = db_health == "stateful" and os.path.exists(verdict)
 class Handler(http.server.BaseHTTPRequestHandler):
+    health_polls = 0
     def log_message(self, *args):
         pass
+    def reject_auth(self):
+        self.send_response(401)
+        self.send_header("content-type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"detail":"invalid bearer token"}')
+    def do_POST(self):
+        if self.path != "/api/auth/nonce":
+            self.send_response(404)
+            self.end_headers()
+            return
+        if self.headers.get("Origin") != origin:
+            self.reject_auth()
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self.reject_auth()
+            return
+        if length <= 0 or length > 4096:
+            self.reject_auth()
+            return
+        form = urllib.parse.parse_qs(
+            self.rfile.read(length).decode("ascii"),
+            keep_blank_values=True,
+        )
+        try:
+            with open(os.path.join(data_dir, "fake-science", "url-nonce"), encoding="utf-8") as f:
+                expected_nonce = f.read().strip()
+        except OSError:
+            self.reject_auth()
+            return
+        if form.get("nonce") != [expected_nonce] or form.get("dest") != ["/"]:
+            self.reject_auth()
+            return
+        self.send_response(200)
+        self.send_header(
+            "Set-Cookie",
+            f"operon_auth={auth_cookie}; Path=/; HttpOnly; SameSite=Strict",
+        )
+        self.send_header("content-type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"ok":true}')
     def do_GET(self):
-        if self.path.startswith("/health"):
+        if self.path.startswith("/api/health"):
+            cookies = {}
+            for item in self.headers.get("Cookie", "").split(";"):
+                if "=" in item:
+                    name, value = item.split("=", 1)
+                    cookies[name.strip()] = value.strip()
+            if self.headers.get("Origin") != origin or cookies.get("operon_auth") != auth_cookie:
+                self.reject_auth()
+                return
+            if db_health == "stalled":
+                time.sleep(2)
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.end_headers()
+            Handler.health_polls += 1
+            if boot_skipped:
+                if Handler.health_polls == 1:
+                    self.wfile.write(b'{"db_corruption":{"flagged":true,"kind":"damage"},"db_migrations_skipped":true}')
+                    return
+                try:
+                    os.unlink(verdict)
+                except FileNotFoundError:
+                    pass
+                self.wfile.write(b'{"db_corruption":{"flagged":false,"kind":null},"db_migrations_skipped":true}')
+            elif db_health == "skipped":
+                self.wfile.write(b'{"db_corruption":{"flagged":false,"kind":null},"db_migrations_skipped":true}')
+            elif db_health == "damage-reverify":
+                self.wfile.write(b'{"db_corruption":{"flagged":true,"kind":"damage"},"db_migrations_skipped":true}')
+            elif db_health == "damage":
+                self.wfile.write(b'{"db_corruption":{"flagged":true,"kind":"damage"},"db_migrations_skipped":false}')
+            elif db_health == "io-errors":
+                self.wfile.write(b'{"db_corruption":{"flagged":true,"kind":"io_errors"},"db_migrations_skipped":false}')
+            elif db_health == "missing-kind":
+                self.wfile.write(b'{"db_corruption":{"flagged":true},"db_migrations_skipped":false}')
+            else:
+                self.wfile.write(b'{"db_corruption":{"flagged":false,"kind":null},"db_migrations_skipped":false}')
+        elif self.path.startswith("/health"):
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b'{"status":"ok"}')
@@ -1264,7 +1387,9 @@ PY
     count="$(cat "$state/url-count" 2>/dev/null || echo 0)"
     count=$((count + 1))
     printf '%s' "$count" > "$state/url-count"
-    echo "http://127.0.0.1:$p/?nonce=$count"
+    nonce="$(printf '%064x' "$count")"
+    printf '%s' "$nonce" > "$state/url-nonce"
+    echo "http://127.0.0.1:$p/?nonce=$nonce"
     ;;
   stop)
     if [ -n "${CSSWITCH_TEST_PORT_OBSERVATION_SEQUENCE_DIR:-}" ]; then
@@ -1543,20 +1668,17 @@ esac
                 .map_err(|error| serde_json::Value::String(error.to_string()))
         })
         .map_err(|error| {
-            error
-                .as_str()
-                .map(str::to_string)
-                .unwrap_or_else(|| {
-                    let code = error
-                        .get("code")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("unknown");
-                    let cause = error
-                        .get("cause")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("none");
-                    format!("typed IPC error code={code} cause={cause}")
-                })
+            error.as_str().map(str::to_string).unwrap_or_else(|| {
+                let code = error
+                    .get("code")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown");
+                let cause = error
+                    .get("cause")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("none");
+                format!("typed IPC error code={code} cause={cause}")
+            })
         })
     }
 
@@ -1647,15 +1769,16 @@ esac
     }
 
     fn authority_tree(root: &Path) -> BTreeMap<PathBuf, AuthorityTreeEntry> {
-        fn walk(
-            root: &Path,
-            current: &Path,
-            result: &mut BTreeMap<PathBuf, AuthorityTreeEntry>,
-        ) {
+        fn walk(root: &Path, current: &Path, result: &mut BTreeMap<PathBuf, AuthorityTreeEntry>) {
             let metadata = match fs::symlink_metadata(current) {
                 Ok(metadata) => metadata,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
-                Err(error) => panic!("authority snapshot failed for {}: {error}", current.display()),
+                Err(error) => {
+                    panic!(
+                        "authority snapshot failed for {}: {error}",
+                        current.display()
+                    )
+                }
             };
             let relative = current.strip_prefix(root).unwrap().to_path_buf();
             if metadata.file_type().is_symlink() {
@@ -1684,7 +1807,10 @@ esac
                 );
                 return;
             }
-            assert!(metadata.is_dir(), "authority fixture contains a special file");
+            assert!(
+                metadata.is_dir(),
+                "authority fixture contains a special file"
+            );
             result.insert(
                 relative,
                 AuthorityTreeEntry {
@@ -1705,6 +1831,21 @@ esac
 
         let mut result = BTreeMap::new();
         walk(root, root, &mut result);
+        result
+    }
+
+    fn science_authority_projection(root: &Path) -> BTreeMap<PathBuf, AuthorityTreeEntry> {
+        let mut result = BTreeMap::new();
+        for entry in crate::runtime::sandbox_session::SCIENCE_PROTECTED_AUTHORITY_ENTRIES {
+            for (relative, value) in authority_tree(&root.join(entry)) {
+                let projected = if relative.as_os_str().is_empty() {
+                    PathBuf::from(entry)
+                } else {
+                    PathBuf::from(entry).join(relative)
+                };
+                result.insert(projected, value);
+            }
+        }
         result
     }
 
@@ -1758,10 +1899,7 @@ esac
         let requested_case = env::var("CSSWITCH_TEST_SSH_PREVALIDATION_CASE").unwrap_or_default();
         let cases = [
             ("missing-system-config", "无法读取已授权的 SSH config"),
-            (
-                "no-concrete-host",
-                "没有可枚举的具体 Host alias",
-            ),
+            ("no-concrete-host", "没有可枚举的具体 Host alias"),
             (
                 "oversized-system-config",
                 "SSH config 不是普通文件或超过安全大小上限",
@@ -1796,8 +1934,7 @@ esac
             ),
         ];
         assert!(
-            requested_case.is_empty()
-                || cases.iter().any(|(case, _)| *case == requested_case),
+            requested_case.is_empty() || cases.iter().any(|(case, _)| *case == requested_case),
             "unknown SSH prevalidation case selector: {requested_case}"
         );
         let mut executed_cases = 0;
@@ -1821,11 +1958,8 @@ esac
                     };
                     fs::write(home.join(".ssh/config"), body).unwrap();
                 }
-                fs::set_permissions(
-                    home.join(".ssh/config"),
-                    fs::Permissions::from_mode(0o600),
-                )
-                .unwrap();
+                fs::set_permissions(home.join(".ssh/config"), fs::Permissions::from_mode(0o600))
+                    .unwrap();
             }
             let fake_science = write_test_bins(&bin_dir).canonicalize().unwrap();
             let mock_upstream = start_mock_upstream();
@@ -1929,7 +2063,7 @@ esac
             let config_before = config::load_from(&config_dir).unwrap();
             let app_before = app_authority_projection(&state);
             let system_ssh_before = authority_tree(&home.join(".ssh"));
-            let science_before = authority_tree(&science_data);
+            let science_before = science_authority_projection(&science_data);
             let private_state_before =
                 authority_tree(&sandbox_home.parent().unwrap().join("state"));
             let runtime_before = authority_tree(&config_dir.join("runtime"));
@@ -1938,8 +2072,7 @@ esac
                 .as_deref()
                 .map(authority_tree)
                 .unwrap_or_default();
-            let receipt_before =
-                authority_tree(&config_dir.join("science-managed-launch.v1.json"));
+            let receipt_before = authority_tree(&config_dir.join("science-managed-launch.v1.json"));
             let lifecycle = Arc::new(lifecycle::Lifecycle::new());
             let app = tauri::test::mock_builder()
                 .manage(state.clone())
@@ -1968,7 +2101,7 @@ esac
             let authorities_unchanged = config::load_from(&config_dir).unwrap() == config_before
                 && app_authority_projection(&state) == app_before
                 && authority_tree(&home.join(".ssh")) == system_ssh_before
-                && authority_tree(&science_data) == science_before
+                && science_authority_projection(&science_data) == science_before
                 && authority_tree(&sandbox_home.parent().unwrap().join("state"))
                     == private_state_before
                 && authority_tree(&config_dir.join("runtime")) == runtime_before
@@ -1997,7 +2130,11 @@ esac
         }
         assert_eq!(
             executed_cases,
-            if requested_case.is_empty() { cases.len() } else { 1 },
+            if requested_case.is_empty() {
+                cases.len()
+            } else {
+                1
+            },
             "SSH prevalidation selector must execute the exact requested oracle set"
         );
     }
@@ -2006,13 +2143,12 @@ esac
     #[ignore = "explicit Acceptance-boundary SSH transaction smoke; temp HOME, fake OAuth, fake Science, and loopback only"]
     fn isolated_ssh_late_failure_compensates_every_authority_and_retry_is_idempotent() {
         let oracle_first = env::var("CSSWITCH_TEST_SSH_ORACLE_FIRST").unwrap_or_default();
-        let failure_edge =
-            env::var("CSSWITCH_TEST_SSH_LATE_FAILURE_EDGE").unwrap_or_else(|_| "foreign-stub".into());
+        let failure_edge = env::var("CSSWITCH_TEST_SSH_LATE_FAILURE_EDGE")
+            .unwrap_or_else(|_| "foreign-stub".into());
         assert!(
             matches!(
                 oracle_first.as_str(),
-                ""
-                    | "oauth"
+                "" | "oauth"
                     | "gateway"
                     | "gateway-child"
                     | "codex-gateway-child"
@@ -2021,8 +2157,10 @@ esac
             ),
             "unknown SSH late-failure oracle selector: {oracle_first}"
         );
-        let owned_gateway_oracle =
-            matches!(oracle_first.as_str(), "gateway-child" | "codex-gateway-child");
+        let owned_gateway_oracle = matches!(
+            oracle_first.as_str(),
+            "gateway-child" | "codex-gateway-child"
+        );
         let codex_gateway_oracle = oracle_first == "codex-gateway-child";
         assert!(
             matches!(
@@ -2030,6 +2168,15 @@ esac
                 "foreign-stub"
                     | "spawn-error"
                     | "serve-mutates-then-exits"
+                    | "host-proof-drift"
+                    | "db-health-skipped"
+                    | "db-health-recovery"
+                    | "db-health-never-clears"
+                    | "db-health-stalled"
+                    | "db-health-io-errors"
+                    | "db-health-missing-kind"
+                    | "db-restart-no-listener"
+                    | "db-restart-launch-blocks"
                     | "post-status-receipt"
             ),
             "unknown SSH late-failure edge selector: {failure_edge}"
@@ -2045,11 +2192,7 @@ esac
         let bin_dir = tmp.join("bin");
         fs::create_dir_all(home.join(".ssh")).unwrap();
         fs::write(home.join(".ssh/config"), "Host isolated-test-host\n").unwrap();
-        fs::set_permissions(
-            home.join(".ssh/config"),
-            fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
+        fs::set_permissions(home.join(".ssh/config"), fs::Permissions::from_mode(0o600)).unwrap();
         let fake_science = write_test_bins(&bin_dir).canonicalize().unwrap();
         let open_log = tmp.join("open.log");
         let science_call_log = tmp.join("science-call.log");
@@ -2068,11 +2211,7 @@ esac
         let gateway_publish_log = tmp.join("gateway-publish.log");
         if owned_gateway_oracle {
             fs::write(&gateway_publish_log, b"").unwrap();
-            fs::set_permissions(
-                &gateway_publish_log,
-                fs::Permissions::from_mode(0o600),
-            )
-            .unwrap();
+            fs::set_permissions(&gateway_publish_log, fs::Permissions::from_mode(0o600)).unwrap();
             env_guard.set("CSSWITCH_TEST_GATEWAY_PUBLISH_LOG", &gateway_publish_log);
         }
         env_guard.set(
@@ -2085,8 +2224,7 @@ esac
 
         let config_dir = config::default_dir();
         let mut before = ssh_fixture_config(mock_upstream.port, proxy_port, sandbox_port);
-        let operation_api_canary =
-            format!("ssh-transaction-key-{}", config::new_id());
+        let operation_api_canary = format!("ssh-transaction-key-{}", config::new_id());
         before
             .profile_by_id_mut("ssh-transaction")
             .expect("candidate fixture profile must exist")
@@ -2099,8 +2237,7 @@ esac
                 template_id: "codex".into(),
                 category: "experimental".into(),
                 api_format: "openai_responses".into(),
-                credential_source:
-                    crate::provider_contracts::CredentialSource::CsswitchOauth,
+                credential_source: crate::provider_contracts::CredentialSource::CsswitchOauth,
                 credential_ref: Some("csswitch:codex:default".into()),
                 model_policy: crate::provider_contracts::ModelPolicy::DynamicCatalog,
                 ..Default::default()
@@ -2169,52 +2306,76 @@ esac
         )
         .unwrap();
         let installer_key = config_dir.join("runtime/skill-install-bridge.key");
-        let installer_key_canary =
-            format!("prior-installer-authority-{}", config::new_id());
+        let installer_key_canary = format!("prior-installer-authority-{}", config::new_id());
         fs::create_dir_all(installer_key.parent().unwrap()).unwrap();
-        fs::write(
-            &installer_key,
-            format!("{installer_key_canary}\n"),
-        )
-        .unwrap();
+        fs::write(&installer_key, format!("{installer_key_canary}\n")).unwrap();
         fs::set_permissions(&installer_key, fs::Permissions::from_mode(0o600)).unwrap();
-        let prior_runtime = science::select_science_runtime_cached(
-            None,
-            &science::ScienceVersionCache::default(),
-        )
-        .unwrap();
+        let prior_runtime =
+            science::select_science_runtime_cached(None, &science::ScienceVersionCache::default())
+                .unwrap();
         let foreign_stub = sandbox_home.join(".ssh/config");
-        let inplace_authority = science_data.join("prior-inplace.db");
+        let inplace_authority = science_data.join("orgs/csswitch-test/prior-inplace.db");
+        fs::create_dir_all(inplace_authority.parent().unwrap()).unwrap();
         let failure_marker = tmp.join("serve-mutation-reached");
         let failure_control = science_data.join("fake-science/fail-after-inplace-mutation");
+        let unbound_candidate_pid = tmp.join("unbound-second-candidate.pid");
         if failure_edge == "foreign-stub" {
             env_guard.set("CSSWITCH_TEST_SSH_LATE_FOREIGN_STUB", &foreign_stub);
+        } else if failure_edge == "host-proof-drift" {
+            env_guard.set("CSSWITCH_TEST_SSH_HOSTS_AFTER_CAPTURE", "drifted-test-host");
+        } else if failure_edge == "db-health-skipped" {
+            env_guard.set("CSSWITCH_FAKE_SCIENCE_DB_HEALTH", "skipped");
+        } else if failure_edge == "db-health-recovery" {
+            env_guard.set("CSSWITCH_FAKE_SCIENCE_DB_HEALTH", "stateful");
+            fs::create_dir_all(&science_data).unwrap();
+            fs::write(science_data.join("fake-db-damage-verdict"), b"flagged\n").unwrap();
+        } else if failure_edge == "db-health-never-clears" {
+            env_guard.set("CSSWITCH_FAKE_SCIENCE_DB_HEALTH", "damage-reverify");
+            env_guard.set("CSSWITCH_TEST_DB_REVERIFY_BUDGET_MS", "250");
+        } else if failure_edge == "db-health-stalled" {
+            env_guard.set("CSSWITCH_FAKE_SCIENCE_DB_HEALTH", "stalled");
+            env_guard.set("CSSWITCH_TEST_DB_REVERIFY_BUDGET_MS", "250");
+        } else if failure_edge == "db-health-io-errors" {
+            env_guard.set("CSSWITCH_FAKE_SCIENCE_DB_HEALTH", "io-errors");
+        } else if failure_edge == "db-health-missing-kind" {
+            env_guard.set("CSSWITCH_FAKE_SCIENCE_DB_HEALTH", "missing-kind");
+        } else if matches!(
+            failure_edge.as_str(),
+            "db-restart-no-listener" | "db-restart-launch-blocks"
+        ) {
+            env_guard.set("CSSWITCH_FAKE_SCIENCE_DB_HEALTH", "stateful");
+            if failure_edge == "db-restart-no-listener" {
+                env_guard.set("CSSWITCH_FAKE_SCIENCE_SECOND_BOOT_NO_LISTENER", "1");
+            } else {
+                env_guard.set("CSSWITCH_FAKE_SCIENCE_SECOND_BOOT_BLOCKS", "1");
+            }
+            env_guard.set("CSSWITCH_FAKE_SCIENCE_UNBOUND_PID", &unbound_candidate_pid);
+            env_guard.set("CSSWITCH_FAKE_SCIENCE_UNBOUND_MUTATION", &inplace_authority);
+            env_guard.set("CSSWITCH_TEST_DB_RECOVERY_RESTART_BUDGET_MS", "250");
+            fs::create_dir_all(&science_data).unwrap();
+            fs::write(science_data.join("fake-db-damage-verdict"), b"flagged\n").unwrap();
+            fs::write(&inplace_authority, b"prior-inplace-authority\n").unwrap();
         } else if failure_edge == "serve-mutates-then-exits" {
             fs::write(&inplace_authority, b"prior-inplace-authority\n").unwrap();
-            fs::set_permissions(
-                &inplace_authority,
-                fs::Permissions::from_mode(0o600),
-            )
-            .unwrap();
+            fs::set_permissions(&inplace_authority, fs::Permissions::from_mode(0o600)).unwrap();
             fs::create_dir_all(failure_control.parent().unwrap()).unwrap();
             fs::write(
                 &failure_control,
-                format!("{}\n{}\n", inplace_authority.display(), failure_marker.display()),
+                format!(
+                    "{}\n{}\n",
+                    inplace_authority.display(),
+                    failure_marker.display()
+                ),
             )
             .unwrap();
-            fs::set_permissions(
-                &failure_control,
-                fs::Permissions::from_mode(0o600),
-            )
-            .unwrap();
+            fs::set_permissions(&failure_control, fs::Permissions::from_mode(0o600)).unwrap();
         } else if failure_edge == "post-status-receipt" {
             env_guard.set("CSSWITCH_TEST_MANAGED_LAUNCH_COMMIT_FAILURE", "1");
         }
         let state: SharedAppState = Arc::new(Mutex::new(AppState::default()));
         let lifecycle = Arc::new(lifecycle::Lifecycle::new());
-        let codex_auth_supervisor = Arc::new(
-            crate::codex_auth_supervisor::CodexAuthSupervisor::default(),
-        );
+        let codex_auth_supervisor =
+            Arc::new(crate::codex_auth_supervisor::CodexAuthSupervisor::default());
         let app = tauri::test::mock_builder()
             .manage(state.clone())
             .manage(lifecycle.clone())
@@ -2333,7 +2494,7 @@ exec '{}' "$@"
         let config_before = config::load_from(&config_dir).unwrap();
         let app_authority_before = app_authority_projection(&state);
         let system_ssh_before = authority_tree(&home.join(".ssh"));
-        let science_authority_before = authority_tree(&science_data);
+        let science_authority_before = science_authority_projection(&science_data);
         let private_state_before = authority_tree(&sandbox_home.parent().unwrap().join("state"));
         let installer_key_before = authority_tree(&config_dir.join("runtime"));
         let managed_receipt = config_dir.join("science-managed-launch.v1.json");
@@ -2345,10 +2506,23 @@ exec '{}' "$@"
             sandbox_port,
             proxy_port,
         );
+        let _db_catalog_bypass = matches!(
+            failure_edge.as_str(),
+            "db-health-skipped"
+                | "db-health-recovery"
+                | "db-health-never-clears"
+                | "db-health-stalled"
+                | "db-health-io-errors"
+                | "db-health-missing-kind"
+                | "db-restart-no-listener"
+                | "db-restart-launch-blocks"
+        )
+        .then(|| sandbox_session::test_arm_gateway_catalog_bypass(proxy_port));
 
         if failure_edge == "spawn-error" {
             env::set_var("PATH", bin_dir.as_os_str());
         }
+        let operation_started = Instant::now();
         let failed = if codex_gateway_oracle {
             invoke_json(
                 &webview,
@@ -2379,6 +2553,280 @@ exec '{}' "$@"
             .err()
             .map(String::as_str)
             .unwrap_or_default();
+        if failure_edge != "db-health-recovery" {
+            let environment_was_exposed = !matches!(
+                failure_edge.as_str(),
+                "foreign-stub" | "spawn-error" | "host-proof-drift"
+            );
+            assert_eq!(
+                failure_surface.contains("environment_uncertain"),
+                environment_was_exposed,
+                "the failure surface must distinguish pre-spawn rollback from a launch whose Science-owned environment may have changed: edge={failure_edge}, failure={failure_surface}"
+            );
+        }
+        if failure_edge == "serve-mutates-then-exits" {
+            assert!(
+                failure_surface.contains("recovery_status=cleanup_required")
+                    && failure_surface.contains("compensation_restore_blocked_science_candidate"),
+                "a failed Science invocation without an exact managed identity must preserve the recovery snapshot and block protected-state restore: {failed:?}"
+            );
+            assert!(
+                failure_marker.is_file()
+                    && fs::read_to_string(&inplace_authority)
+                        .is_ok_and(|bytes| bytes == "mutated-by-failing-science\n"),
+                "the oracle must prove Science changed a protected org authority before failing"
+            );
+            assert_ne!(
+                science_authority_projection(&science_data),
+                science_authority_before,
+                "protected authority must not be restored underneath an unproven candidate"
+            );
+            assert!(
+                failure_surface.contains(".one-click-rollback-"),
+                "manual recovery must retain a credential-free snapshot locator"
+            );
+            fs::remove_file(&failure_control).unwrap();
+            cleanup.finish().expect("unproven candidate oracle cleanup");
+            return;
+        }
+        if failure_edge == "db-health-recovery" {
+            assert!(
+                failed
+                    .as_ref()
+                    .is_ok_and(|value| value["action"] == "started"),
+                "stateful 0.1.25 oracle must close in one operation: {failed:?}"
+            );
+            assert_eq!(
+                fs::read_to_string(science_data.join("fake-science/serve-count")).unwrap(),
+                "2",
+                "recovery must use the initial boot plus exactly one managed restart"
+            );
+            assert!(
+                !science_data.join("fake-db-damage-verdict").exists(),
+                "the Science-owned cleared verdict must survive the managed restart"
+            );
+            env::remove_var("CSSWITCH_FAKE_SCIENCE_DB_HEALTH");
+            cleanup.finish().expect("DB recovery oracle cleanup");
+            return;
+        }
+        if failure_edge == "db-health-skipped" {
+            assert!(
+                failed
+                    .as_ref()
+                    .is_err_and(|error| { error.contains("第二次启动未达到 clear/clear") }),
+                "a second boot that still reports migrations_skipped must fail closed: {failed:?}"
+            );
+            assert_eq!(
+                fs::read_to_string(&science_call_log)
+                    .unwrap_or_default()
+                    .lines()
+                    .filter(|line| *line == "serve")
+                    .count(),
+                2,
+                "second-boot failure must consume the sole managed restart and never launch a third candidate"
+            );
+            assert_eq!(
+                science_authority_projection(&science_data),
+                science_authority_before,
+                "second-boot failure must restore the complete pre-operation ScienceData tree, including OAuth, route/config, and the persisted verdict"
+            );
+            assert!(TcpStream::connect(("127.0.0.1", sandbox_port)).is_err());
+            assert!(!config_dir.join("science-managed-launch.v1.json").exists());
+            env::remove_var("CSSWITCH_FAKE_SCIENCE_DB_HEALTH");
+            cleanup.finish().expect("DB second-boot failure cleanup");
+            return;
+        }
+        if failure_edge == "db-health-never-clears" {
+            assert!(
+                failed
+                    .as_ref()
+                    .is_err_and(|error| error.contains("science_db_reverify_timeout")),
+                "a verdict that never clears must stop at the bounded reverify deadline: {failed:?}"
+            );
+            assert_eq!(
+                fs::read_to_string(&science_call_log)
+                    .unwrap_or_default()
+                    .lines()
+                    .filter(|line| *line == "serve")
+                    .count(),
+                1,
+                "reverify timeout must not consume the managed restart"
+            );
+            assert_eq!(
+                science_authority_projection(&science_data),
+                science_authority_before
+            );
+            assert!(TcpStream::connect(("127.0.0.1", sandbox_port)).is_err());
+            assert!(!config_dir.join("science-managed-launch.v1.json").exists());
+            env::remove_var("CSSWITCH_FAKE_SCIENCE_DB_HEALTH");
+            env::remove_var("CSSWITCH_TEST_DB_REVERIFY_BUDGET_MS");
+            cleanup.finish().expect("DB reverify-timeout cleanup");
+            return;
+        }
+        if failure_edge == "db-health-stalled" {
+            assert!(
+                failed
+                    .as_ref()
+                    .is_err_and(|error| error.contains("science_db_reverify_timeout")),
+                "a stalled authenticated health response must stop at the absolute reverify deadline: {failed:?}"
+            );
+            assert!(
+                operation_started.elapsed() < Duration::from_millis(3_500),
+                "the 250ms reverify budget must cap a stalled 2s health response in addition to the fixed launch/rollback work"
+            );
+            assert_eq!(
+                fs::read_to_string(&science_call_log)
+                    .unwrap_or_default()
+                    .lines()
+                    .filter(|line| *line == "serve")
+                    .count(),
+                1,
+                "stalled health must not consume the managed restart"
+            );
+            assert_eq!(
+                science_authority_projection(&science_data),
+                science_authority_before
+            );
+            assert!(TcpStream::connect(("127.0.0.1", sandbox_port)).is_err());
+            assert!(!config_dir.join("science-managed-launch.v1.json").exists());
+            env::remove_var("CSSWITCH_FAKE_SCIENCE_DB_HEALTH");
+            env::remove_var("CSSWITCH_TEST_DB_REVERIFY_BUDGET_MS");
+            cleanup.finish().expect("DB stalled-health cleanup");
+            return;
+        }
+        if failure_edge == "db-health-io-errors" {
+            assert!(
+                failed.as_ref().is_err_and(|error| {
+                    error.contains("第二次启动未达到 clear/clear")
+                }),
+                "0.1.25 io_errors is a THIS-run wedge and must consume the sole restart immediately: {failed:?}"
+            );
+            assert_eq!(
+                fs::read_to_string(&science_call_log)
+                    .unwrap_or_default()
+                    .lines()
+                    .filter(|line| *line == "serve")
+                    .count(),
+                2,
+                "io_errors must not enter the 305s damage reverify lane"
+            );
+            assert_eq!(
+                science_authority_projection(&science_data),
+                science_authority_before
+            );
+            assert!(TcpStream::connect(("127.0.0.1", sandbox_port)).is_err());
+            assert!(!config_dir.join("science-managed-launch.v1.json").exists());
+            env::remove_var("CSSWITCH_FAKE_SCIENCE_DB_HEALTH");
+            cleanup.finish().expect("DB io_errors cleanup");
+            return;
+        }
+        if failure_edge == "db-health-missing-kind" {
+            assert!(
+                failed.as_ref().is_err_and(
+                    |error| error.contains("science_api_health_missing_db_corruption_kind")
+                ),
+                "flagged health without the 0.1.25 kind discriminant must fail closed: {failed:?}"
+            );
+            assert_eq!(
+                fs::read_to_string(&science_call_log)
+                    .unwrap_or_default()
+                    .lines()
+                    .filter(|line| *line == "serve")
+                    .count(),
+                1,
+                "malformed health must not guess a recovery lane or consume the restart"
+            );
+            assert_eq!(
+                science_authority_projection(&science_data),
+                science_authority_before
+            );
+            assert!(TcpStream::connect(("127.0.0.1", sandbox_port)).is_err());
+            assert!(!config_dir.join("science-managed-launch.v1.json").exists());
+            env::remove_var("CSSWITCH_FAKE_SCIENCE_DB_HEALTH");
+            cleanup.finish().expect("DB missing-kind cleanup");
+            return;
+        }
+        if matches!(
+            failure_edge.as_str(),
+            "db-restart-no-listener" | "db-restart-launch-blocks"
+        ) {
+            assert!(
+                failed.as_ref().is_err_and(|error| {
+                    error.contains("code=science_candidate_stop_unproven")
+                        && error.contains("compensation_restore_blocked_science_candidate")
+                        && error.contains("recovery_status=cleanup_required")
+                }),
+                "a detached post-spawn/pre-receipt candidate must block authority restore with typed recovery: {failed:?}"
+            );
+            assert_eq!(
+                fs::read_to_string(&science_call_log)
+                    .unwrap_or_default()
+                    .lines()
+                    .filter(|line| *line == "serve")
+                    .count(),
+                2,
+                "the unbound candidate must be the sole recovery restart"
+            );
+            if failure_edge == "db-restart-launch-blocks" {
+                assert!(
+                    operation_started.elapsed() < std::time::Duration::from_secs(5),
+                    "the recovery deadline must include the launch script, not begin after blocking status"
+                );
+            }
+            let unbound_pid = fs::read_to_string(&unbound_candidate_pid)
+                .unwrap()
+                .trim()
+                .parse::<u32>()
+                .unwrap();
+            assert!(unbound_pid > 1);
+            assert!(
+                process_start_identity_if_alive(unbound_pid).is_some(),
+                "old-product red requires the unbound second candidate to remain alive"
+            );
+            let expected_mutation = if failure_edge == "db-restart-launch-blocks" {
+                "mutated-by-blocked-second-candidate\n"
+            } else {
+                "mutated-by-unbound-second-candidate\n"
+            };
+            assert_eq!(
+                fs::read_to_string(&inplace_authority).unwrap(),
+                expected_mutation,
+                "authority must not be restored underneath an unproven live candidate"
+            );
+            assert_ne!(
+                science_authority_projection(&science_data),
+                science_authority_before,
+                "blocked restore must preserve the current authority plus the recovery snapshot"
+            );
+            assert!(TcpStream::connect(("127.0.0.1", sandbox_port)).is_err());
+            assert!(!config_dir.join("science-managed-launch.v1.json").exists());
+            unsafe {
+                libc::kill(unbound_pid as i32, libc::SIGTERM);
+            }
+            for _ in 0..50 {
+                if process_start_identity_if_alive(unbound_pid).is_none() {
+                    break;
+                }
+                thread::sleep(std::time::Duration::from_millis(20));
+            }
+            if process_start_identity_if_alive(unbound_pid).is_some() {
+                unsafe {
+                    libc::kill(unbound_pid as i32, libc::SIGKILL);
+                }
+            }
+            assert!(
+                process_start_identity_if_alive(unbound_pid).is_none(),
+                "test must clean the intentionally unowned candidate"
+            );
+            env::remove_var("CSSWITCH_FAKE_SCIENCE_DB_HEALTH");
+            env::remove_var("CSSWITCH_FAKE_SCIENCE_SECOND_BOOT_NO_LISTENER");
+            env::remove_var("CSSWITCH_FAKE_SCIENCE_SECOND_BOOT_BLOCKS");
+            env::remove_var("CSSWITCH_FAKE_SCIENCE_UNBOUND_PID");
+            env::remove_var("CSSWITCH_FAKE_SCIENCE_UNBOUND_MUTATION");
+            env::remove_var("CSSWITCH_TEST_DB_RECOVERY_RESTART_BUDGET_MS");
+            cleanup.finish().expect("DB unbound-candidate cleanup");
+            return;
+        }
         let operation_auth_preflight_count = fs::read_to_string(&auth_call_log)
             .unwrap_or_default()
             .lines()
@@ -2429,12 +2877,15 @@ exec '{}' "$@"
             .collect::<Vec<_>>();
         let launch_context_matches_prior = if codex_gateway_oracle {
             let authority = lock(&state);
-            authority.gateway_launch_context.as_ref().is_some_and(|context| {
+            authority
+                .gateway_launch_context
+                .as_ref()
+                .is_some_and(|context| {
                     prior_codex_profile
                         .as_ref()
                         .is_some_and(|profile| context.profile == *profile)
-                    && context.science_runtime.is_none()
-            })
+                        && context.science_runtime.is_none()
+                })
         } else {
             true
         };
@@ -2446,7 +2897,7 @@ exec '{}' "$@"
             true
         };
         let system_ssh_after_failure = authority_tree(&home.join(".ssh"));
-        let science_authority_after_failure = authority_tree(&science_data);
+        let science_authority_after_failure = science_authority_projection(&science_data);
         let private_state_after_failure =
             authority_tree(&sandbox_home.parent().unwrap().join("state"));
         let installer_key_after_failure = authority_tree(&config_dir.join("runtime"));
@@ -2466,8 +2917,7 @@ exec '{}' "$@"
             && app_authority_after_failure.gateway_kind == app_authority_before.gateway_kind
             && app_authority_after_failure.shim_mode == app_authority_before.shim_mode
             && app_authority_after_failure.key_fp == app_authority_before.key_fp
-            && app_authority_after_failure.sandbox_present
-                == app_authority_before.sandbox_present
+            && app_authority_after_failure.sandbox_present == app_authority_before.sandbox_present
             && app_authority_after_failure.sandbox_port == app_authority_before.sandbox_port
             && app_authority_after_failure.sandbox_url == app_authority_before.sandbox_url
             && app_authority_after_failure.science_runtime == app_authority_before.science_runtime
@@ -2481,19 +2931,17 @@ exec '{}' "$@"
             let prior_publish = gateway_publishes.first();
             let candidate = gateway_publishes.get(1);
             let restored_publish = gateway_publishes.get(2);
-            let expected_installer_token =
-                proxy_lifecycle::test_skill_install_bridge_token(
-                    &app_authority_after_failure.secret,
-                    &app_authority_after_failure.launch_id,
-                )
-                .ok()
-                .map(|token| format!("{token}\n").into_bytes());
+            let expected_installer_token = proxy_lifecycle::test_skill_install_bridge_token(
+                &app_authority_after_failure.secret,
+                &app_authority_after_failure.launch_id,
+            )
+            .ok()
+            .map(|token| format!("{token}\n").into_bytes());
             stable_app_authority_restored
                 && app_authority_after_failure.proxy_present
                 && !app_authority_after_failure.launch_id.is_empty()
                 && tracked_gateway_running_after_failure
-                && tracked_gateway_pid_after_failure
-                    == restored_publish.map(|publish| publish.0)
+                && tracked_gateway_pid_after_failure == restored_publish.map(|publish| publish.0)
                 && listener_pid_if_unique(proxy_port) == tracked_gateway_pid_after_failure
                 && gateway_publishes.len() == 3
                 && prior_publish.is_some_and(|prior| {
@@ -2515,16 +2963,18 @@ exec '{}' "$@"
                         && restored.3 == app_authority_after_failure.proxy_port
                 })
                 && prior_gateway_pid.is_some()
-                && prior_health.zip(restored_health).is_some_and(|(prior, restored)| {
-                    restored.gateway == prior.gateway
-                        && restored.provider == prior.provider
-                        && restored.shim == prior.shim
-                        && restored.provider_contract_id == prior.provider_contract_id
-                        && restored.provider_contract_digest == prior.provider_contract_digest
-                        && restored.catalog_fp == prior.catalog_fp
-                        && restored.intent == prior.intent
-                        && restored.launch_id == app_authority_after_failure.launch_id
-                })
+                && prior_health
+                    .zip(restored_health)
+                    .is_some_and(|(prior, restored)| {
+                        restored.gateway == prior.gateway
+                            && restored.provider == prior.provider
+                            && restored.shim == prior.shim
+                            && restored.provider_contract_id == prior.provider_contract_id
+                            && restored.provider_contract_digest == prior.provider_contract_digest
+                            && restored.catalog_fp == prior.catalog_fp
+                            && restored.intent == prior.intent
+                            && restored.launch_id == app_authority_after_failure.launch_id
+                    })
                 && installer_key_after_failure
                     .get(&PathBuf::from("skill-install-bridge.key"))
                     .is_some_and(|entry| {
@@ -2573,6 +3023,10 @@ exec '{}' "$@"
         if failure_edge == "foreign-stub" {
             env::remove_var("CSSWITCH_TEST_SSH_LATE_FOREIGN_STUB");
             fs::remove_file(&foreign_stub).unwrap();
+        } else if failure_edge == "host-proof-drift" {
+            env::remove_var("CSSWITCH_TEST_SSH_HOSTS_AFTER_CAPTURE");
+        } else if failure_edge == "db-health-skipped" {
+            env::remove_var("CSSWITCH_FAKE_SCIENCE_DB_HEALTH");
         } else if failure_edge == "spawn-error" {
             env::set_var(
                 "PATH",
@@ -2603,23 +3057,19 @@ exec '{}' "$@"
                 }
             })
         } else {
-            sandbox_session::one_click_login(
-                handle,
-                state.clone(),
-                lifecycle.as_ref(),
-                None,
-                None,
-            )
+            sandbox_session::one_click_login(handle, state.clone(), lifecycle.as_ref(), None, None)
         };
         let retry_started_once = retry
             .as_ref()
             .is_ok_and(|value| value["action"] == "started")
-            && fs::read_to_string(
-                sandbox_home.join(".claude-science/fake-science/serve-count"),
-            )
-            .ok()
-            .as_deref()
-            == Some("1");
+            && fs::read_to_string(sandbox_home.join(".claude-science/fake-science/serve-count"))
+                .ok()
+                .as_deref()
+                == Some(if failure_edge == "post-status-receipt" {
+                    "2"
+                } else {
+                    "1"
+                });
         let science_calls_after_retry =
             fs::read_to_string(&science_call_log).unwrap_or_else(|_| "<missing>".into());
         let serve_calls_after_failure = science_calls_after_failure
@@ -2651,6 +3101,37 @@ exec '{}' "$@"
                 sandbox_ssh_after_failure, expected_sandbox_ssh,
                 "late-failure compensation must leave no extra file, symlink, or directory in the sandbox SSH authority"
             );
+        } else if failure_edge == "host-proof-drift" {
+            assert!(
+                failed.as_ref().is_err_and(|error| {
+                    error.contains("code=ssh_authority_changed_retry")
+                        && !error.contains("起沙箱脚本失败")
+                }),
+                "host proof drift must fail before packaged zsh with a typed retry"
+            );
+            assert!(
+                sandbox_ssh_after_failure.is_empty(),
+                "host proof drift must not create or rewrite the sandbox SSH stub"
+            );
+            assert_eq!(
+                serve_calls_after_failure, 0,
+                "host proof drift must fail before fake Science serve"
+            );
+        } else if failure_edge == "db-health-skipped" {
+            assert!(
+                failed.as_ref().is_err_and(|error| {
+                    error.contains("science_db_migrations_skipped_restart_required")
+                }),
+                "semantic DB health must reject a coarse /health 200"
+            );
+            assert_eq!(
+                serve_calls_after_failure, 1,
+                "fake Science must start before semantic DB health rejects readiness"
+            );
+            assert!(
+                sandbox_ssh_after_failure.is_empty(),
+                "DB readiness compensation must remove the managed sandbox SSH stub"
+            );
         } else if failure_edge == "spawn-error" {
             let spawn_error_reached = failure_surface.contains("起沙箱失败");
             assert!(
@@ -2677,8 +3158,7 @@ exec '{}' "$@"
                 "failed Science cleanup must remove only the managed sandbox SSH stub"
             );
         } else {
-            let post_status_failure_reached = failure_surface
-                .contains("受管启动身份无法安全提交")
+            let post_status_failure_reached = failure_surface.contains("受管启动身份无法安全提交")
                 && failure_surface.contains("test-only managed launch commit failure");
             assert!(
                 post_status_failure_reached,
@@ -2689,12 +3169,28 @@ exec '{}' "$@"
                 "post-status compensation must remove the managed sandbox SSH stub"
             );
         }
-        assert_eq!(
-            system_ssh_after_failure, system_ssh_before,
-            "late-failure compensation must not change the authorized system SSH source tree"
-        );
+        if failure_edge == "host-proof-drift" {
+            assert_ne!(
+                system_ssh_after_failure, system_ssh_before,
+                "the external test authority drift must remain external to CSSwitch rollback"
+            );
+            assert_eq!(
+                system_ssh_after_failure
+                    .get(&PathBuf::from("config"))
+                    .map(|entry| entry.bytes.as_slice()),
+                Some(b"Host drifted-test-host\n".as_slice())
+            );
+        } else {
+            assert_eq!(
+                system_ssh_after_failure, system_ssh_before,
+                "late-failure compensation must not change the authorized system SSH source tree"
+            );
+        }
         if oracle_first == "gateway" {
-            assert!(gateway_restored, "late SSH failure must restore Gateway authority");
+            assert!(
+                gateway_restored,
+                "late SSH failure must restore Gateway authority"
+            );
         } else if oracle_first == "journal" {
             assert!(
                 journal_restored,
@@ -2711,7 +3207,10 @@ exec '{}' "$@"
                 "late SSH failure must restore the exact prior virtual OAuth authority"
             );
         }
-        assert!(profile_restored, "late SSH failure must preserve the active profile");
+        assert!(
+            profile_restored,
+            "late SSH failure must preserve the active profile"
+        );
         if owned_gateway_oracle {
             let ownership_error_absent =
                 !failure_surface.contains("无法恢复先前 Gateway child 所有权");
@@ -2813,8 +3312,14 @@ exec '{}' "$@"
                     .is_some_and(|health| health.provider == "codex")
             );
         }
-        assert!(gateway_restored, "late SSH failure must restore Gateway authority");
-        assert!(science_restored, "late SSH failure must restore Science authority");
+        assert!(
+            gateway_restored,
+            "late SSH failure must restore Gateway authority"
+        );
+        assert!(
+            science_restored,
+            "late SSH failure must restore Science authority"
+        );
         assert!(
             bridge_restored,
             "late SSH failure must restore managed bridge state and Science config"
@@ -2831,7 +3336,7 @@ exec '{}' "$@"
             serve_calls_after_failure,
             usize::from(matches!(
                 failure_edge.as_str(),
-                "serve-mutates-then-exits" | "post-status-receipt"
+                "serve-mutates-then-exits" | "db-health-skipped" | "post-status-receipt"
             )),
             "authority-external call log must identify whether the failed attempt reached Science serve"
         );
@@ -2839,7 +3344,7 @@ exec '{}' "$@"
             serve_calls_after_retry,
             if matches!(
                 failure_edge.as_str(),
-                "serve-mutates-then-exits" | "post-status-receipt"
+                "serve-mutates-then-exits" | "db-health-skipped" | "post-status-receipt"
             ) {
                 2
             } else {
@@ -2906,9 +3411,7 @@ exec '{}' "$@"
         config::save_to(&config_dir, &cfg).unwrap();
         let state: SharedAppState = Arc::new(Mutex::new(AppState::default()));
         let lifecycle = Arc::new(lifecycle::Lifecycle::new());
-        let supervisor = Arc::new(
-            crate::codex_auth_supervisor::CodexAuthSupervisor::default(),
-        );
+        let supervisor = Arc::new(crate::codex_auth_supervisor::CodexAuthSupervisor::default());
         let app = tauri::test::mock_builder()
             .manage(state.clone())
             .manage(lifecycle.clone())
@@ -2974,8 +3477,7 @@ exec '{}' "$@"
                 break port;
             }
         };
-        let drift_port_closed_before =
-            TcpStream::connect(("127.0.0.1", drift_proxy_port)).is_err();
+        let drift_port_closed_before = TcpStream::connect(("127.0.0.1", drift_proxy_port)).is_err();
         let (worker, preflight_seen) = lifecycle.with_serialized(|| {
             let worker = thread::spawn(move || {
                 invoke_json(
@@ -3023,8 +3525,7 @@ exec '{}' "$@"
         let launch_context_unchanged = {
             let current = lock(&state).gateway_launch_context.clone();
             current.zip(prior_context).is_some_and(|(current, prior)| {
-                current.profile == prior.profile
-                    && current.science_runtime == prior.science_runtime
+                current.profile == prior.profile && current.science_runtime == prior.science_runtime
             })
         };
         let child_context_unchanged = after == prior
@@ -3040,8 +3541,7 @@ exec '{}' "$@"
             && !sinks.contains(&cfg.secret)
             && !sinks.contains("csswitch:codex:default");
         let rejected_typed = surface.contains("config_changed_retry");
-        let drift_port_closed_after =
-            TcpStream::connect(("127.0.0.1", drift_proxy_port)).is_err();
+        let drift_port_closed_after = TcpStream::connect(("127.0.0.1", drift_proxy_port)).is_err();
         cleanup
             .finish()
             .expect("serialized recheck fixture must leave no process residue");
@@ -3109,11 +3609,9 @@ exec '{}' "$@"
             &sandbox_home,
         )
         .unwrap();
-        let prior_runtime = science::select_science_runtime_cached(
-            None,
-            &science::ScienceVersionCache::default(),
-        )
-        .unwrap();
+        let prior_runtime =
+            science::select_science_runtime_cached(None, &science::ScienceVersionCache::default())
+                .unwrap();
         let prior_pid = start_managed_fake_science(
             &fake_science,
             &sandbox_home,
@@ -3138,10 +3636,7 @@ exec '{}' "$@"
         let handle = app.handle().clone();
 
         science::test_reset_managed_launch_commit_failure_once();
-        env_guard.set(
-            "CSSWITCH_TEST_MANAGED_LAUNCH_COMMIT_FAILURE_ONCE",
-            "1",
-        );
+        env_guard.set("CSSWITCH_TEST_MANAGED_LAUNCH_COMMIT_FAILURE_ONCE", "1");
         env_guard.set(
             "CSSWITCH_TEST_MANAGED_LAUNCH_FAILURE_PID_LOG",
             &candidate_pid_log,
@@ -3164,8 +3659,7 @@ exec '{}' "$@"
         let candidate_pid = fs::read_to_string(&candidate_pid_log)
             .ok()
             .and_then(|pid| pid.trim().parse::<u32>().ok());
-        let capture_observation =
-            fs::read_to_string(&snapshot_observation).unwrap_or_default();
+        let capture_observation = fs::read_to_string(&snapshot_observation).unwrap_or_default();
         let expected_capture_observation = format!(
             "expected_prior_pid={prior_pid}\nexpected_receipt={}\nlistener=stopped\nprior_process=absent\nprior_receipt=absent\n",
             receipt_path.display()
@@ -3183,8 +3677,8 @@ exec '{}' "$@"
             .and_then(|value| value["port"].as_u64())
             .map(|port| port as u16);
         let app_after = app_authority_projection(&state);
-        let candidate_gone = candidate_pid
-            .is_some_and(|pid| process_start_identity_if_alive(pid).is_none());
+        let candidate_gone =
+            candidate_pid.is_some_and(|pid| process_start_identity_if_alive(pid).is_none());
         let prior_pid_gone = process_start_identity_if_alive(prior_pid).is_none();
         let restored_healthy = restored_pid.is_some()
             && restored_pid != Some(prior_pid)
@@ -3213,9 +3707,9 @@ exec '{}' "$@"
         force_cleanup_isolated_fixture(&state, &tmp, sandbox_port, proxy_port);
 
         assert!(
-            failed.as_ref().is_err_and(|error| {
-                error.contains("test-only managed launch commit failure")
-            }),
+            failed
+                .as_ref()
+                .is_err_and(|error| { error.contains("test-only managed launch commit failure") }),
             "fixture must reach the post-status managed-receipt failure: {failed:?}"
         );
         assert!(
@@ -3284,15 +3778,14 @@ exec '{}' "$@"
             &sandbox_home,
         )
         .unwrap();
-        let stable_authority = science_data.join("stable-authority.db");
+        let stable_authority = science_data.join("orgs/csswitch-test/stable-authority.db");
+        fs::create_dir_all(stable_authority.parent().unwrap()).unwrap();
         fs::write(&stable_authority, b"stable-private-authority\n").unwrap();
         fs::set_permissions(&stable_authority, fs::Permissions::from_mode(0o600)).unwrap();
         let stable_before = fs::read(&stable_authority).unwrap();
-        let prior_runtime = science::select_science_runtime_cached(
-            None,
-            &science::ScienceVersionCache::default(),
-        )
-        .unwrap();
+        let prior_runtime =
+            science::select_science_runtime_cached(None, &science::ScienceVersionCache::default())
+                .unwrap();
         let prior_pid = start_managed_fake_science(
             &fake_science,
             &sandbox_home,
@@ -3360,9 +3853,8 @@ exec '{}' "$@"
                 cleanup_log.clone(),
             )
         });
-        let _restart_seam = (oracle == "post-spawn-failure").then(|| {
-            sandbox_session::test_arm_prior_restart_post_spawn_failure(sandbox_port)
-        });
+        let _restart_seam = (oracle == "post-spawn-failure")
+            .then(|| sandbox_session::test_arm_prior_restart_post_spawn_failure(sandbox_port));
 
         let failed = sandbox_session::one_click_login(
             handle.clone(),
@@ -3374,21 +3866,21 @@ exec '{}' "$@"
         let candidate_pid = fs::read_to_string(&candidate_pid_log)
             .ok()
             .and_then(|pid| pid.trim().parse::<u32>().ok());
-        let capture_observation =
-            fs::read_to_string(&snapshot_observation).unwrap_or_default();
+        let capture_observation = fs::read_to_string(&snapshot_observation).unwrap_or_default();
         let expected_capture_observation = format!(
             "expected_prior_pid={prior_pid}\nexpected_receipt={}\nlistener=stopped\nprior_process=absent\nprior_receipt=absent\n",
             receipt_path.display()
         );
         let listener_after_failure = listener_pid_if_unique(sandbox_port);
-        let verified_restart_identity =
-            sandbox_session::test_prior_restart_post_spawn_identity();
+        let verified_restart_identity = sandbox_session::test_prior_restart_post_spawn_identity();
         let verified_restart_identity_absent =
-            verified_restart_identity.as_ref().is_some_and(|(pid, process_start)| {
-                listener_after_failure != Some(*pid)
-                    && science::test_process_start_identity_for_pid(*pid).as_ref()
-                        != Some(process_start)
-            });
+            verified_restart_identity
+                .as_ref()
+                .is_some_and(|(pid, process_start)| {
+                    listener_after_failure != Some(*pid)
+                        && science::test_process_start_identity_for_pid(*pid).as_ref()
+                            != Some(process_start)
+                });
         let receipt = fs::read(&receipt_path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
@@ -3397,8 +3889,8 @@ exec '{}' "$@"
             .and_then(|value| value["listener_pid"].as_u64())
             .map(|pid| pid as u32);
         let app_after = app_authority_projection(&state);
-        let candidate_gone = candidate_pid
-            .is_some_and(|pid| process_start_identity_if_alive(pid).is_none());
+        let candidate_gone =
+            candidate_pid.is_some_and(|pid| process_start_identity_if_alive(pid).is_none());
         let prior_gone = process_start_identity_if_alive(prior_pid).is_none();
         let stable_file_restored = fs::read(&stable_authority)
             .is_ok_and(|bytes| bytes == stable_before)
@@ -3415,10 +3907,7 @@ exec '{}' "$@"
                 crate::runtime::operation::LOCAL_HEALTH_TIMEOUT_MS,
             )
         };
-        let gateway_restored = lock(&state)
-            .proxy
-            .as_ref()
-            .map(std::process::Child::id)
+        let gateway_restored = lock(&state).proxy.as_ref().map(std::process::Child::id)
             == prior_gateway_pid
             && gateway_after.as_ref().is_some_and(|health| {
                 health.gateway == prior_gateway_health.gateway
@@ -3469,9 +3958,9 @@ exec '{}' "$@"
         force_cleanup_isolated_fixture(&state, &tmp, sandbox_port, proxy_port);
 
         assert!(
-            failed.as_ref().is_err_and(|error| {
-                error.contains("test-only managed launch commit failure")
-            }),
+            failed
+                .as_ref()
+                .is_err_and(|error| { error.contains("test-only managed launch commit failure") }),
             "fixture must reach the post-status managed-receipt failure: {failed:?}"
         );
         assert_eq!(
@@ -3492,11 +3981,11 @@ exec '{}' "$@"
                 && app_after.science_confirmed_stopped.is_none()
                 && safe_stop.is_ok()
                 && listener_closed_after_safe_stop;
-            let degraded_surface = result_surface.contains("degraded")
-                && result_surface.contains("cleanup_required");
-            let cleanup_path_reported = cleanup_residual.as_ref().is_some_and(|path| {
-                result_surface.contains(&path.to_string_lossy().to_string())
-            });
+            let degraded_surface =
+                result_surface.contains("degraded") && result_surface.contains("cleanup_required");
+            let cleanup_path_reported = cleanup_residual
+                .as_ref()
+                .is_some_and(|path| result_surface.contains(&path.to_string_lossy().to_string()));
             assert!(
                 prior_restarted
                     && cleanup_residual_private
@@ -3591,18 +4080,20 @@ exec '{}' "$@"
             &sandbox_home,
         )
         .unwrap();
-        let stable_authority = science_data.join("prior-authority.db");
+        let stable_authority = science_data.join("orgs/csswitch-test/prior-authority.db");
+        fs::create_dir_all(stable_authority.parent().unwrap()).unwrap();
         fs::write(&stable_authority, b"prior-authority-bytes\n").unwrap();
         fs::set_permissions(&stable_authority, fs::Permissions::from_mode(0o600)).unwrap();
         let stable_bytes_before = fs::read(&stable_authority).unwrap();
-        let stable_mode_before =
-            fs::metadata(&stable_authority).unwrap().permissions().mode() & 0o777;
+        let stable_mode_before = fs::metadata(&stable_authority)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
         let config_before = config::load_from(&config_dir).unwrap();
-        let prior_runtime = science::select_science_runtime_cached(
-            None,
-            &science::ScienceVersionCache::default(),
-        )
-        .unwrap();
+        let prior_runtime =
+            science::select_science_runtime_cached(None, &science::ScienceVersionCache::default())
+                .unwrap();
         let prior_pid = start_managed_fake_science(
             &fake_science,
             &sandbox_home,
@@ -3688,7 +4179,8 @@ exec '{}' "$@"
         assert!(
             failed
                 .as_ref()
-                .is_err_and(|error| error.contains("test-only one-click authority snapshot capture failure")),
+                .is_err_and(|error| error
+                    .contains("test-only one-click authority snapshot capture failure")),
             "fixture must reach the injected snapshot capture failure: {failed:?}"
         );
         assert!(
@@ -3753,11 +4245,9 @@ exec '{}' "$@"
             &sandbox_home,
         )
         .unwrap();
-        let prior_runtime = science::select_science_runtime_cached(
-            None,
-            &science::ScienceVersionCache::default(),
-        )
-        .unwrap();
+        let prior_runtime =
+            science::select_science_runtime_cached(None, &science::ScienceVersionCache::default())
+                .unwrap();
         let prior_pid = start_managed_fake_science(
             &fake_science,
             &sandbox_home,
@@ -3839,11 +4329,8 @@ exec '{}' "$@"
         assert_eq!(result["status"], "error");
         assert_eq!(result["recovery_status"], "restored");
         assert!(
-            result["message"]
-                .as_str()
-                .is_some_and(|message| message.contains(
-                    "test-only one-click authority snapshot capture failure"
-                )),
+            result["message"].as_str().is_some_and(|message| message
+                .contains("test-only one-click authority snapshot capture failure")),
             "structured result must retain the original capture cause: {result}"
         );
         assert_eq!(
@@ -3874,11 +4361,7 @@ exec '{}' "$@"
         let (proxy_port, sandbox_port) = ssh_fixture_ports();
         let gateway_publish_log = tmp.join("gateway-publish.log");
         fs::write(&gateway_publish_log, b"").unwrap();
-        fs::set_permissions(
-            &gateway_publish_log,
-            fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
+        fs::set_permissions(&gateway_publish_log, fs::Permissions::from_mode(0o600)).unwrap();
 
         let mut env_guard = EnvGuard::new();
         env_guard.set("HOME", &home);
@@ -3887,10 +4370,7 @@ exec '{}' "$@"
         env_guard.set("CSSWITCH_TEST_OPEN_BIN", bin_dir.join("open"));
         env_guard.set("CSSWITCH_TEST_FAKE_SCIENCE_IDENTITY", "1");
         env_guard.set("CSSWITCH_DOCTOR_CHECK_REAL_HOME", "0");
-        env_guard.set(
-            "CSSWITCH_TEST_GATEWAY_PUBLISH_LOG",
-            &gateway_publish_log,
-        );
+        env_guard.set("CSSWITCH_TEST_GATEWAY_PUBLISH_LOG", &gateway_publish_log);
         env_guard.set(
             "PATH",
             format!(
@@ -3916,11 +4396,9 @@ exec '{}' "$@"
             &sandbox_home,
         )
         .unwrap();
-        let prior_runtime = science::select_science_runtime_cached(
-            None,
-            &science::ScienceVersionCache::default(),
-        )
-        .unwrap();
+        let prior_runtime =
+            science::select_science_runtime_cached(None, &science::ScienceVersionCache::default())
+                .unwrap();
         let committed_binding = crate::runtime::provider::desired_runtime_binding(
             &cfg,
             cfg.active_profile().unwrap(),
@@ -3975,8 +4453,7 @@ exec '{}' "$@"
             crate::runtime::operation::LOCAL_HEALTH_TIMEOUT_MS,
         )
         .expect("prior Gateway must be healthy");
-        let _catalog_seam =
-            sandbox_session::test_arm_healthy_reopen_catalog_failure(proxy_port);
+        let _catalog_seam = sandbox_session::test_arm_healthy_reopen_catalog_failure(proxy_port);
 
         let failed = sandbox_session::one_click_login(
             handle.clone(),
@@ -4011,13 +4488,14 @@ exec '{}' "$@"
                 .proxy
                 .as_mut()
                 .is_some_and(|child| child.try_wait().unwrap().is_none());
-            let context_matches = authority
-                .gateway_launch_context
-                .as_ref()
-                .is_some_and(|context| {
-                    context.profile == prior_profile
-                        && context.science_runtime.as_ref() == Some(&prior_runtime)
-                });
+            let context_matches =
+                authority
+                    .gateway_launch_context
+                    .as_ref()
+                    .is_some_and(|context| {
+                        context.profile == prior_profile
+                            && context.science_runtime.as_ref() == Some(&prior_runtime)
+                    });
             (
                 authority.proxy.as_ref().map(std::process::Child::id),
                 running,
@@ -4036,8 +4514,7 @@ exec '{}' "$@"
         let restored_publish = publishes.get(2);
         let gateway_restored = publishes.len() == 3
             && prior_gateway_pid == publishes.first().map(|publish| publish.0)
-            && candidate_pid
-                .is_some_and(|pid| process_start_identity_if_alive(pid).is_none())
+            && candidate_pid.is_some_and(|pid| process_start_identity_if_alive(pid).is_none())
             && tracked_gateway_running
             && tracked_gateway_pid == restored_publish.map(|publish| publish.0)
             && restored_publish.is_some_and(|publish| {
@@ -4054,8 +4531,7 @@ exec '{}' "$@"
                 restored.gateway == prior_gateway_health.gateway
                     && restored.provider == prior_gateway_health.provider
                     && restored.shim == prior_gateway_health.shim
-                    && restored.provider_contract_id
-                        == prior_gateway_health.provider_contract_id
+                    && restored.provider_contract_id == prior_gateway_health.provider_contract_id
                     && restored.provider_contract_digest
                         == prior_gateway_health.provider_contract_digest
                     && restored.catalog_fp == prior_gateway_health.catalog_fp
@@ -4077,9 +4553,9 @@ exec '{}' "$@"
         force_cleanup_isolated_fixture(&state, &tmp, sandbox_port, proxy_port);
 
         assert!(
-            failed.as_ref().is_err_and(|error| {
-                error.contains("test-only healthy reopen catalog failure")
-            }),
+            failed
+                .as_ref()
+                .is_err_and(|error| { error.contains("test-only healthy reopen catalog failure") }),
             "fixture must fail only after the active Gateway restart: {failed:?}"
         );
         assert!(
@@ -4091,8 +4567,7 @@ exec '{}' "$@"
     #[test]
     #[ignore = "explicit Acceptance-boundary optional SSH feature-off smoke; temp HOME, fake Science, and loopback only"]
     fn isolated_ssh_feature_off_ignores_missing_optional_wrapper_and_system_config() {
-        let cleanup_oracle =
-            env::var("CSSWITCH_TEST_COMMIT_CLEANUP_ORACLE").unwrap_or_default();
+        let cleanup_oracle = env::var("CSSWITCH_TEST_COMMIT_CLEANUP_ORACLE").unwrap_or_default();
         assert!(
             matches!(cleanup_oracle.as_str(), "" | "once" | "persistent"),
             "unknown commit cleanup oracle: {cleanup_oracle}"
@@ -4176,16 +4651,10 @@ exec '{}' "$@"
             proxy_port,
         );
 
-        let started = sandbox_session::one_click_login(
-            handle,
-            state.clone(),
-            lifecycle.as_ref(),
-            None,
-            None,
-        );
-        let serve_count = fs::read_to_string(
-            sandbox_home.join(".claude-science/fake-science/serve-count"),
-        );
+        let started =
+            sandbox_session::one_click_login(handle, state.clone(), lifecycle.as_ref(), None, None);
+        let serve_count =
+            fs::read_to_string(sandbox_home.join(".claude-science/fake-science/serve-count"));
         let committed = config::load_from(&config_dir).unwrap();
         let sandbox_ssh_after = authority_tree(&sandbox_ssh);
         let system_ssh_after = authority_tree(&home.join(".ssh"));
@@ -4223,7 +4692,10 @@ exec '{}' "$@"
                 .is_ok_and(|value| value["action"] == "started"),
             "disabled optional SSH must not require HOME/.ssh/config or a packaged wrapper: {started:?}"
         );
-        assert!(system_ssh_after.is_empty(), "feature-off flow must not create a system SSH authority");
+        assert!(
+            system_ssh_after.is_empty(),
+            "feature-off flow must not create a system SSH authority"
+        );
         assert_eq!(
             sandbox_ssh_after, sandbox_ssh_before,
             "feature-off flow must preserve foreign sandbox SSH files exactly"
@@ -4354,15 +4826,10 @@ exec '{}' "$@"
         fs::create_dir(&neighbor).unwrap();
         fs::set_permissions(&neighbor, fs::Permissions::from_mode(0o700)).unwrap();
         fs::write(neighbor.join("sentinel"), b"unrelated-neighbor\n").unwrap();
-        fs::set_permissions(
-            neighbor.join("sentinel"),
-            fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
+        fs::set_permissions(neighbor.join("sentinel"), fs::Permissions::from_mode(0o600)).unwrap();
         let neighbor_before = authority_tree(&neighbor);
 
-        let manifest_path =
-            config_dir.join(config::PENDING_AUTHORITY_CLEANUP_MANIFEST_FILE);
+        let manifest_path = config_dir.join(config::PENDING_AUTHORITY_CLEANUP_MANIFEST_FILE);
         let residual_metadata = fs::symlink_metadata(&residual).unwrap();
         let managed_id = residual
             .file_name()
@@ -4392,24 +4859,25 @@ exec '{}' "$@"
                     && !metadata.file_type().is_symlink()
                     && metadata.permissions().mode() & 0o777 == 0o700
             }) && parsed.is_some_and(|value| {
-                value.as_object().is_some_and(|object| object.len() == 2)
-                    && value["schema_version"] == 1
+                value.as_object().is_some_and(|object| object.len() == 3)
+                    && value["schema_version"] == 2
+                    && value["disposition"] == "cleanup_only"
                     && value["entries"]
                         == serde_json::json!([{
-                        "managed_id": managed_id,
-                        "path": residual.to_string_lossy().to_string(),
-                        "device": residual_metadata.dev(),
-                        "inode": residual_metadata.ino(),
-                        "marker": managed_id
-                    }])
+                            "managed_id": managed_id,
+                            "path": residual.to_string_lossy().to_string(),
+                            "device": residual_metadata.dev(),
+                            "inode": residual_metadata.ino(),
+                            "marker": managed_id
+                        }])
             }) && fs::read(residual.join(".csswitch-one-click-rollback.marker"))
                 .is_ok_and(|bytes| bytes == format!("{managed_id}\n").as_bytes())
                 && {
-                let raw = String::from_utf8_lossy(bytes);
-                raw.contains(&residual.to_string_lossy().to_string())
-                    && !raw.contains("foreign-known-host-authority")
-                    && !raw.contains("ssh-transaction-fake-key-never-log")
-                    && (cfg.secret.is_empty() || !raw.contains(&cfg.secret))
+                    let raw = String::from_utf8_lossy(bytes);
+                    raw.contains(&residual.to_string_lossy().to_string())
+                        && !raw.contains("foreign-known-host-authority")
+                        && !raw.contains("ssh-transaction-fake-key-never-log")
+                        && (cfg.secret.is_empty() || !raw.contains(&cfg.secret))
                 }
         });
         let lifecycle_identity = config::PendingCleanupIdentity {
@@ -4436,8 +4904,7 @@ exec '{}' "$@"
                     sandbox_url,
                     ..
                 } = &mut *authority;
-                let result =
-                    science::stop_sandbox(&handle, sandbox, sandbox_url, runtime.as_ref());
+                let result = science::stop_sandbox(&handle, sandbox, sandbox_url, runtime.as_ref());
                 authority.stop_proxy();
                 result
             };
@@ -4472,14 +4939,11 @@ exec '{}' "$@"
                 .is_some_and(|entries| entries.is_empty()),
             _ => false,
         };
-        let lifecycle_observation =
-            config::test_pending_cleanup_lifecycle_observation();
+        let lifecycle_observation = config::test_pending_cleanup_lifecycle_observation();
         let lifecycle_order_exact = !oracle.starts_with("durable-")
             || lifecycle_observation.events
                 == vec![
-                    config::PendingCleanupLifecycleEvent::Register(
-                        lifecycle_identity.clone(),
-                    ),
+                    config::PendingCleanupLifecycleEvent::Register(lifecycle_identity.clone()),
                     config::PendingCleanupLifecycleEvent::Remove {
                         identity: lifecycle_identity,
                         not_found: oracle == "durable-missing",
@@ -4589,9 +5053,7 @@ exec '{}' "$@"
         let mut cfg = ssh_fixture_config(mock_upstream.port, proxy_port, sandbox_port);
         cfg.reuse_system_ssh = false;
         config::save_to(&config_dir, &cfg).unwrap();
-        let sandbox_parent = home
-            .join(config::CONFIG_DIR_NAME)
-            .join("sandbox");
+        let sandbox_parent = home.join(config::CONFIG_DIR_NAME).join("sandbox");
         fs::create_dir_all(&sandbox_parent).unwrap();
         let managed_id = ".one-click-rollback-abcdefabcdefabcdefabcdefabcdefab";
         let replacement_marker = "race-replacement-object-must-survive";
@@ -4602,8 +5064,7 @@ exec '{}' "$@"
         fs::write(&marker_path, format!("{managed_id}\n")).unwrap();
         fs::set_permissions(&marker_path, fs::Permissions::from_mode(0o600)).unwrap();
         let metadata = fs::symlink_metadata(&managed).unwrap();
-        let manifest_path =
-            config_dir.join(config::PENDING_AUTHORITY_CLEANUP_MANIFEST_FILE);
+        let manifest_path = config_dir.join(config::PENDING_AUTHORITY_CLEANUP_MANIFEST_FILE);
         let manifest_bytes = serde_json::to_vec(&serde_json::json!({
             "schema_version": 1,
             "entries": [{
@@ -4641,8 +5102,7 @@ exec '{}' "$@"
             sandbox_port,
             proxy_port,
         );
-        let _lifecycle_observation =
-            config::test_arm_pending_cleanup_lifecycle(None);
+        let _lifecycle_observation = config::test_arm_pending_cleanup_lifecycle(None);
         config::test_configure_pending_cleanup_race(if case == "missing-recreated" {
             config::PendingCleanupRaceAction::Recreate {
                 path: managed.clone(),
@@ -4657,9 +5117,10 @@ exec '{}' "$@"
         let result =
             sandbox_session::one_click_login(handle, state.clone(), lifecycle.as_ref(), None, None);
         let observation = config::test_pending_cleanup_lifecycle_observation();
-        let zero_remove = observation.events.iter().all(|event| {
-            !matches!(event, config::PendingCleanupLifecycleEvent::Remove { .. })
-        });
+        let zero_remove = observation
+            .events
+            .iter()
+            .all(|event| !matches!(event, config::PendingCleanupLifecycleEvent::Remove { .. }));
         let boundary_exact = observation.validated_loader_count == 1
             && observation.initial_ticket_count == 1
             && observation.race_hook_count == 1
@@ -4672,21 +5133,23 @@ exec '{}' "$@"
             && TcpStream::connect(("127.0.0.1", proxy_port)).is_err()
             && TcpStream::connect(("127.0.0.1", sandbox_port)).is_err();
         let race_effect_preserved = if case == "missing-recreated" {
-            observation.race_identity.as_ref().is_some_and(|race_identity| {
-                race_identity.path == managed
-                    && race_identity.marker == replacement_marker
-                    && race_identity.device == metadata.dev()
-                    && (race_identity.inode != metadata.ino()
-                        || race_identity.marker != managed_id)
-                    && fs::symlink_metadata(&managed).is_ok_and(|current| {
-                        current.dev() == race_identity.device
-                            && current.ino() == race_identity.inode
-                    })
-                    && fs::read(&marker_path)
-                        .is_ok_and(|bytes| {
+            observation
+                .race_identity
+                .as_ref()
+                .is_some_and(|race_identity| {
+                    race_identity.path == managed
+                        && race_identity.marker == replacement_marker
+                        && race_identity.device == metadata.dev()
+                        && (race_identity.inode != metadata.ino()
+                            || race_identity.marker != managed_id)
+                        && fs::symlink_metadata(&managed).is_ok_and(|current| {
+                            current.dev() == race_identity.device
+                                && current.ino() == race_identity.inode
+                        })
+                        && fs::read(&marker_path).is_ok_and(|bytes| {
                             bytes == format!("{replacement_marker}\n").as_bytes()
                         })
-            })
+                })
         } else {
             !managed.exists()
         };
@@ -4753,9 +5216,7 @@ exec '{}' "$@"
         let mut cfg = ssh_fixture_config(mock_upstream.port, proxy_port, sandbox_port);
         cfg.reuse_system_ssh = false;
         config::save_to(&config_dir, &cfg).unwrap();
-        let sandbox_parent = home
-            .join(config::CONFIG_DIR_NAME)
-            .join("sandbox");
+        let sandbox_parent = home.join(config::CONFIG_DIR_NAME).join("sandbox");
         fs::create_dir_all(&sandbox_parent).unwrap();
         fs::set_permissions(&sandbox_parent, fs::Permissions::from_mode(0o700)).unwrap();
         let managed_id = ".one-click-rollback-0123456789abcdef0123456789abcdef";
@@ -4780,8 +5241,7 @@ exec '{}' "$@"
             inode: residual_metadata.ino(),
             marker: managed_id.to_string(),
         };
-        let manifest_path =
-            config_dir.join(config::PENDING_AUTHORITY_CLEANUP_MANIFEST_FILE);
+        let manifest_path = config_dir.join(config::PENDING_AUTHORITY_CLEANUP_MANIFEST_FILE);
         let manifest_bytes = serde_json::to_vec(&serde_json::json!({
             "schema_version": 1,
             "entries": [{
@@ -4844,11 +5304,13 @@ exec '{}' "$@"
         let manifest_after_fault = fs::read(&manifest_path).ok();
         let manifest_metadata_after_fault = fs::symlink_metadata(&manifest_path).ok();
         let old_manifest_exact = manifest_after_fault.as_deref() == Some(manifest_bytes.as_slice())
-            && manifest_metadata_after_fault.as_ref().is_some_and(|metadata| {
-                metadata.permissions().mode() & 0o777 == 0o600
-                    && metadata.dev() == manifest_before.dev()
-                    && metadata.ino() == manifest_before.ino()
-            });
+            && manifest_metadata_after_fault
+                .as_ref()
+                .is_some_and(|metadata| {
+                    metadata.permissions().mode() & 0o777 == 0o600
+                        && metadata.dev() == manifest_before.dev()
+                        && metadata.ino() == manifest_before.ino()
+                });
         let owned_temp_observed_and_cleaned = observed.as_ref().is_some_and(|observation| {
             observation.target_path == manifest_path
                 && observation.config_access_held
@@ -4857,9 +5319,7 @@ exec '{}' "$@"
                     .temp_path
                     .file_name()
                     .and_then(|name| name.to_str())
-                    .is_some_and(|name| {
-                        name.starts_with(".pending-authority-cleanup.v1.json.tmp-")
-                    })
+                    .is_some_and(|name| name.starts_with(".pending-authority-cleanup.v1.json.tmp-"))
                 && observation.temp_device == manifest_before.dev()
                 && observation.temp_inode > 0
                 && !observation.temp_path.exists()
@@ -4894,12 +5354,7 @@ exec '{}' "$@"
                 sandbox_url,
                 ..
             } = &mut *authority;
-            let _ = science::stop_sandbox(
-                &handle,
-                sandbox,
-                sandbox_url,
-                runtime.as_ref(),
-            );
+            let _ = science::stop_sandbox(&handle, sandbox, sandbox_url, runtime.as_ref());
             authority.stop_proxy();
         }
         drop(failpoint);
@@ -4920,30 +5375,26 @@ exec '{}' "$@"
                 .is_some_and(|entries| entries.is_empty()),
             _ => false,
         };
-        let fresh_retry_continued = second.as_ref().is_ok_and(|value| {
-            matches!(value["action"].as_str(), Some("started" | "reopened"))
-        });
+        let fresh_retry_continued = second
+            .as_ref()
+            .is_ok_and(|value| matches!(value["action"].as_str(), Some("started" | "reopened")));
         let neighbor_untouched = authority_tree(&neighbor) == neighbor_before;
-        let lifecycle_observation =
-            config::test_pending_cleanup_lifecycle_observation();
+        let lifecycle_observation = config::test_pending_cleanup_lifecycle_observation();
         let lifecycle_order_exact = lifecycle_observation.events
             == vec![
-                config::PendingCleanupLifecycleEvent::Register(
-                    lifecycle_identity.clone(),
-                ),
+                config::PendingCleanupLifecycleEvent::Register(lifecycle_identity.clone()),
                 config::PendingCleanupLifecycleEvent::Remove {
                     identity: lifecycle_identity,
                     not_found: true,
                 },
                 config::PendingCleanupLifecycleEvent::Clear,
             ];
-        let lifecycle_boundaries_exact =
-            lifecycle_observation.validated_loader_count == 1
-                && lifecycle_observation.initial_ticket_count == 1
-                && lifecycle_observation.race_hook_count == 1
-                && lifecycle_observation.delete_attempt_count == 0
-                && lifecycle_observation.completion_count == 1
-                && lifecycle_observation.causal_mismatch_count == 0;
+        let lifecycle_boundaries_exact = lifecycle_observation.validated_loader_count == 1
+            && lifecycle_observation.initial_ticket_count == 1
+            && lifecycle_observation.race_hook_count == 1
+            && lifecycle_observation.delete_attempt_count == 0
+            && lifecycle_observation.completion_count == 1
+            && lifecycle_observation.causal_mismatch_count == 0;
         cleanup
             .finish()
             .expect("manifest pre-rename fixture must leave no process or temp residue");
@@ -5034,13 +5485,14 @@ exec '{}' "$@"
         ));
         let result =
             sandbox_session::one_click_login(handle, state.clone(), lifecycle.as_ref(), None, None);
-        let lifecycle_observation =
-            config::test_pending_cleanup_lifecycle_observation();
+        let lifecycle_observation = config::test_pending_cleanup_lifecycle_observation();
         let residual = lifecycle_observation
             .attempted_register
             .as_ref()
             .map(|identity| identity.path.clone());
-        let remove_log_empty = fs::read_to_string(&cleanup_log).unwrap_or_default().is_empty();
+        let remove_log_empty = fs::read_to_string(&cleanup_log)
+            .unwrap_or_default()
+            .is_empty();
         let residual_private = residual.as_ref().is_some_and(|path| path.is_dir());
         let register_failed_before_remove = result.is_err()
             && lifecycle_observation.attempted_register.is_some()
@@ -5118,9 +5570,7 @@ exec '{}' "$@"
         cfg.reuse_system_ssh = false;
         config::save_to(&config_dir, &cfg).unwrap();
         let config_before = config::load_from(&config_dir).unwrap();
-        let sandbox_parent = home
-            .join(config::CONFIG_DIR_NAME)
-            .join("sandbox");
+        let sandbox_parent = home.join(config::CONFIG_DIR_NAME).join("sandbox");
         fs::create_dir_all(&sandbox_parent).unwrap();
         let managed_id = ".one-click-rollback-fedcba9876543210fedcba9876543210";
         let managed = sandbox_parent.join(managed_id);
@@ -5129,12 +5579,10 @@ exec '{}' "$@"
         fs::write(&marker, format!("{managed_id}\n")).unwrap();
         fs::set_permissions(&marker, fs::Permissions::from_mode(0o600)).unwrap();
         let metadata = fs::symlink_metadata(&managed).unwrap();
-        let neighbor =
-            sandbox_parent.join(".one-click-rollback-11111111111111111111111111111111");
+        let neighbor = sandbox_parent.join(".one-click-rollback-11111111111111111111111111111111");
         fs::create_dir(&neighbor).unwrap();
         fs::write(neighbor.join("sentinel"), b"neighbor\n").unwrap();
-        let manifest_path =
-            config_dir.join(config::PENDING_AUTHORITY_CLEANUP_MANIFEST_FILE);
+        let manifest_path = config_dir.join(config::PENDING_AUTHORITY_CLEANUP_MANIFEST_FILE);
         let mut manifest = serde_json::json!({
             "schema_version": 1,
             "entries": [{
@@ -5163,9 +5611,7 @@ exec '{}' "$@"
             let marker_ticket = entry
                 .and_then(|entry| entry["marker"].as_str())
                 .unwrap_or_default();
-            let suffix = id
-                .strip_prefix(".one-click-rollback-")
-                .unwrap_or_default();
+            let suffix = id.strip_prefix(".one-click-rollback-").unwrap_or_default();
             [
                 lstat.is_some_and(|metadata| {
                     metadata.is_file()
@@ -5182,15 +5628,9 @@ exec '{}' "$@"
                             entries.len() == 1
                                 && entries[0].as_object().is_some_and(|object| {
                                     object.len() == 5
-                                        && [
-                                            "managed_id",
-                                            "path",
-                                            "device",
-                                            "inode",
-                                            "marker",
-                                        ]
-                                        .iter()
-                                        .all(|key| object.contains_key(*key))
+                                        && ["managed_id", "path", "device", "inode", "marker"]
+                                            .iter()
+                                            .all(|key| object.contains_key(*key))
                                         && entries[0]["managed_id"].is_string()
                                         && entries[0]["path"].is_string()
                                         && entries[0]["device"].as_u64().is_some()
@@ -5203,30 +5643,21 @@ exec '{}' "$@"
                     && suffix
                         .bytes()
                         .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')),
-                entry
-                    .and_then(|entry| entry["path"].as_str())
-                    == Some(expected_raw_path),
+                entry.and_then(|entry| entry["path"].as_str()) == Some(expected_raw_path),
                 entry.and_then(|entry| entry["device"].as_u64())
                     == target_metadata.as_ref().map(MetadataExt::dev),
                 entry.and_then(|entry| entry["inode"].as_u64())
                     == target_metadata.as_ref().map(MetadataExt::ino),
-                target
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    == Some(id)
+                target.file_name().and_then(|name| name.to_str()) == Some(id)
                     && marker_ticket == id
                     && fs::read(target.join(".csswitch-one-click-rollback.marker"))
                         .is_ok_and(|bytes| bytes == format!("{marker_ticket}\n").as_bytes()),
             ]
         };
-        let baseline_vector = predicate_vector(
-            &manifest_path,
-            &managed,
-            managed.to_string_lossy().as_ref(),
-        );
+        let baseline_vector =
+            predicate_vector(&manifest_path, &managed, managed.to_string_lossy().as_ref());
         assert_eq!(
-            baseline_vector,
-            [true; 7],
+            baseline_vector, [true; 7],
             "unsafe matrix baseline E1/E2/P1/P2/P3/P4/P5 must all be true"
         );
         let mut predicate_target = managed.clone();
@@ -5250,11 +5681,8 @@ exec '{}' "$@"
                 "marker": invalid_id
             });
         } else if case == "path-mismatch" {
-            manifest["entries"][0]["path"] = serde_json::json!(format!(
-                "{}/./{}",
-                sandbox_parent.display(),
-                managed_id
-            ));
+            manifest["entries"][0]["path"] =
+                serde_json::json!(format!("{}/./{}", sandbox_parent.display(), managed_id));
         } else if case == "device-mismatch" {
             manifest["entries"][0]["device"] = serde_json::json!(metadata.dev() + 1);
         } else if case == "inode-mismatch" {
@@ -5288,8 +5716,7 @@ exec '{}' "$@"
             fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
             fs::set_permissions(&manifest_path, fs::Permissions::from_mode(0o600)).unwrap();
         }
-        let post_vector =
-            predicate_vector(&manifest_path, &predicate_target, &expected_raw_path);
+        let post_vector = predicate_vector(&manifest_path, &predicate_target, &expected_raw_path);
         let expected_false = match case.as_str() {
             "manifest-symlink" => 0,
             "extra-field" => 1,
@@ -5340,8 +5767,8 @@ exec '{}' "$@"
             && lock(&state).sandbox.is_none()
             && TcpStream::connect(("127.0.0.1", proxy_port)).is_err()
             && TcpStream::connect(("127.0.0.1", sandbox_port)).is_err();
-        let config_unchanged = config::load_from(&config_dir)
-            .is_ok_and(|current| current == config_before);
+        let config_unchanged =
+            config::load_from(&config_dir).is_ok_and(|current| current == config_before);
         let authority_untouched = authority_tree(&sandbox_parent) == authority_before;
         let target_untouched = authority_tree(&predicate_target) == target_before;
         let neighbor_untouched = authority_tree(&neighbor) == neighbor_before;
@@ -5355,16 +5782,18 @@ exec '{}' "$@"
                 ) == manifest_identity_before
             });
         let symlink_target_untouched =
-            symlink_target.as_ref().is_none_or(|(path, before, identity)| {
-                authority_tree(path) == *before
-                    && fs::symlink_metadata(path).is_ok_and(|metadata| {
-                        (
-                            metadata.dev(),
-                            metadata.ino(),
-                            metadata.permissions().mode() & 0o777,
-                        ) == *identity
-                    })
-            });
+            symlink_target
+                .as_ref()
+                .is_none_or(|(path, before, identity)| {
+                    authority_tree(path) == *before
+                        && fs::symlink_metadata(path).is_ok_and(|metadata| {
+                            (
+                                metadata.dev(),
+                                metadata.ino(),
+                                metadata.permissions().mode() & 0o777,
+                            ) == *identity
+                        })
+                });
         cleanup
             .finish()
             .expect("unsafe manifest fixture must leave no process or temp residue");
@@ -5442,25 +5871,19 @@ exec '{}' "$@"
             proxy_port,
         );
         science::test_reset_managed_launch_commit_failure_once();
-        let canary =
-            format!("rollback-raw-canary-credential-{}", config::new_id());
-        let _rollback_seam =
-            sandbox_session::test_arm_rollback_diagnostic_canary(&canary);
-        let _cleanup_lifecycle =
-            config::test_arm_pending_cleanup_lifecycle(None);
+        let canary = format!("rollback-raw-canary-credential-{}", config::new_id());
+        let _rollback_seam = sandbox_session::test_arm_rollback_diagnostic_canary(&canary);
+        let _cleanup_lifecycle = config::test_arm_pending_cleanup_lifecycle(None);
         let result =
             sandbox_session::one_click_login(handle, state.clone(), lifecycle.as_ref(), None, None);
         let surface = match &result {
             Ok(value) => value.to_string(),
             Err(error) => error.clone(),
         };
-        let target_failure_reached =
-            surface.contains("test-only managed launch commit failure");
+        let target_failure_reached = surface.contains("test-only managed launch commit failure");
         let diagnostic_credential_free = !surface.contains(&canary);
-        let valuable_snapshot =
-            sandbox_session::test_rollback_diagnostic_snapshot();
-        let cleanup_observation =
-            config::test_pending_cleanup_lifecycle_observation();
+        let valuable_snapshot = sandbox_session::test_rollback_diagnostic_snapshot();
+        let cleanup_observation = config::test_pending_cleanup_lifecycle_observation();
         let failed_restore_preserved_unregistered_snapshot =
             valuable_snapshot.as_ref().is_some_and(|path| path.is_dir())
                 && cleanup_observation.events.is_empty()
@@ -6228,9 +6651,9 @@ exec '{}' "$@"
             st.science_runtime = Some(runtime_before_stop_oracles.clone());
             st.sandbox_url = url_before_stop_oracles;
         }
-        cleanup
-            .finish()
-            .expect("all isolated Science and Gateway fixtures must cleanly stop before oracle assertions");
+        cleanup.finish().expect(
+            "all isolated Science and Gateway fixtures must cleanly stop before oracle assertions",
+        );
 
         assert!(
             complete_port_sequence,
@@ -6523,11 +6946,7 @@ exec '{}' "$@"
         let bin_dir = tmp.join("bin");
         fs::create_dir_all(home.join(".ssh")).unwrap();
         fs::write(home.join(".ssh/config"), "Host isolated-test-host\n").unwrap();
-        fs::set_permissions(
-            home.join(".ssh/config"),
-            fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
+        fs::set_permissions(home.join(".ssh/config"), fs::Permissions::from_mode(0o600)).unwrap();
         let fake_science = write_test_bins(&bin_dir).canonicalize().unwrap();
         let mock_upstream = start_mock_upstream();
         let (proxy_port, sandbox_port) = ssh_fixture_ports();
@@ -6557,12 +6976,9 @@ exec '{}' "$@"
 
         let config_dir = config::default_dir();
         let mut cfg = ssh_fixture_config(mock_upstream.port, proxy_port, sandbox_port);
-        let original_api_canary =
-            format!("serialized-candidate-original-{}", config::new_id());
-        let drifted_api_canary =
-            format!("serialized-candidate-drifted-{}", config::new_id());
-        cfg.profile_by_id_mut("ssh-transaction").unwrap().api_key =
-            original_api_canary.clone();
+        let original_api_canary = format!("serialized-candidate-original-{}", config::new_id());
+        let drifted_api_canary = format!("serialized-candidate-drifted-{}", config::new_id());
+        cfg.profile_by_id_mut("ssh-transaction").unwrap().api_key = original_api_canary.clone();
         cfg.secret = config::new_id();
         cfg.experimental_codex_enabled = true;
         cfg.runtime_transaction = Some(config::RuntimeTransactionJournal {
@@ -6588,9 +7004,7 @@ exec '{}' "$@"
 
         let state: SharedAppState = Arc::new(Mutex::new(AppState::default()));
         let lifecycle = Arc::new(lifecycle::Lifecycle::new());
-        let supervisor = Arc::new(
-            crate::codex_auth_supervisor::CodexAuthSupervisor::default(),
-        );
+        let supervisor = Arc::new(crate::codex_auth_supervisor::CodexAuthSupervisor::default());
         let app = tauri::test::mock_builder()
             .manage(state.clone())
             .manage(lifecycle.clone())
@@ -6672,7 +7086,7 @@ exec '{}' "$@"
         let private_state = sandbox_home.parent().unwrap().join("state");
         let managed_receipt = config_dir.join("science-managed-launch.v1.json");
         let system_ssh_before = authority_tree(&home.join(".ssh"));
-        let science_before = authority_tree(&science_data);
+        let science_before = science_authority_projection(&science_data);
         let private_state_before = authority_tree(&private_state);
         let runtime_before = authority_tree(&config_dir.join("runtime"));
         let receipt_before = authority_tree(&managed_receipt);
@@ -6768,7 +7182,7 @@ exec '{}' "$@"
             .unwrap_or_default()
             .is_empty();
         let no_authority_mutation = authority_tree(&home.join(".ssh")) == system_ssh_before
-            && authority_tree(&science_data) == science_before
+            && science_authority_projection(&science_data) == science_before
             && authority_tree(&private_state) == private_state_before
             && authority_tree(&config_dir.join("runtime")) == runtime_before
             && authority_tree(&managed_receipt) == receipt_before
@@ -6811,9 +7225,9 @@ exec '{}' "$@"
                 && event_payloads
                     .iter()
                     .all(|payload| !payload.contains(*canary))
-                && log_authority.values().all(|entry| {
-                    !String::from_utf8_lossy(&entry.bytes).contains(*canary)
-                })
+                && log_authority
+                    .values()
+                    .all(|entry| !String::from_utf8_lossy(&entry.bytes).contains(*canary))
         });
         cleanup
             .finish()
@@ -6903,11 +7317,7 @@ exec '{}' "$@"
         fs::write(&sandbox_stub, &stub_bytes).unwrap();
         fs::set_permissions(&sandbox_stub, fs::Permissions::from_mode(0o600)).unwrap();
         fs::write(&foreign_neighbor, b"foreign-neighbor-must-survive\n").unwrap();
-        fs::set_permissions(
-            &foreign_neighbor,
-            fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
+        fs::set_permissions(&foreign_neighbor, fs::Permissions::from_mode(0o600)).unwrap();
 
         let science_data = sandbox_home.join(".claude-science");
         fs::create_dir_all(&science_data).unwrap();
@@ -6928,13 +7338,10 @@ exec '{}' "$@"
             fs::Permissions::from_mode(0o600),
         )
         .unwrap();
-        let inplace_authority = science_data.join("prior-inplace.db");
+        let inplace_authority = science_data.join("orgs/csswitch-test/prior-inplace.db");
+        fs::create_dir_all(inplace_authority.parent().unwrap()).unwrap();
         fs::write(&inplace_authority, b"prior-inplace-authority\n").unwrap();
-        fs::set_permissions(
-            &inplace_authority,
-            fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
+        fs::set_permissions(&inplace_authority, fs::Permissions::from_mode(0o600)).unwrap();
         let failure_marker = tmp.join("serve-mutation-reached");
         let failure_control = science_data.join("fake-science/fail-after-inplace-mutation");
         fs::create_dir_all(failure_control.parent().unwrap()).unwrap();
@@ -6947,17 +7354,11 @@ exec '{}' "$@"
             ),
         )
         .unwrap();
-        fs::set_permissions(
-            &failure_control,
-            fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
+        fs::set_permissions(&failure_control, fs::Permissions::from_mode(0o600)).unwrap();
 
-        let prior_runtime = science::select_science_runtime_cached(
-            None,
-            &science::ScienceVersionCache::default(),
-        )
-        .unwrap();
+        let prior_runtime =
+            science::select_science_runtime_cached(None, &science::ScienceVersionCache::default())
+                .unwrap();
         let state: SharedAppState = Arc::new(Mutex::new(AppState::default()));
         {
             let mut authority = lock(&state);
@@ -6981,7 +7382,7 @@ exec '{}' "$@"
         let config_before = config::load_from(&config_dir).unwrap();
         let app_before = app_authority_projection(&state);
         let system_ssh_before = authority_tree(&system_ssh);
-        let science_before = authority_tree(&science_data);
+        let science_before = science_authority_projection(&science_data);
         let private_state = sandbox_home.parent().unwrap().join("state");
         let private_state_before = authority_tree(&private_state);
         let runtime_before = authority_tree(&config_dir.join("runtime"));
@@ -7024,7 +7425,7 @@ exec '{}' "$@"
             && config_after_failure.runtime_transaction == config_before.runtime_transaction
             && app_after_failure == app_before
             && authority_tree(&system_ssh) == system_ssh_before
-            && authority_tree(&science_data) == science_before
+            && science_authority_projection(&science_data) == science_before
             && authority_tree(&private_state) == private_state_before
             && authority_tree(&config_dir.join("runtime")) == runtime_before
             && authority_tree(&receipt) == receipt_before
@@ -7037,21 +7438,14 @@ exec '{}' "$@"
             && neighbor_after_failure == neighbor_before;
 
         fs::remove_file(&failure_control).unwrap();
-        let retry = sandbox_session::one_click_login(
-            handle,
-            state.clone(),
-            lifecycle.as_ref(),
-            None,
-            None,
-        );
+        let retry =
+            sandbox_session::one_click_login(handle, state.clone(), lifecycle.as_ref(), None, None);
         let retry_surface = retry
             .as_ref()
             .map(serde_json::Value::to_string)
             .unwrap_or_else(|error| error.clone());
         let retry_idempotent = retry.as_ref().is_ok_and(|value| {
-            value["action"] == "started"
-                && value["stage"] == "complete"
-                && value["status"] == "ok"
+            value["action"] == "started" && value["stage"] == "complete" && value["status"] == "ok"
         }) && fs::read_to_string(
             science_data.join("fake-science/serve-count"),
         )
@@ -7069,9 +7463,7 @@ exec '{}' "$@"
         let sinks_credential_free = [
             failure_surface.as_str(),
             retry_surface.as_str(),
-            fs::read_to_string(&open_log)
-                .unwrap_or_default()
-                .as_str(),
+            fs::read_to_string(&open_log).unwrap_or_default().as_str(),
         ]
         .iter()
         .all(|sink| !sink.contains(&api_canary) && !sink.contains(&config_before.secret));
