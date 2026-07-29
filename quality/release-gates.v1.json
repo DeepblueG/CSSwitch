@@ -312,7 +312,7 @@
       "profile": "product",
       "status": "active",
       "owner": "science-runtime",
-      "reason": "Future isolated metadata parser gate; signing and installed runtime remain separate.",
+      "reason": "The exact metadata parser and isolated App-seeded updater snapshot/version oracle are source-reproduced and source-fixed. Final artifact, installed runtime, signing, public, and live evidence remain pending.",
       "expiry": "2026-10-01",
       "replacement_id": null,
       "evidence_layer": "source-test",

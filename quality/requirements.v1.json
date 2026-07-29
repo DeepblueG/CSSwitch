@@ -309,7 +309,7 @@
       "id": "REQ-083-SCIENCE-UPDATER",
       "version": "v0.8.3",
       "title": "Science check-only and CSSwitch updater boundary",
-      "description": "Science check-only behavior, the standalone updater executable, and the DMG-seeded installed App must remain distinct. The fixed updater path must validate the standalone identity, fail closed on invalid candidates, and commit only the exact same-open SHA-256 snapshot.",
+      "description": "Science check-only behavior, standalone updater artifacts, and DMG-seeded installed-App artifacts remain distinct evidence. The fixed updater path may contain either of the two exact field-observed official executable identifiers; it must require the exact Team ID, fail closed on every other candidate, and commit only the exact same-open SHA-256 snapshot.",
       "status": "active",
       "owner": "science-runtime",
       "depends_on": [
@@ -317,7 +317,7 @@
       ],
       "acceptance_conditions": [
         "Record check-only, standalone updater, and DMG-seed behavior separately.",
-        "Require exact standalone updater identifier and Team ID without treating embedded metadata as cryptographic provenance.",
+        "Require one of the two exact field-observed updater-path identifiers and the exact Team ID without treating embedded metadata as cryptographic provenance.",
         "Bind official_updated selection to a stable same-open SHA-256 content-addressed snapshot and reject unsafe candidates without installed-App fallback.",
         "Prove installed_app selection separately against the DMG seed without mutating the Science data-dir.",
         "Do not promote source checks to installed or live Science proof."
@@ -336,7 +336,8 @@
         ],
         "basis": [
           ".agents/rules/science-runtime.md",
-          "official 0.1.20 and 0.1.25 updater and DMG-seed dual-track source oracles"
+          "official 0.1.20 and 0.1.25 updater and DMG-seed dual-track source oracles",
+          "field App-seeded 0.1.25 executable at the fixed updater path"
         ]
       },
       "retirement": null
@@ -520,7 +521,7 @@
         "REQ-083-EVIDENCE"
       ],
       "acceptance_conditions": [
-        "Register metadata false-rejection as an open product issue.",
+        "Reproduce metadata false-rejection and retain it as source-fixed-product-pending until later evidence layers close.",
         "Require fail-closed parser tests that distinguish malformed, mismatched, and valid metadata.",
         "Do not convert source parser evidence into signing or installed acceptance."
       ],
@@ -538,7 +539,7 @@
         ],
         "basis": [
           ".agents/rules/science-runtime.md",
-          "docs/audits/v082-change-audit.md"
+          "docs/evidence/investigations/2026-07-28-claude-science-0.1.25-compatibility.md"
         ]
       },
       "retirement": null
