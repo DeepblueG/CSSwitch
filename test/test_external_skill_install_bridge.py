@@ -322,8 +322,9 @@ class ExternalSkillInstallBridge(unittest.TestCase):
             "\n#[cfg(test)]\nmod transaction_tests", 1
         )[0]
         registration = one_click.index("register_before_science_start(")
-        launch = one_click.index('let status_result = Command::new("zsh")')
+        launch = one_click.index('let launch_child = Command::new("zsh")')
         self.assertLess(registration, launch)
+        self.assertIn(".spawn();", one_click[launch:])
         self.assertIn("RegistrationStatus::Warning(error)", one_click)
         self.assertNotIn("register_before_science_start(&app, &auth_dir)?", one_click)
 
