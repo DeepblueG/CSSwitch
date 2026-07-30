@@ -1,0 +1,111 @@
+# CSSwitch 产品与 Claude Science 能力地图
+
+本文是 Claude Science 能力范围与 CSSwitch 第三方模式托管决策的唯一当前表。
+它回答四个问题：
+
+1. 这项能力是否由 Claude Science 官方产品拥有；
+2. CSSwitch 第三方模式是否必须托管或只做窄桥接；
+3. 哪些管理面明确是 CSSwitch 的 non-target；
+4. 当前已知到哪一层，还有什么是 `UNKNOWN`。
+
+内部依赖和故障归属见
+[Claude Science 能力依赖](../architecture/science-capability-dependencies.md)。
+exact HEAD、版本、package、URL、hash、route 与日期化调查只留在
+[2026-07-30 架构调研](../audits/2026-07-30-v084-architecture-reconnaissance.md)。
+本表不是 release PASS，也不把 source、test、package-static 或 fixture 写成 live。
+
+## 判定词
+
+### 第三方模式处理
+
+| 判定 | 含义 |
+|---|---|
+| `必须托管` | 没有这层，CSSwitch 第三方模式不能安全、稳定地成立 |
+| `窄桥接` | CSSwitch 只提供明确入口或适配，不接管 Science 的领域语义 |
+| `原生保留` | 由 Science 继续管理；CSSwitch 只保证隔离、启动或状态保全 |
+| `不托管` | 由用户、账号或外部服务管理 |
+
+### 已知证据层
+
+| 层级 | 只能说明什么 |
+|---|---|
+| `OFFICIAL` | 官方公开 capability surface 或 ownership |
+| `SOURCE` | 当前 CSSwitch 源码中的实现边界 |
+| `TEST` | 对应 source contract 的测试结果 |
+| `PACKAGE-STATIC` | 指定 Science package 中存在的静态表面 |
+| `FIXTURE` | 隔离 mock/fake/fixture 中的行为；不得写成真实服务或 current live |
+| `ARTIFACT` / `INSTALLED-LIVE` | 仅在绑定 exact artifact/runtime 身份且已有相应证据时使用 |
+
+`OFFICIAL` 不证明指定账号、版本或第三方模式可用；`SOURCE/TEST` 不证明最终
+artifact；`PACKAGE-STATIC` 不证明实际调用；`FIXTURE` 不证明 live。
+
+## 能力、所有权与托管决策表
+
+`UNKNOWN` 单列记录尚未建立的事实。空白不表示已验证。
+
+| 能力域 | 能力 | Science 官方拥有 | CSSwitch 第三方模式处理 | CSSwitch non-target | 已知证据层 | UNKNOWN |
+|---|---|---|---|---|---|---|
+| 安装与平台 | macOS App/CLI | 是：Science App、CLI 与本地数据语义 | `原生保留`；第三方受管启动另见“第三方运行包络” | 否 | `OFFICIAL`、`PACKAGE-STATIC` | 当前 final artifact、普通 installed 行为与发布态 |
+| 安装与平台 | whole-app remote Linux / WSL | 是：Science 的整机部署能力 | `原生保留`；CSSwitch 当前不提供部署管理 | 是：CSSwitch 不提供 whole-app Linux/WSL 管理面 | `OFFICIAL` | 第三方模式兼容性、端口、preview 与数据目录行为 |
+| 第三方运行包络 | 隔离 HOME、持久 data-dir、runtime identity、启动/停止/恢复 | 否：这是 CSSwitch 第三方模式责任 | `必须托管` | 否 | `SOURCE`、`TEST` | final artifact 与 installed-live 连续性 |
+| 第三方运行包络 | 本地虚拟登录、loopback Gateway 与受限 route | 否：这是 CSSwitch 第三方模式责任 | `必须托管`；虚拟登录只建立本地受管路径 | 否 | `SOURCE`、`TEST` | final artifact、真实第三方请求与版本兼容性 |
+| Provider | profile、第三方 provider、模型 selector、模型目录与协议适配 | 否：第三方 provider 拥有模型、认证、配额和计费 | `必须托管` profile/selector/routing；不拥有模型服务 | 否 | `SOURCE`、`TEST` | 指定 provider/model 的 live、配额与服务质量 |
+| Project | project、session、conversation、custom instructions、archive/import | 是：Science 本地 UI、数据库和 session control plane | `原生保留`；CSSwitch 只隔离和保全数据域 | 是：不提供 Science 语义 CRUD | `OFFICIAL`、`PACKAGE-STATIC` | 第三方 current live、archive/unarchive、import 与 restart readback |
+| Agent 工作流 | plans、delegation、fork 与恢复 | 是：Science session/plan control plane | `原生保留` | 是：不实现第二套 plan/delegation engine | `OFFICIAL`、`PACKAGE-STATIC` | 第三方实际模型请求、配额和 entitlement |
+| 文件与权限 | attachments、路径授权、standing grant、撤销和越界拒绝 | 是：Science 拥有 permission UI、scope、持久化和 enforcement；用户拥有授权决定与资源 | `原生保留`；CSSwitch 不扩大授权 | 是：不提供通用文件权限管理 | `OFFICIAL`、`PACKAGE-STATIC` | 第三方 current live、撤销、跨 session 与重启后的 enforcement |
+| 产物 | artifact、版本、diff、preview、execution/environment/review provenance | 是：Science artifact/execution store | `原生保留` | 是：不重建 artifact/provenance 系统 | `OFFICIAL`、`PACKAGE-STATIC` | 第三方 save/version/download/delete/restart 与 lineage |
+| 上下文 | annotations | 是：Science message/context state | `原生保留` | 是：不实现第二套 annotation 管理面 | `OFFICIAL`、`PACKAGE-STATIC` | 格式覆盖、定位稳定性、批量提交与持久化 |
+| 上下文 | project memory、search、context compaction | 是：Science project/session context | `原生保留` | 是：不实现第二套 memory engine | `OFFICIAL`、`PACKAGE-STATIC` | 保存时点、跨 session 隔离与删除语义 |
+| 计算环境 | starter/task Conda、Python/R kernel、包安装与 compute monitor | 是：Science 环境与 kernel 生命周期 | `原生保留`；CSSwitch 只保护 Science-owned opaque roots 的边界 | 是：不重写 Conda/kernel 生命周期 | `OFFICIAL`、`PACKAGE-STATIC`、`SOURCE` | 第三方 current live、task env reuse、kernel/persistent package 边界 |
+| 计算环境 | Node environment | 未确认 | `不托管`；在 ownership 明确前不扩 CSSwitch 范围 | 是：当前不提供 Node 环境管理 | `PACKAGE-STATIC` 表面不足以定 ownership | owner、scope、创建/复用/清理合同 |
+| 计算环境 | GPU | 部分：Science 提供模式；主机/GPU/driver 属于外部环境 | `不托管`；只在未来明确支持的平台上评估兼容 | 是：不管理 GPU 主机、driver 或安全策略 | `OFFICIAL` | 第三方兼容性、sandbox 风险边界与专用主机 live |
+| Skills | 官方 catalog、marketplace、remote/private sources | 是：Science/账号面 | `原生保留` | 是：CSSwitch 不模拟官方 catalog 或 entitlement | `OFFICIAL`、`PACKAGE-STATIC` | 指定 package/account 的第三方可用性 |
+| Skills | 已安装 Skill discovery 与只读投影 | 是：Science active-org Skill 目录；CSSwitch 只安全投影 | `窄桥接` | 否 | `SOURCE`、`TEST` | final artifact/runtime 中目录变化与 restart 后一致性 |
+| Skills | 外部 local archive / 准确公开 GitHub URL 的安装与 attach/detach | 部分：Science 拥有 Agent binding；CSSwitch 拥有外部来源 bridge | `窄桥接` | 否 | `SOURCE`、`TEST`、`FIXTURE` | final artifact/runtime 的安装、卸载、attach/detach 与 restart |
+| Skills | session load、trigger、domain execution | 是：Science Agent/session 与 Skill 自身工具环境 | `原生保留`；CSSwitch 不从 attach 推断 load | 是：不实现 Agent trigger/domain executor | `PACKAGE-STATIC`、`SOURCE` 只证明前置链路 | 实际 `skill()` load、tool/poll、领域执行和 restart persistence |
+| MCP | 外部 Skill 自带 internal local stdio MCP | 混合：Science loader 执行；CSSwitch 只为受管 Skill 安装 | `窄桥接`，仅服务外部 Skill | 否 | `SOURCE`、`TEST`、`FIXTURE` | final artifact/runtime 的 process/tool lifecycle |
+| MCP | 通用 local stdio MCP 管理 | 是：Science Settings/loader/process | `原生保留` | 是：CSSwitch 不提供通用 command/args/env 管理面 | `OFFICIAL`、`PACKAGE-STATIC` | 第三方模式实际配置、启动、继承与调用 |
+| MCP | custom Remote SSE / Streamable HTTP、OAuth/header | 是：Science custom-connector client；远端服务归外部 owner | `不托管` | 是：CSSwitch 不提供通用 Remote MCP 管理面 | `OFFICIAL`、`PACKAGE-STATIC`；raw CONNECT 只属 transport | 第三方 client/auth/tool discovery/tool call |
+| Connectors | Featured、Directory 与 Anthropic-hosted MCP | 是：Science/Anthropic/账号/org entitlement | `不托管` | 是：不模拟 hosted entitlement 或 connector directory | `OFFICIAL`；Anthropic host denial 有 `SOURCE` 边界 | UI、账号 entitlement、OAuth 与用户可见 live |
+| Plugins | manifest、UI、hooks、权限、启停和更新 runtime | 是：Science 上游表面 | `原生保留` | 是：CSSwitch 不提供 Plugin runtime/registry；只支持可安全降解的 Skill 子集 | `OFFICIAL`、`PACKAGE-STATIC`、`SOURCE` | 完整上游合同、第三方 runtime 与各导入路径行为 |
+| 检索 | Web Search | 部分：Science/Anthropic 服务与账号；外网为外部条件 | `不托管` | 是：第三方 provider routing 不替代 Web Search | `OFFICIAL`；Anthropic 目标 transport denial 有 `SOURCE` 边界 | 用户可见结果、账号 entitlement 与 current live |
+| 文献 | 开放数据库、出版商、机构代理与用户凭证访问 | 混合：Science connector/client 与具体数据服务 | `不托管` | 是：不管理机构/付费凭证，不绕过 paywall | `OFFICIAL` | 开放、机构、付费来源分别的账号、网络和 live |
+| 云数据 | S3、GCS、Azure、S3-compatible 导入 | 混合：Science client；用户/云服务拥有凭证、bucket 和费用 | `不托管` | 是：CSSwitch 不管理云凭证、bucket policy 或数据 | `OFFICIAL`、`PACKAGE-STATIC` | 第三方 current live、权限、费用与数据边界 |
+| Remote compute | 系统 SSH、HPC、SLURM | 混合：Science parser/record；CSSwitch opt-in bridge；用户/OpenSSH/server/scheduler 各自拥有后续层 | `窄桥接` preflight/sidecar/stub；不拥有 key/server/scheduler | 否 | `SOURCE`、`TEST` | parser、OpenSSH invocation、真实 server connectivity 三道动态结果 |
+| Remote compute | Modal jobs | 混合：Science client；Modal 账号、预算和执行归外部服务 | `不托管` | 是：不管理真实付费任务、预算或账号 | `OFFICIAL`、`PACKAGE-STATIC` | 审批、提交、取消、费用与 current live |
+| 外部推理 | BioNeMo / inference endpoints | 混合：Science client；NVIDIA/第三方 endpoint 归外部服务 | `不托管`；不与 CSSwitch provider selector 合并 | 是：不管理该 endpoint 的凭证和计费 | `OFFICIAL`、`PACKAGE-STATIC` | 第三方 endpoint 的 auth、network、billing 与 live |
+| 审查 | Reviewer / Specialist | 是：Science review/specialist control plane | `原生保留` | 是：CSSwitch 不提供通用 Reviewer/Specialist 设置或替代实现 | `OFFICIAL`、`PACKAGE-STATIC` | 账号/plan entitlement、第三方实际模型请求与审查结果 |
+| 账号与组织 | Claude OAuth、官方模型 catalog、订阅、usage、entitlement | 否：由 Anthropic 账号、组织和服务拥有 | `不托管`；第三方模式只使用本地虚拟登录 | 是：不模拟真实 OAuth、usage 或 entitlement | `OFFICIAL`、`SOURCE` | 指定账号/组织的可用能力属于官方模式取证 |
+| 账号与组织 | telemetry、analytics/Admin API、offboarding、compliance、数据驻留 | 混合：Science local data 与 Anthropic 服务端是不同数据面 | `不托管` | 是：CSSwitch 不提供组织管理/compliance API | `OFFICIAL`、`PACKAGE-STATIC` | 本地/服务端数据边界、账号计划与 current live |
+| Network | app、model、connector、sandbox、preview/voice、package、remote compute、updater 各流量面 | 混合：Science 发起流量；服务与网络 owner 各异 | `必须托管`第三方 model/Gateway 必需的受限 network policy；其他流量不合并承诺 | 部分：除第三方 model/Gateway 必需流量外均非目标 | `SOURCE`、`TEST`、`PACKAGE-STATIC` | 各流量面在 0.1.25 第三方模式的独立 live 结果 |
+| Updater | Science check/apply/update/rollback | 是：Science updater 与最低支持版本 | `原生保留`；第三方运行固定 `--no-auto-update`，启动时只采用受校验候选 | 是：CSSwitch 不提供通用 check/apply/download UI | `SOURCE`、`TEST`、`PACKAGE-STATIC` | 当前 installed identity、候选采用、rollback 与 public release |
+| Codex | browser-only OAuth、模型目录与 Responses bridge | 否：Codex 与第三方模型服务各有 owner | `窄桥接`，默认关闭且不读取原生 `~/.codex` | 否 | `SOURCE`、`TEST`、`FIXTURE` | final artifact、真实账号与 provider live |
+| 诊断 | Gateway/Science/upstream 状态、doctor 与 reconciliation | 否：这是 CSSwitch 运维责任 | `必须托管` | 否 | `SOURCE`、`TEST` | final artifact、installed-live 与真实故障覆盖 |
+
+## 决策结论
+
+CSSwitch 第三方模式真正必须托管的只有：
+
+1. 隔离 HOME/data-dir、runtime identity、启动/停止/恢复；
+2. 本地虚拟登录、loopback Gateway、provider/profile/model routing；
+3. 第三方模式所需的受限 network/route policy；
+4. 与上述受管状态一致的诊断和恢复。
+
+外部 Skill、系统 SSH 和 Codex 属于窄桥接：CSSwitch 只负责自己明确建立的入口，
+不接管 Science Agent、OpenSSH/server 或 Codex/第三方服务的后续语义。
+
+Project/session/artifact、权限、memory、annotations、Python/R/Conda、Skill
+load/trigger、Reviewer/Specialist 等能力继续由 Science 原生管理。官方账号、
+entitlement、catalog/hosted connectors、通用 MCP/Plugin 管理、云服务、组织管理
+和真实付费计算不是 CSSwitch 第三方模式的托管目标。
+
+## 维护规则
+
+- 一项能力只在本表保存一个当前 ownership/托管结论；
+- 新 Science 版本只能在日期化 audit 中记录观察，证据足够后再更新本表；
+- `UNKNOWN` 不是待实现列表；先判断 owner，再决定是否属于 CSSwitch；
+- mock、fake、fixture、source、test、package-static、artifact 与 installed-live
+  必须保持分层；
+- 不因能力存在于 Science UI、route 或字符串中，就承诺第三方模式 current live；
+- 不为本表新增 handoff 流水线、探针执行、GATE-SOURCE、schema、lint 或 lifecycle
+  合同。
