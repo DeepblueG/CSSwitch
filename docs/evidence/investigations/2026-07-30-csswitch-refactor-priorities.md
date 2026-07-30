@@ -6,18 +6,25 @@
 
 下一阶段不应从“大改架构”开始，而应按以下顺序收口：
 
-1. 先消除一键失败阶段对错误文案的反向解析；
-2. 再拆分一键事务协调与 recovery projection；
-3. 随后拆分 Gateway server 的 HTTP、inference dispatch 与 Skill bridge；
-4. 再拆 frontend feature controller；
-5. 最后处理 config、Codex control 和安全敏感 store。
+1. 先关闭 Science child 的 ambient environment 泄漏，冻结 Runtime/Gateway 两级
+   allowlist；
+2. 再消除一键失败阶段对错误文案的反向解析；
+3. 再拆分一键事务协调与 recovery projection；
+4. 随后拆分 Gateway server 的 HTTP、inference dispatch 与 Skill bridge；
+5. 再拆 frontend feature controller；
+6. 最后处理 config、Codex control 和安全敏感 store。
 
-前三项直接决定故障能否被稳定定位，也覆盖当前职责密度和回归风险最高的生产路径。每一步都应保持现有 Tauri command、DTO、配置 schema、锁序、journal 顺序、Gateway wire behavior 与 runtime adapter contract 不变。
+环境 allowlist 是拆分前的安全合同，不是拆分过程中顺手清理的实现细节；其后三项
+直接决定故障能否被稳定定位，也覆盖当前职责密度和回归风险最高的生产路径。每一步
+都应保持现有 Tauri command、DTO、配置 schema、锁序、journal 顺序、Gateway
+wire behavior 与 runtime adapter contract 不变。
 
 ## 审查范围与证据
 
 - 源码基线：`origin/main@37d5cfb6600a0022d5e1bbbe9a7e181a917b12dd`
-- 公开架构文档基线：`5d46591b366fd5a4a727dbfac1c8a093bbb79892`
+- 当前合同入口：`docs/architecture/science-runtime.md`、
+  `science-capability-dependencies.md` 与
+  `docs/features/product-science-capability-map.md`
 - 检查对象：
   - `desktop/src-tauri/src/`
   - `desktop/gateway/src/`
@@ -50,6 +57,36 @@
 `runtime/skill_install_bridge_e2e.rs` 虽有 2,857 行，但它只通过 `#[cfg(test)]` module 引入，不属于生产体积。
 
 现有测试密度为后续机械拆分提供了基础：`config.rs` 约 58 个 test、`commands/runtime.rs` 约 48 个、`gateway/server.rs` 约 33 个、`runtime/science.rs` 约 31 个、`runtime/sandbox_session.rs` 约 28 个、`commands/codex.rs` 与 `gateway/codex_protocol.rs` 各约 27 个。
+
+## P0 前置：关闭 ambient environment 泄漏
+
+### 现状
+
+隔离 HOME/data-dir 已建立文件状态边界，但 Rust process launch 与
+`launch-virtual-sandbox.sh` 仍从 parent process 继承 ambient environment。未知环境
+变量、provider credential 或只应属于某个 opt-in bridge 的变量因此可能进入
+Science child。这个缺口会随着函数/模块搬迁扩散，必须在机械拆分前冻结。
+
+### 目标边界
+
+建立两级显式 allowlist：
+
+- Science Runtime 只接收启动、locale、受限 proxy 和受管 endpoint 所必需的变量；
+- provider secret 只进入 Gateway，不进入 Science；
+- Skill、SSH、Codex 变量只有相应 bridge 显式启用时才加入；
+- 未列变量默认删除，不能用 denylist 追逐未知 secret。
+
+这一步允许改变原本未承诺的 ambient inheritance，但不改变公开 Tauri DTO、profile
+schema、Gateway wire behavior、端口或 runtime identity。
+
+### 验收不变量
+
+- 随机 sentinel 和常见 provider secret 不进入 Science child；
+- Gateway 仍能得到当前 profile 所需的 provider secret；
+- bridge-disabled 时对应变量缺席，bridge-enabled 时只出现该 bridge 的最小集合；
+- locale、PATH/runtime discovery、`ANTHROPIC_BASE_URL`、受限 proxy 与
+  `NO_PROXY` 等必要行为保持可用；
+- 日志、operation event 与诊断输出不泄漏变量值。
 
 ## P0：先稳定故障投影
 
@@ -120,6 +157,7 @@ sandbox_session facade
 - stop 前后继续执行强 identity 校验，身份漂移时不发送信号；
 - reuse 与 cold-start 两条分支的不同提交顺序不得被“统一”；
 - optional bridge 失败继续只降级局部能力。
+- 已冻结的 Runtime/Gateway environment allowlist 不因 helper 移动而扩大。
 
 ### 推荐提交粒度
 
@@ -167,6 +205,7 @@ server::serve
 - body、event、tool、non-stream 等既有 size bound 不变；
 - HTTP status、typed error envelope、SSE event 和 stream termination 不变；
 - scratch 与正式 Gateway 仍共享 binary 但不共享状态承诺；
+- provider secret 只在 Gateway 边界可见，不因拆分进入 Science 或 frontend；
 - Skill bridge request ID、replay window、terminal-once 与 host lock 语义不变；
 - `server::serve(GatewayConfig)` 保持稳定入口。
 
@@ -286,15 +325,18 @@ provider catalog
 
 ## 建议实施顺序
 
-1. 为现有 runtime failure 建立内部 typed projection，并冻结现有 DTO；
-2. 从 `sandbox_session.rs` 机械提取 pending cleanup；
-3. 机械提取 recovery projection；
-4. 缩短一键 orchestrator，保持原锁序和提交顺序；
-5. 从 `gateway/server.rs` 提取 Skill bridge host；
-6. 提取 HTTP codec 与 inference dispatch，保留 `serve` façade；
-7. 从 `main.js` 提取 preview adapter 和 IPC client，再按 feature 拆 controller；
-8. 保持 façade 后拆 config 内部；
-9. 拆 Codex control implementation；
-10. 最后评估 provider shared library、Skill store 和 Codex protocol。
+1. 先实现 Runtime/Gateway 两级 environment allowlist 与 sentinel 泄漏测试；
+2. 为现有 runtime failure 建立内部 typed projection，并冻结现有 DTO；
+3. 从 `sandbox_session.rs` 机械提取 pending cleanup；
+4. 机械提取 recovery projection；
+5. 缩短一键 orchestrator，保持原锁序和提交顺序；
+6. 从 `gateway/server.rs` 提取 Skill bridge host；
+7. 提取 HTTP codec 与 inference dispatch，保留 `serve` façade；
+8. 从 `main.js` 提取 preview adapter 和 IPC client，再按 feature 拆 controller；
+9. 保持 façade 后拆 config 内部；
+10. 拆 Codex control implementation；
+11. 最后评估 provider shared library、Skill store 和 Codex protocol。
 
-每一步的退出条件都是“行为不变、所有权更清楚、失败能定位到单一 CSSwitch domain”，而不是达到某个任意文件行数。
+环境 allowlist 步骤的退出条件是“必要行为不变、未知/越权变量不再继承”；后续机械
+拆分的退出条件是“行为不变、所有权更清楚、失败能定位到单一 CSSwitch domain”，
+而不是达到某个任意文件行数。
