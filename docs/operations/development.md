@@ -1,6 +1,6 @@
 # 开发与维护
 
-本文说明 v0.8.1 源码树的开发入口。安全、Git / worktree 和证据措辞分别以 [`.agents/rules/`](../../.agents/rules/) 为准。
+本文说明当前源码树的开发入口。安全、Git / worktree 和证据措辞分别以 [`.agents/rules/`](../../.agents/rules/) 为准。
 
 ## 环境
 
@@ -18,19 +18,16 @@ npm install
 npm run tauri dev
 ```
 
-日常自动检查从仓库根目录运行：
+完整 source/unit gate 只在准备好 clean exact-HEAD 候选后从仓库根目录运行：
 
 ```bash
-bash test/run_all.sh
+GATE_ROOT="$(mktemp -d /private/tmp/csswitch-source-gate.XXXXXX)"
+chmod 700 "$GATE_ROOT"
+bash test/run_all.sh --output-root "$GATE_ROOT"
 ```
 
-需要完整发布环境时才使用：
-
-```bash
-bash test/run_all.sh --require-release-ready
-```
-
-两种判定的准确含义见[测试文档](testing.md)。
+固定 15-suite 选择、输出目录约束和判定边界见[测试文档](testing.md)。无参数调用和
+旧 `--require-release-ready` 已不再是有效入口。
 
 ## 组件级检查
 
@@ -47,7 +44,8 @@ python3 -m unittest discover -s test -p 'test_*.py' -v
 node --check desktop/src/main.js
 ```
 
-优先使用 `test/run-*.sh` 作为门禁，因为它们对缺失依赖、loopback 限制与层级状态有统一词汇；组件命令适合聚焦诊断。
+组件命令和单个 `test/run-*.sh` 只适合聚焦诊断；当前完整门禁是上述
+`GATE-SOURCE`，不能由组件结果拼成 `SOURCE-GREEN`。
 
 ## Science 相邻功能工作法
 
@@ -70,10 +68,6 @@ Science 已拥有的能力不应在 CSSwitch 再造一套 installer、目录所�
 
 ## 文档维护
 
-- 当前合同：`docs/architecture/`、`docs/features/`、`docs/operations/`；
-- 当前快照：`.agents/context/`；
-- 日期化结果：`docs/evidence/`；
-- 公开行为：根 README；已发布变更：CHANGELOG；
-- 临时下一步：`.agents/handoffs/`，任务结束后不保留为长期事实。
+文档类型、权威位置、默认阅读预算，以及临时 Plan / Draft Spec / Handoff 的晋升、过期与删除，统一见[文档治理合同](document-lifecycle.md)。
 
 发布或重要 upstream runtime 变化后，应复核 architecture、功能限制、known issues 和 release evidence，而不是把新事实只留在聊天或 handoff。

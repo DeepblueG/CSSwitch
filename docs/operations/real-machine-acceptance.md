@@ -1,6 +1,8 @@
-# CSSwitch v0.8.1 真机验收
+# CSSwitch 真机验收
 
-本矩阵描述应如何验收，不表示各项已经通过。每次执行必须记录目标 commit / artifact、环境和结果；发布附件的既有结果见对应 [release evidence](../evidence/releases/README.md)。
+状态：当前运维合同
+
+适用范围：跨版本累积的 RM 编号与当前候选验收流程。每次执行前必须针对目标版本复核命令和 gate，并记录 exact commit / artifact、环境和结果；矩阵存在不表示任一项已经通过。发布附件的既有结果见对应 [release evidence](../evidence/releases/README.md)。
 
 ## 1. 安全护栏
 
@@ -16,10 +18,16 @@
 ## 2. 自动化基线
 
 ```bash
-bash test/run_all.sh
+GATE_ROOT="$(mktemp -d /private/tmp/csswitch-source-gate.XXXXXX)"
+chmod 700 "$GATE_ROOT"
+bash test/run_all.sh --output-root "$GATE_ROOT"
 ```
 
-记录五层状态和 `current-env clean` / `release-ready green`，不要记录过期的固定 pass 数。构建发布候选前另跑 `--require-release-ready`。Python 仅供测试与 mock 使用；v0.8.1 runtime proxy 是 Rust sidecar。
+先在 clean exact-HEAD source 候选上取得完整 15-suite `GATE-SOURCE` completion seal，
+记录命令、退出码、HEAD、输出目录和 suite 结果；局部组件结果不能替代。该 gate 只
+建立 source/unit 证据，后续 Acceptance artifact、installed/runtime 与 live 场景仍
+按本矩阵分别取证。Python 仅供测试驱动与 mock 使用；产品 runtime proxy 是 Rust
+sidecar。
 
 ## 3. 先在开发 HOME 构建
 
@@ -142,7 +150,7 @@ RM-01～RM-34 保留历史编号；Codex 场景从 RM-35 继续，0.8.1 新增 p
 | RM-33 | bundle 整包确认 | 重复 RM-32 并明确确认 | 精确 confirmation ID 校验；全部成员批量 detach 并整包 quarantine；不残留部分物理安装；不提供成员级删除 |
 | RM-34 | v0.5.0 干净升级 | 旧 route / split connector、用户 MCP / 未知字段、已装 GitHub Skill 与新本地 ZIP 组合 | 迁移到合并 connector；用户 MCP 与未知字段保留；重启恢复、重复安装、GitHub / ZIP bundle 整包卸载均按 v0.6 合同工作 |
 | RM-35 | Acceptance artifact + 用户 OAuth 后 live provider | 独立 Codex 登录 | 只由脱敏 `codex-auth status` 证明 Acceptance data root 凭据存在，不读取或输出文件内容；登录成功后 Codex profile 自动出现但 active provider 不变；正式 CSSwitch 与原生 Codex 登录前后状态不变；无 token 证据泄漏 |
-| RM-36 | 用户 OAuth 后 live provider | 动态多模型 | 若当前账号目录返回 Sol/Terra/Luna，则 CSSwitch 与 Science 分别显示 `Codex / GPT-5.6-Sol`、`Codex / GPT-5.6-Terra`、`Codex / GPT-5.6-Luna`；请求 alias/raw id 与 Gateway 脱敏观测一致，缺失模型不伪造 |
+| RM-36 | 用户 OAuth 后 live provider | 动态多模型 | 当前账号至少返回两个可用模型；若目录返回 Sol/Terra/Luna，则 CSSwitch 与 Science 分别显示 `Codex / GPT-5.6-Sol`、`Codex / GPT-5.6-Terra`、`Codex / GPT-5.6-Luna`；请求 alias/raw id 与 Gateway 脱敏观测一致，缺失模型不伪造 |
 | RM-37 | 用户 OAuth 后 live provider | 流式文本与 reasoning | 增量顺序、thinking、usage 和终态正确；CSSwitch Gateway 不持久化对话，Science 自有项目 / 对话持久化不属于失败 |
 | RM-38 | 自动 mock + 用户 OAuth 后 live provider | 工具调用 | tool id / result 严格闭环；真实最小工具成功；断流 / 取消不重复执行由 mock 故障注入证明 |
 | RM-39 | 自动 mock | 刷新与失效 | fake OAuth / secret store 强制 401 和 CAS；并发刷新单写者；401 只影响下一请求；不破坏真实 token |

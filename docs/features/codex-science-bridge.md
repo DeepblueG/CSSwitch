@@ -116,7 +116,7 @@ CSSwitch 只提供浏览器登录，使用 Authorization Code + PKCE-S256 和至
 
 登录 token exchange、慢 header、慢 body 与 browser callback wait 都可取消。cancel 与 `Running -> Committing` 竞争同一个原子屏障：cancel 胜出后不能写认证文件；commit 胜出后返回 `commit_in_progress`。sidecar 明确回复 `accepted` 后两秒仍不退出，父进程可结束并回收；未收到确认时不得猜测并杀死可能正在提交的进程。
 
-阶段 1 固定采用上述官方 Codex SHA 的当前参数：issuer `https://auth.openai.com`；client id `app_EMoamEEZ73f0CkXaXp7hrann`；authorize / token / revoke 分别为 `/oauth/authorize`、`/oauth/token`、`/oauth/revoke`；redirect URI 为 `http://localhost:{1455|1457}/auth/callback`；scope 精确为 `openid profile email offline_access api.connectors.read api.connectors.invoke`；另传 `id_token_add_organizations=true`、`codex_cli_simplified_flow=true`、`originator=codex_cli_rs`。这些是固定上游兼容参数，不表示 CSSwitch 获得官方合作身份；任何未来变更必须重新取证、审查和更新本文，不能静默漂移。
+当前浏览器 OAuth 合同采用上述官方 Codex SHA 的固定参数：issuer `https://auth.openai.com`；client id `app_EMoamEEZ73f0CkXaXp7hrann`；authorize / token / revoke 分别为 `/oauth/authorize`、`/oauth/token`、`/oauth/revoke`；redirect URI 为 `http://localhost:{1455|1457}/auth/callback`；scope 精确为 `openid profile email offline_access api.connectors.read api.connectors.invoke`；另传 `id_token_add_organizations=true`、`codex_cli_simplified_flow=true`、`originator=codex_cli_rs`。这些是固定上游兼容参数，不表示 CSSwitch 获得官方合作身份；任何未来变更必须重新取证、审查和更新本文，不能静默漂移。
 
 production build 只允许固定官方 endpoint 与 CSSwitch 私有文件仓库；fake browser、fake OAuth 和 fake secret store 只能通过 Rust 测试注入 trait 使用，不能通过生产环境变量注入 endpoint、token 或认证内容。`logout` 先 best-effort revoke，再删除 CSSwitch 自有认证文件；不得删除原生 Codex 凭据。非法代理时跳过无法建立的 revoke transport，仍推进 generation 并删除本地项，返回 `{code:"revoke_skipped",reason:"proxy_config_invalid"}`；合法 route 的 revoke 网络失败同样不阻止本地删除，只有本地文件删除失败才返回 logout 失败。
 
@@ -142,11 +142,11 @@ Config v3 另含带 `serde(default)` 的 `codex_network={mode:"auto|custom",prox
 
 Desktop 与 Gateway 共用同一 Rust resolver，得到 `ResolvedCodexNetworkRoute{source,proxy_scheme,proxy_url,no_proxy,fingerprint}`。所有 Codex reqwest builder 先 `.no_proxy()`，再应用该规范化 route；OAuth、刷新、revoke、模型目录、推理、formal 与 scratch 不得隐式读取环境。route fingerprint 进入 formal Gateway 复用身份，变化后旧 Gateway 不能复用。UI 与 doctor 只显示 `direct|env_https|env_all|custom` 和 scheme；direct 的准确文案是“直接 socket，可能由系统 TUN 接管”，不得声称检测了 TUN，也不得显示完整代理 URL。
 
-阶段 2 新建 typed `catalog/provider-contracts.v1.json`，作为 `auth_mode`、`model_discovery`、`transport` 等 provider 启动 capability 的唯一 source of truth；现有 `catalog/capabilities.v1.json` 继续只保存兼容性 evidence rules，schema 和 loader 不变。profile 不复制 capabilities。backend 将 provider contracts 与 profile 合并、校验后生成私有 `ResolvedLaunchPlan`，至少包含 adapter、endpoint、opaque credential handle、model policy、transport、超时和缓存策略，再投影成 `FormalGatewayPlan`、`ScratchPlan` 和 `PublicPlanView`。Gateway 同样直接编译并校验这份 catalog；Codex 的 model GET 与 inference transport 从中取得 connect、request、read-idle、cache TTL 和显式维护的上游 client compatibility version，桌面进程还会向受管 sidecar 注入 contract id 与完整 catalog SHA-256，Gateway 启动和 Tauri health 两侧均需匹配。只有 formal gateway 内部能把固定 `CodexDefault` handle 解析为 CSSwitch 私有 OAuth；scratch 只得到 `provider=codex`、临时 loopback endpoint / path secret，UI 只得到脱敏 public view。三条路径共用 resolver，但权限投影不同。
+当前 typed `catalog/provider-contracts.v1.json` 是 `auth_mode`、`model_discovery`、`transport` 等 provider 启动 capability 的唯一 source of truth；现有 `catalog/capabilities.v1.json` 继续只保存兼容性 evidence rules，schema 和 loader 不变。profile 不复制 capabilities。backend 将 provider contracts 与 profile 合并、校验后生成私有 `ResolvedLaunchPlan`，至少包含 adapter、endpoint、opaque credential handle、model policy、transport、超时和缓存策略，再投影成 `FormalGatewayPlan`、`ScratchPlan` 和 `PublicPlanView`。Gateway 同样直接编译并校验这份 catalog；Codex 的 model GET 与 inference transport 从中取得 connect、request、read-idle、cache TTL 和显式维护的上游 client compatibility version，桌面进程还会向受管 sidecar 注入 contract id 与完整 catalog SHA-256，Gateway 启动和 Tauri health 两侧均需匹配。只有 formal gateway 内部能把固定 `CodexDefault` handle 解析为 CSSwitch 私有 OAuth；scratch 只得到 `provider=codex`、临时 loopback endpoint / path secret，UI 只得到脱敏 public view。三条路径共用 resolver，但权限投影不同。
 
 迁移在内存中按 v1 → canonical v2 → v3 执行，最后只原子提交一次 v3。v1 输入先保存原始 `config.json.v1.bak`，再把 canonical v2 保存为 `config.json.v2.bak`；v2 输入只需后者。目标 backup 已存在且字节相同时复用；内容不同时以 `config.json.vN.bak.<full-sha256>` 使用 `O_EXCL` 另存，绝不覆盖。备份发布使用同目录、由输入内容哈希确定的 hidden pending；publish 和首次目录 `fsync` 后必须删除 pending 并再次 `fsync`。若在该窗口崩溃，下一次相同迁移会先清理模块自有 pending hard link，再校验单链接不变量并继续。任一校验、backup、`fsync` 或 rename 失败都不改变当前 config。迁移的读取、版本备份与最终提交锚定同一个已打开目录句柄，不因目录路径替换漂移。迁移不改变现有 API-key profile、active profile、端口或设置，并为 Codex network 采用 auto 默认值。
 
-`downgrade_to_v2` 对每个 Codex profile 都要求显式 `export_then_remove` 或 `remove`，不能只处理 active profile。export 只含 profile 元数据和模型选择，不含 token、账号 id、credential payload 或缓存；若移除的是 active Codex profile，必须把旧 v2 schema 的 `active_id` 写成 `""`，不能写 JSON null；非 Codex active 保持。`export_then_remove` 必须由调用方给出 CSSwitch 配置目录之外的目标：先原子落盘并完成目录 `fsync`，再使用 rolling backup、同目录 temp、`fsync`、rename 提交 v2。export 失败时 config 字节不变；export 已成功而后续 config 提交失败时，安全可重入结果是“原 v3 config + 已完成 export”，绝不能是“profile 已删除但 export 未完成”。用户 export 父目录权限不得被 CSSwitch 修改，失败回滚保留原目标文件的字节和 mode。降级保留所有 v2 可表达的 API-key profile、设置与端口，永远不读取、删除或修改 OAuth 文件；v2 无法表达 Codex network，因此 RM-41 必须明确验证该字段被丢弃且其余设置不变。
+`downgrade_to_v2` 对每个 Codex profile 都要求显式 `export_then_remove` 或 `remove`，不能只处理 active profile。export 只含 profile 元数据和模型选择，不含 token、账号 id、credential payload 或缓存；若移除的是 active Codex profile，必须把旧 v2 schema 的 `active_id` 写成 `""`，不能写 JSON null；非 Codex active 保持。`export_then_remove` 必须由调用方给出 CSSwitch 配置目录之外的目标：先原子落盘并完成目录 `fsync`，再使用 rolling backup、同目录 temp、`fsync`、rename 提交 v2。export 失败时 config 字节不变；export 已成功而后续 config 提交失败时，安全可重入结果是“原 v3 config + 已完成 export”，绝不能是“profile 已删除但 export 未完成”。用户 export 父目录权限不得被 CSSwitch 修改，失败回滚保留原目标文件的字节和 mode。降级保留所有 v2 可表达的 API-key profile、设置与端口，永远不读取、删除或修改 OAuth 文件；v2 无法表达 Codex network，因此降级会丢弃该字段并保持其余设置不变。
 
 ## 请求与对话状态
 
@@ -188,7 +188,7 @@ reducer 必须处理文本 delta、reasoning delta、function call arguments、o
 
 2026-07-16 对本机 installed Science `0.1.18-dev.20260709.t211149.shab3f5130` 的隔离实验已验证：Science 会请求 `/v1/models?limit=1000`，但会过滤所有不以 `claude-` 开头的模型 id；同一响应中的 raw `gpt-5.3-codex` 不显示，而确定性的 `claude-csswitch-codex-gpt-5.3-codex` 会显示且可选。详细证据见 [Science 模型 ID 兼容实验](../evidence/investigations/2026-07-16-codex-science-model-compat.md)。
 
-因此模型目录内部与磁盘缓存只保存官方 raw id；Science-facing `/v1/models` 暴露 `claude-csswitch-codex-<raw-id>`，显示名显式加 `Codex / ` 前缀，不冒充 Anthropic 内置型号。Desktop 的“查看模型”按与 Gateway 相同的合同保留非空、至多 512 UTF-8 bytes 且无 Unicode 控制字符的完整 display name，不 trim，也不从 alias 猜展示名；非法或缺失时只显示明确的“显示名不可用”fallback，HTML 输出必须转义。当前账号目录 fixture 覆盖 `Codex / GPT-5.6-Sol`、`Codex / GPT-5.6-Terra`、`Codex / GPT-5.6-Luna`，但 live 目录缺少任一项时不得补造。`/v1/messages` 只接受当前账号目录中可反解的该类 alias，校验后在发送上游前恢复 raw id；直接 raw id、未知 alias 和已失效目录项都返回确定性 400，不能发出推理 POST。至少两个真实账号模型的 live 选择与上游一致性保留为 RM-36，必须由用户亲自完成 OAuth 后验收，自动 Gate 不得伪造该结论。
+因此模型目录内部与磁盘缓存只保存官方 raw id；Science-facing `/v1/models` 暴露 `claude-csswitch-codex-<raw-id>`，显示名显式加 `Codex / ` 前缀，不冒充 Anthropic 内置型号。Desktop 的“查看模型”按与 Gateway 相同的合同保留非空、至多 512 UTF-8 bytes 且无 Unicode 控制字符的完整 display name，不 trim，也不从 alias 猜展示名；非法或缺失时只显示明确的“显示名不可用”fallback，HTML 输出必须转义。当前账号目录 fixture 覆盖 `Codex / GPT-5.6-Sol`、`Codex / GPT-5.6-Terra`、`Codex / GPT-5.6-Luna`，但 live 目录缺少任一项时不得补造。`/v1/messages` 只接受当前账号目录中可反解的该类 alias，校验后在发送上游前恢复 raw id；直接 raw id、未知 alias 和已失效目录项都返回确定性 400，不能发出推理 POST。自动 Gate 不足以证明真实账号模型的 live 选择与上游一致性；只有绑定用户 OAuth 与 exact candidate 的 dated evidence 才能支持该结论。
 
 ## 生命周期与 UI
 
@@ -198,77 +198,8 @@ Codex 是现有 provider 架构中的一种 capability 组合，不新增第二�
 
 login/logout 前 Tauri 不能停止其他 provider 的 Science 或 gateway。若身份无法确认或 stop 失败，login/logout fail closed，不继续 auth mutation、不杀未知 PID。关闭实验开关只停止自有 Codex 链路，不删除凭据；停止失败时 UI 据实保留运行 / 错误状态。用户显式 logout 才删除 CSSwitch Codex 凭据。App 退出向当前 operation 发送取消并只回收登记的精确 sidecar PID，不持久化 operation。
 
-## 分阶段任务与 Gate
+## 实施历史与真机验收入口
 
-### 阶段 0：基线与合同
+已发布功能不在当前 Feature Contract 保留开发期分阶段 Plan；历史阶段与 Gate 从 Git 历史和日期化 evidence 追溯。
 
-- 从干净 `main@0897e78f201e9e463be6a13e3d11888bde31f3b0` 创建独立 worktree；
-- 记录五层总测试基线，见 [2026-07-16 日期化证据](../evidence/investigations/2026-07-16-codex-science-bridge-baseline.md)；
-- 冻结本文全部边界。
-
-Gate：原有 provider 五层全绿，工作区与其他 UI / Skill worktree 隔离。
-
-### 阶段 1：OAuth 与私有文件存储
-
-- 实现 auth CLI、PKCE callback、private file store、mutation/refresh lock；
-- fake browser、fake OAuth server、fake secret store 全矩阵测试；
-- 证明日志、argv、状态和配置无 token。
-
-Gate：自动测试覆盖登录、state/PKCE、超时、端口冲突、刷新竞争、退出和原生凭据不接触。
-
-### 阶段 2：配置与 provider 收口
-
-- v3 schema、备份、迁移和安全降级；
-- typed provider contracts catalog 与 `ResolvedLaunchPlan`；
-- scratch / formal / UI 消除 API-key 与固定模型假设。
-
-Gate：现有 v1/v2 迁移、全部 API-key provider 和 rollback 合同无回归。
-
-### 阶段 3：Responses 与 SSE
-
-- Anthropic Messages → Responses request translator；
-- Codex SSE reducer 与 nonstream accumulator；
-- thinking signature、工具调用、取消和零重试状态机。
-
-Gate：golden、loopback、断流、401、空 200、工具去重、篡改 signature 和内存边界全部通过。
-
-### 阶段 4：模型目录
-
-- 官方动态目录 client、缓存与失效；
-- raw id / shell alias Science 实验；
-- installed Science 多模型选择兼容和 unknown-model 错误；产品 UI 接线在阶段 5 完成。
-
-Gate：官方目录、缓存、失效与 alias → raw 映射自动测试通过；installed Science 对 raw / alias 的隔离双样本实验通过。真实账号至少两个可用模型的最终证明属于 RM-36，停在用户 OAuth 之前不能提前宣称完成。
-
-### 阶段 5：产品接入
-
-- 实验开关、auth 状态、登录/退出、诊断；
-- 一键启动、切换、stop、logout 和 downgrade 编排；
-- 文档和升级说明。
-
-Gate：关闭开关、provider 切换和失败回滚不影响其他 provider、原生 Codex 或真实 Science。
-
-### 阶段 6：全面验证与实机环境
-
-- `bash test/run_all.sh` 五层回归；
-- 独立安全审查、协议审查和最终差异审查；
-- RM-35～RM-45；
-- 构建独立 bundle ID 的 Acceptance app，生成临时 HOME、CSSwitch 根、Science data-dir 和动态端口。
-
-Gate：自动化全绿；实机环境已准备但停在打开真实 OAuth 浏览器之前，由用户亲自完成授权。
-
-## 真机矩阵增量
-
-| ID | 证据层 | 场景 | 必须满足 |
-|---|---|---|---|
-| RM-35 | Acceptance artifact + 用户 OAuth 后 live provider | 独立 Codex 登录 | 只由脱敏 `codex-auth status` 证明 Acceptance data root 凭据存在，不读取或输出文件内容；登录成功后 Codex profile 自动出现但 active provider 不变；正式 CSSwitch 与原生 Codex 登录前后状态不变；无 token 证据泄漏 |
-| RM-36 | 用户 OAuth 后 live provider | 动态多模型 | 若当前账号目录返回 Sol/Terra/Luna，则 CSSwitch 与 Science 分别显示 `Codex / GPT-5.6-Sol`、`Codex / GPT-5.6-Terra`、`Codex / GPT-5.6-Luna`；请求 alias/raw id 与 Gateway 脱敏观测一致，缺失模型不伪造 |
-| RM-37 | 用户 OAuth 后 live provider | 流式文本与 reasoning | 增量顺序、thinking、usage 和终态正确；CSSwitch Gateway 不持久化对话，Science 自有项目 / 对话持久化不属于失败 |
-| RM-38 | 自动 mock + 用户 OAuth 后 live provider | 工具调用 | tool id / result 严格闭环；真实最小工具成功；断流 / 取消不重复执行由 mock 故障注入证明 |
-| RM-39 | 自动 mock | 刷新与失效 | fake OAuth / secret store 强制 401 和 CAS；并发刷新单写者；401 只影响下一请求；不破坏真实 token |
-| RM-40 | Acceptance artifact + 用户 OAuth 后 live provider | 退出与重登 | 只删除 Acceptance namespace 项；正式 CSSwitch、原生 Codex 与其他 provider 不变；只用脱敏 status 观测 |
-| RM-41 | 自动 fixture + Acceptance artifact | v3 降级 | 每个 Codex profile 显式处理；API-key profiles、端口和设置完整；Codex network 字段按合同丢弃；OAuth 文件不变且不读取其内容 |
-| RM-42 | Acceptance artifact | 隔离打包 | 独立 bundle ID、隔离目录；Gateway / Science 使用动态端口，OAuth callback 仍固定 1455 / 1457；8765 与已安装 App 不变；收尾无残留进程 |
-| RM-43 | Acceptance artifact | Finder 无代理环境 + 系统 TUN | Finder 启动显示 `direct`，只说明“直接 socket，可能由系统 TUN 接管”；TUN 下浏览器登录成功但不声称检测 TUN |
-| RM-44 | Acceptance artifact + 本地 fixture | 显式代理 | HTTP CONNECT 与 SOCKS5h 分别完成浏览器 token exchange、模型目录与最小推理；SOCKS5h 证明域名在代理端解析；production 不注入自定义 CA |
-| RM-45 | Acceptance artifact | 登录取消 | browser callback wait、慢 callback header、token exchange 取消在两秒内终态；pre-commit 取消后 generation 与 Acceptance OAuth 文件状态不变；committing 返回 `commit_in_progress` |
+当前隔离步骤、证据层与 RM-35～RM-45 矩阵只在[真机验收](../operations/real-machine-acceptance.md#5-当前验收矩阵)维护。本文不复制该运维正文，也不把矩阵条目写成已执行或 PASS。

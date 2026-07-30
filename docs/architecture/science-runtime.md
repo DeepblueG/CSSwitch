@@ -1,27 +1,33 @@
 # Science runtime 合同
 
-本文描述 v0.7.0 的稳定选择与身份合同。2026-07-13 的具体版本、错误 binary 事故与 E2E 证据见[日期化调查](../evidence/investigations/2026-07-13-science-runtime-and-skill-bridge.md)。
+本文描述跨版本的 executable 选择、HOME/data、身份和恢复合同。具体 Science 版本、hash、embedded identity、事故与 E2E 结果只进入[日期化调研](../audits/2026-07-30-v084-architecture-reconnaissance.md)或 evidence。
 
-## 分离四个事实
+## 分离六个事实
 
 1. **executable**：实际执行的 `claude-science` 文件；
 2. **persistent data-dir**：`~/.csswitch/sandbox/home/.claude-science`；
-3. **version runtime resources**：`<data-dir>/runtime/<version>/`；
-4. **live identity**：canonical executable、data-dir、监听 PID、端口和受管启动记录的组合。
+3. **isolated HOME**：CSSwitch 第三方模式传入的 HOME；当前部署让它与 data-dir 根共址，但这不是 Science 通用 `data_dir` 语义；
+4. **fixed user-level state**：Science 固定写入 `~/.claude-science` 的 config、认证与 shared package environment；在第三方模式中该 `~` 指隔离 HOME；
+5. **environments / kernels / runtime resources**：starter/task environments、session kernels 与 `<data-dir>/runtime/<version>/`；
+6. **live identity**：canonical executable、data-dir、监听 PID、端口和受管启动记录的组合。
 
-data-dir 持久化组织、项目、Skills 和 Science 自己的 runtime 数据，但不是 executable 版本 pin。
+官方合同中，data directory 保存 per-org conversation、artifact、delegation 和 workspace；认证 token 与 shared package environment 固定在 `~/.claude-science`，不随 `data_dir` 移动。CSSwitch 用隔离 HOME 把两类状态一起隔离，但文档和恢复逻辑仍须区分所有权。
+
+starter Conda Python/R 环境、跨项目复用的 named task environment、session 内 Python/R kernel 与 inline package 都是不同生命周期。CSSwitch 不拥有这些环境，也不从 opaque root 推断功能可用；Node 的上游所有权/scope 仍为 `UNKNOWN`。
 
 ## 新启动选择顺序
 
 1. 如果设置了 `SCIENCE_BIN`，它必须是绝对、非 symlink、可执行且能安全读取版本的开发 override；无效时 fail closed，不继续猜其他 binary。
-2. 否则检查固定的 `~/.claude-science/bin/claude-science`。只有路径无 symlink、目录与文件由当前用户拥有且不可被 group/world 写入、文件是大小有界的 Mach-O、embedded identifier / Team ID 与当前 Science 身份相符，才把同一次安全打开读取到的字节原子提交到 CSSwitch 私有、只读、SHA-256 内容寻址的 runtime snapshot；snapshot 在隔离 HOME 下版本可确认时才选择为 `official_updated`。
+2. 否则检查固定的 `~/.claude-science/bin/claude-science`。只有路径无 symlink、目录与文件由当前用户拥有且不可被 group/world 写入、文件是大小有界的 Mach-O、embedded identifier / Team ID 精确匹配当前源码枚举的 Science identity，才把同一次安全打开读取到的字节原子提交到 CSSwitch 私有、只读、SHA-256 内容寻址的 runtime snapshot；snapshot 在隔离 HOME 下版本可确认时才选择为 `official_updated`。
 3. 官方 updater runtime 不可用时，使用当前安装在 `/Applications/Claude Science.app` 中的官方 executable。
 4. 只有以上来源都不可用、`<CSSwitch data-dir>/bin/claude-science` 可执行且版本可确认时，preflight 才返回 `cached_choice_required`；用户可授权 `cached_once`。
 5. cache 授权只在本次启动的内存中生效，不写成偏好。未知版本或缺失 cache 不可启动。
 
-`official_updated` 只读取并快照官方 updater 写入的固定单个 executable；snapshot 位于 `<CSSwitch data root>/runtime-snapshots/science/`，不在 Science data-dir 内。CSSwitch 不扫描、复制或读取真实 Science 账号、组织、配置、`conda`、`runtime` 或 `seed-assets`，不下载 Science、不调用 updater，也不覆盖 Science cache。检测到候选但本地校验失败时会显式报错，不静默回退旧 App。
+`official_updated` 只读取并快照 updater 固定路径中的单个 executable；该路径已观察到 standalone updater 与 App-seeded 两种精确 identity，当前源码只接受枚举的 exact identifier + Team ID 组合。具体字符串、hash、版本与 `source-fixed-product-pending` 结论留在日期化 audit；它们不能写成 final artifact、installed/live 或公开 release 已证明。
 
-当前上游 App seed 与 updater executable 的 `codesign --verify --strict` 都可能失败，因此 embedded identifier / Team ID 只作为格式与误选防护，不声称密码学证明文件来自 Anthropic。该路径沿用 CSSwitch 已有的“信任当前用户安装的本地 Science”边界；复制前后复核同一 source inode/metadata，snapshot 以完整 SHA-256 命名并进入 host-context fingerprint。启动、恢复、URL、status 和 stop 前 snapshot 内容变化均 fail closed；官方 updater 随后替换 source 不会改变已运行 daemon 的 executable 身份。为支持 CSSwitch 自身重启后的接管，恢复探测会在私有 snapshot 目录中重新验证已有的内容寻址 executable；历史 snapshot 只参与现有 daemon 的身份恢复，不改变 stopped-to-started 的新启动选择顺序。
+snapshot 位于 `<CSSwitch data root>/runtime-snapshots/science/`，不在 Science data-dir 内。CSSwitch 不扫描、复制或读取真实 Science 账号、组织、配置、`conda`、`runtime` 或 `seed-assets`，不下载 Science、不调用 updater，也不覆盖 Science cache。检测到候选但本地校验失败时会显式报错，不静默回退旧 App。
+
+embedded identifier / Team ID 只作为格式与误选防护，不声称密码学证明文件来自 Anthropic。该路径沿用 CSSwitch 已有的“信任当前用户安装的本地 Science”边界；复制前后复核同一 source inode/metadata，snapshot 以完整 SHA-256 命名并进入 host-context fingerprint。启动、恢复和停止等强控制路径会重新验证 snapshot，内容变化时 fail closed；高频 UI `status` 是下文明确的轻量例外，只投影 HTTP health 与已有 metadata。`sandbox_url()` 也不是独立的强身份边界：runtime 不再 current 或 CLI URL 获取失败时，它会回退到裸 `http://127.0.0.1:<port>`；手动打开入口会先验证 listener/runtime，但冷启动与 reuse 路径依赖调用它之前已经完成的身份检查。updater 随后替换 source 不会改变已运行 daemon 的 executable 身份。为支持 CSSwitch 自身重启后的接管，恢复探测会在私有 snapshot 目录中重新验证已有的内容寻址 executable；历史 snapshot 只参与现有 daemon 的身份恢复，不改变 stopped-to-started 的新启动选择顺序。
 
 ## 启动与网络参数
 
@@ -44,17 +50,19 @@ CSSwitch 是启动与路由插件，不拥有 Science 的语言环境。冷启�
 
 `conda/`、`runtime/`、`seed-assets/`、`r-libs/`、`sbx-bind-src/` 是 Science-owned opaque roots。CSSwitch 只对这五个固定顶层入口做 no-follow 的目录、owner、权限和 device/inode 绑定校验，并在任何受保护写入前及 `serve` spawn 紧前重验；不得递归遍历、读取、复制、fsync、删除或回滚其内容。未知的其他顶层入口同样按外部状态原地保留，除非它与受保护入口冲突或根目录身份不安全。这个边界不依赖 APFS clone，也不把环境误称为可重建缓存。
 
+这是当前 **protected projection** 合同。旧候选曾对整棵 authority 做 full-tree snapshot，因 Conda 大文件、runtime symlink、entry/逻辑容量而多次失效；该历史只证明当时的故障与修复过程，不表示当前仍递归 clone 全树。后继关系见[0.1.25 compatibility evidence](../evidence/investigations/2026-07-28-claude-science-0.1.25-compatibility.md)末尾指针。
+
 私有快照根一旦建立，就在复制任何受保护状态之前，以 marker、精确 path/device/inode 和原子 manifest 的 `active_recovery` disposition 持久登记；完整快照仍必须在任何 OAuth、SSH bridge、MCP 或路由写入之前完成。只有成功、完整补偿或无需继续恢复的选择分支，才能通过 compare-and-swap 把同一票据转成 `cleanup_only`，随后才允许删除；因此 capture 中途崩溃不会留下未登记的敏感 orphan，config journal 即使被补偿回滚，也不能把仍需恢复的快照误删。进程若在活动事务中崩溃，下一次启动不得自动删除这份快照，也不得把可能的部分写入态当作新基线；当前策略是保留快照并要求人工恢复。旧版 `start_science` 日志没有 runtime 指纹，升级后按 `environment_uncertain`、`newer_runtime_required` 失败关闭，不得跨 runtime 自动启动。
 
 事务在调用 `claude-science serve` 前失败时，可以精确补偿受保护状态。调用后，Science 可能已经迁移或修改自身环境，即使受保护状态已恢复，结果也必须标为 `environment_uncertain`；跨 runtime 失败不得用旧 runtime 自动重启这个已暴露环境。无法证明候选 Science 已停止时，不得在其下方恢复凭据或组织数据库，必须保留受限恢复快照并返回 `cleanup_required`。
 
 ## 运行中身份与恢复
 
-CSSwitch 在内存中记录实际 launch binary path、来源（`explicit`、`official_updated`、`installed_app` 或 `cached_once`）、版本和选择时文件指纹。启动、复用、恢复、生成受管 URL 与停止操作使用这份 runtime metadata，并在需要控制 daemon 的边界做强身份检查。
+CSSwitch 在内存中记录实际 launch binary path、来源（`explicit`、`official_updated`、`installed_app` 或 `cached_once`）、版本和选择时文件指纹。启动、复用、恢复与停止操作使用这份 runtime metadata，并在需要控制 daemon 的边界做强身份检查。URL helper 也接收该 metadata，但自身允许上述 localhost fallback，不能单独作为强身份证明。
 
 停止不能只信任 Science CLI 的退出码：部分版本会返回成功并删除 lockfile，但 daemon 仍在监听。CSSwitch 在调用 CLI 前后都要求 sandbox port 的唯一监听 PID 与已记录 executable 精确匹配；CLI 后端口仍存活时，只向这一个前后均匹配的 PID 发送 TERM，超时后再次复核同一身份才 KILL，并以端口实际关闭作为成功条件。监听身份变化时不发送信号并返回错误。
 
-高频 UI `status` 是例外：它只对 sandbox port 做短超时 HTTP health，并把内存中的 path / source / version metadata 投影到诊断结果；它不反复调用 `claude-science status`，不重新核对监听 PID，也不能证明当前监听者就是已记录 runtime。
+高频 UI `status` 是例外：它只对 sandbox port 做短超时 HTTP health，并把内存中的 source / version metadata 投影到诊断结果；launch binary path 仍只保留在 `AppState`，不跨 status DTO 暴露。该路径不反复调用 `claude-science status`，不重新核对监听 PID，也不能证明当前监听者就是已记录 runtime。
 
 CSSwitch 自身重启后，只能在以下条件同时满足时接管已有 daemon：
 

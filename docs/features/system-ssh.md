@@ -6,7 +6,15 @@
 
 `reuse_system_ssh` 默认关闭。关闭时，CSSwitch 不把真实系统 SSH 配置注入隔离 Science。
 
-启用时，CSSwitch 会在隔离 HOME 的 `.ssh/config` 创建一个 `0600` 普通入口文件。该文件不复制真实配置，只包含一条指向真实 `~/.ssh/config` 的绝对 `Include`，用于满足 Science 在真正执行 SSH 前的 Host 校验；实际连接仍由下述 wrapper 固定使用真实配置。
+启用时，CSSwitch 会在隔离 HOME 的 `.ssh/config` 创建一个 `0600` V2 普通入口文件。它不复制真实配置，精确结构是：
+
+```text
+# CSSwitch managed system SSH config bridge v2
+Host <从真实 config 安全枚举的具体 aliases...>
+Include "<真实 ~/.ssh/config 的绝对路径>"
+```
+
+`Host` 行让 Science 在真正执行 SSH 前取得候选 alias；`Include` 让 OpenSSH 继续按真实配置求值。该 stub 不是“只有一条 Include”，也不是对真实 config 的语义副本。
 
 启用后，CSSwitch 在隔离环境 PATH 前放置一个窄 wrapper，最终执行：
 
@@ -42,20 +50,20 @@
 
 默认关闭时，SSH 不是普通 Science 启动的前置条件。用户启用该设置时，CSSwitch 先验证真实 `~/.ssh/config`；SSH 授权状态变化会先停止仍使用旧授权的隔离 Science，再保存新设置。关闭授权会撤销 CSSwitch 管理的隔离 config；若该位置是外来文件、symlink 或特殊文件，CSSwitch 会拒绝覆盖或删除并据实报错。
 
-启用后的每次启动都会再次校验 config 与 packaged wrapper。config 缺失、wrapper 缺失或路径不安全时，启动 fail closed 并清理部分启动，不能以 warning 略过。只有 Science 已成功启动后的某次 `/usr/bin/ssh` 命令失败，才只影响该命令。
+启用后的每次启动都会再次校验 config 与 packaged wrapper。config 缺失、wrapper 缺失或路径不安全时，启动 fail closed 并清理部分启动，不能以 warning 略过。
+
+当前 packaged wrapper validator 检查：asset root/scripts/wrapper 目录链不是 symlink 且为目录；wrapper 本身不是 symlink、是普通文件、不超过 128 KiB，并至少有一个 executable bit。它当前不检查 wrapper 的精确内容/hash、owner、link count、group/world writable 或精确 mode，文档和验收不能把这些未实现检查写成已证明。只有 Science 已成功启动后的某次 SSH 命令失败，才只影响该命令。
 
 错误报告不得打印私钥路径、config 内容、ssh-agent 数据或其他敏感信息，也不得为了诊断读取真实 private key。
 
-## 验证层
+## 三道动态 gate
 
-1. 配置默认关闭；
-2. opt-in 保存时缺失 config 会被拒绝；
-3. 启用后启动时 wrapper 内容、权限与 config 再次通过 fail-closed 校验；
-4. 隔离 Science PATH 选择 wrapper；
-5. wrapper 将参数转给 `/usr/bin/ssh -F`；
-6. 没有 `.ssh` 复制、`sshd`、防火墙或公网 listener；
-7. 特定真实 server 连通性只在单独授权后验证。
+| Gate | 要证明什么 | 当前边界 |
+|---|---|---|
+| 1. Science parser acceptance | 当前 Science 接受 alias inventory、`ssh_hosts` 与 V2 stub | source 建立生成/事务链；当前 0.1.25 动态结果未运行 |
+| 2. OpenSSH invocation | Science 实际选择 wrapper；wrapper 调用 `/usr/bin/ssh -F <real config>` 并保留参数/env | wrapper source 已建立；需隔离 recorder，不连真实 server |
+| 3. real server connectivity | key/agent/known_hosts、DNS/network、server 与远端命令成功 | 只在另行授权后验证；不能由 Gate 1/2 推出 |
 
-其中第 1～6 项可由本地 fixture 和系统 OpenSSH 自动验证；Claude Science 自己是否接受 `Include` 必须使用当前安装版本做一次隔离 UI 验收，不能由 `/usr/bin/ssh -G` 的结果代替。
+静态/source 还应分别证明：默认关闭、保存时缺失 config 拒绝、stub/sidecar 事务、无 `.ssh` 复制、无 `sshd`/防火墙/公网 listener。`/usr/bin/ssh -G` 不能替代 Science parser，wrapper source 也不能替代 Science 实际 invocation。
 
-源码 / 合同测试不能替代第 7 层；第 7 层也不能泛化为所有用户配置可用。
+任一道 gate 的成功都不能泛化为所有用户 config、key、agent、网络或 server 可用。

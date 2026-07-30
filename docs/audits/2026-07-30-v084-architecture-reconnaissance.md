@@ -298,9 +298,9 @@ V2 stub 是 marker + `Host <aliases...>` + absolute `Include`，不是“只有�
 
 | 调研时缺口 | 本期治理落点 |
 |---|---|
-| capability map 只覆盖 CSSwitch 集成面，遗漏 annotations、memory、cloud、literature、Web Search、GPU、Modal、BioNeMo、平台与 admin/compliance | [产品能力地图](../features/product-science-capability-map.md#claude-science-产品能力全景)补齐用户能力域 |
+| capability map 只覆盖 CSSwitch 集成面，遗漏 annotations、memory、cloud、literature、Web Search、GPU、Modal、BioNeMo、平台与 admin/compliance | [产品能力地图](../features/product-science-capability-map.md#能力所有权与托管决策表)补齐用户能力域 |
 | hosted/Directory connector 只有笼统 `UNKNOWN` | 产品与 architecture 分别记录 `*.mcp.claude.com` source-level transport denial，并保留 UI/entitlement/OAuth/live `NOT-RUN / UNKNOWN` |
-| permission system、用户授权和资源 owner 混写 | [能力依赖](../architecture/science-capability-dependencies.md#所有权模型)拆分 Science enforcement 与用户授权决定 |
+| permission system、用户授权和资源 owner 混写 | [能力依赖](../architecture/science-capability-dependencies.md#1-架构判断顺序)拆分 Science enforcement 与用户授权决定 |
 | 官方 Claude、第三方 provider 与 CSSwitch routing owner 混写 | 能力依赖拆分 Anthropic entitlement、provider service 与 CSSwitch profile/selector/routing |
 | whole-app Linux/WSL 与 SSH remote compute 混写 | 产品与 architecture 分成独立平台部署和 remote compute |
 | updater 被误解为 Anthropic CONNECT blocklist 结果 | 固化 `--no-auto-update` 禁用；update host 本身不在该 blocklist |

@@ -5,9 +5,11 @@
 ## 阅读顺序
 
 1. 所有任务先读[安全规则](.agents/rules/safety.md)和[Git / worktree 规则](.agents/rules/git-worktrees.md)。
-2. 再按任务读取 [`.agents/rules/`](.agents/rules/) 下的测试、发布、Science runtime、外部 Skill 或系统 SSH 规则。
+2. 再按任务读取 [`.agents/rules/`](.agents/rules/) 下零或一项最接近的领域规则；没有匹配项时不强行套用。涉及文档创建、修改、引用或删除时读[文档治理规则](.agents/rules/documentation.md)。
 3. 涉及版本、分支、worktree、验证状态或已知问题时，先实时复核，再参考 [`.agents/context/`](.agents/context/) 的日期化快照。
 4. 架构、运维、功能合同、历史证据和外部参考从[文档总入口](docs/README.md)进入。
+
+默认首轮只加载解决任务所需的一个索引和最多两份相关正文或 Context；需要更多证据时沿链接逐级展开，不预读全部 context、audit 或 evidence。正式独立审查额外读取 [`reviewing.md`](.agents/rules/reviewing.md) overlay，但不增加领域规则、索引、正文或 Context 的预算。
 
 ## 信息权威顺序
 

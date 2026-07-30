@@ -15,11 +15,16 @@
 ## 2. 源码门禁
 
 ```bash
-bash test/run_all.sh --require-release-ready
+GATE_ROOT="$(mktemp -d /private/tmp/csswitch-source-gate.XXXXXX)"
+chmod 700 "$GATE_ROOT"
+bash test/run_all.sh --output-root "$GATE_ROOT"
 git diff --check
 ```
 
-如环境层被阻塞，就换到具备相应能力的发布环境复跑；不能把 `current-env clean` 改写成 `release-ready green`。
+该命令必须绑定 clean、non-shallow 的 exact `HEAD`，并取得完整 15-suite PASS
+completion seal。preflight、环境或 suite 阻断时应在满足同一候选约束的环境复跑；
+不能把局部测试、stdout 摘要或旧 `current-env clean` / `release-ready green`
+词汇改写成当前 `SOURCE-GREEN`。
 
 ## 3. 构建 artifact
 

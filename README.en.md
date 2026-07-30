@@ -80,7 +80,9 @@ npm run tauri dev
 Run the complete local gate with:
 
 ```bash
-bash test/run_all.sh
+GATE_ROOT="$(mktemp -d /private/tmp/csswitch-source-gate.XXXXXX)"
+chmod 700 "$GATE_ROOT"
+bash test/run_all.sh --output-root "$GATE_ROOT"
 ```
 
 [Changelog](./CHANGELOG.md) · [Development and testing](./docs/operations/development.md) · [Release evidence](./docs/evidence/releases/README.md)

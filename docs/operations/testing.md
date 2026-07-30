@@ -1,42 +1,51 @@
 # 自动测试与证据判定
 
-## 总入口
+## 权威 source gate
+
+当前唯一完整 source/unit 入口是固定的 `GATE-SOURCE`：
 
 ```bash
-bash test/run_all.sh
+GATE_ROOT="$(mktemp -d /private/tmp/csswitch-source-gate.XXXXXX)"
+chmod 700 "$GATE_ROOT"
+bash test/run_all.sh --output-root "$GATE_ROOT"
 ```
 
-脚本按顺序汇总五层：
+`GATE_ROOT` 必须是绝对、canonical、当前用户拥有、空的 `0700` 目录，且不能位于
+仓库内。`test/run_all.sh` 只是兼容命令名，只接受上述 `--output-root` 参数并转发到
+隔离 Python CLI；无参数调用和旧 `--require-release-ready` 均返回 usage error。
 
-| 层 | 入口 | 覆盖范围 |
-|---|---|---|
-| `offline` | `test/run-offline.sh` | Python 纯单元：capability、catalog、process ownership；不使用网络 |
-| `loopback` | `test/run-loopback.sh` | 从当前源码构建 Rust gateway，运行 127.0.0.1 mock / provider / installed matrix 合同 |
-| `scripts` | `test/run-scripts.sh` | shell、doctor 与 verify-proxy 运维合同 |
-| `rust` | `test/run-rust.sh` | desktop backend 与 gateway 的 fmt、clippy、tests |
-| `frontend` | `test/run-frontend.sh` | `desktop/src/main.js` 的 Node 语法检查 |
+Gate 只接受 clean、non-shallow 的 exact `HEAD`，固定顺序执行
+`quality/release-gates.v1.json` 中 `GATE-SOURCE.required_suite_ids` 的 15 个 suite。
+命令、测试 identity、允许环境、timeout、无 retry 与聚合证据均由
+`quality/test-catalog.v1.json` 和 trusted run-evidence 合同绑定。公共 CLI 不能选择
+子集。
 
-每层必须输出一个 `S0_LAYER <layer> <status>`。缺标记行按失败处理；loopback 层的有界重试不会把最终失败吞掉。
+报告至少记录命令、退出码、exact `HEAD`、输出目录、最终 completion seal / aggregate
+判定与 15 个 suite 状态。只有递归验证后的 PASS seal 才建立
+`RUN-EVIDENCE-GREEN` 与 `SOURCE-GREEN`；stdout 摘要或某个组件通过都不是权威。
+完整冻结合同见 [Trusted source gate v1](quality-source-gate.md)。
 
-## 两种总判定
+## 聚焦诊断
 
-### `current-env clean`
+`test/run-offline.sh`、`test/run-loopback.sh`、`test/run-scripts.sh`、
+`test/run-rust.sh` 和 `test/run-frontend.sh` 仍可用于定位相应组件问题，但它们不是
+当前完整 gate，也不能单独建立 `SOURCE-GREEN`。旧 `S0_LAYER`、
+`current-env clean` 与 `release-ready green` 只用于解释历史 evidence，不是当前
+候选的结果词汇。
 
-本环境五层中没有 `fail`，脚本退出 0。允许存在 `env-blocked`、`skipped` 或 `needs-real-machine`，因此不能写成完整发布门禁通过。
-
-### `release-ready green`
-
-五层全部为 `pass`，不存在环境阻塞。发布机器使用：
+文档治理的定向入口是：
 
 ```bash
-bash test/run_all.sh --require-release-ready
+python3 -m unittest test.test_document_governance -v
 ```
 
-有任何非 `pass` 层时，该模式退出 2；有真实失败时退出 1。报告必须同时写命令、退出码、五层状态与运行 commit。
+它登记在 `quality/test-catalog.v1.json` 的既有 `SUITE-PY-OFFLINE`，由完整
+`GATE-SOURCE` 执行；覆盖范围与不能外推的证据层以
+[文档治理合同](document-lifecycle.md)为准。
 
 ## 自动化没有证明的层
 
-五层全绿仍不自动证明：
+`GATE-SOURCE` PASS 仍不自动证明：
 
 - `.app` / DMG 从目标 commit 构建且内容正确；
 - 临时安装副本或 installed runtime 可用；
@@ -49,9 +58,9 @@ bash test/run_all.sh --require-release-ready
 
 ## 报告词汇
 
-- `通过`：该层已执行且满足判据；
+- `PASS`：目标 gate / suite 已执行、身份绑定且满足判据；
 - `失败`：已执行但不满足；
-- `ENV-BLOCKED`：当前环境缺能力，不能视为失败或通过；
+- `PREFLIGHT / ENV-BLOCKED`：当前环境或候选前置不满足，不能视为通过；
 - `NEEDS-REAL-MACHINE`：必须在指定真机 / artifact 上执行；
 - `未执行`：没有取得该层证据；
 - `需人工判断`：机器结果不足以自动确定。

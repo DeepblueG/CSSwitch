@@ -1,100 +1,108 @@
 # CSSwitch 架构总览
 
-本文是 v0.7.0 当前架构合同，只保留产品边界、所有权、数据流和失败边界。版本固定的调查结果见[证据目录](../evidence/README.md)。
+本文只保留跨版本的产品边界、组件依赖和高层失败边界。版本、commit、package、release 与一次验证见[日期化 audit/evidence](../audits/2026-07-30-v084-architecture-reconnaissance.md)。
 
 ## 产品边界
 
-CSSwitch 是 Claude Science 的 provider 配置转换器、本地 inference gateway 和隔离启动器。它负责：
+CSSwitch 是 Claude Science 的 provider 配置转换器、本地 inference Gateway 和隔离启动器。它负责：
 
-- 将当前 profile 转换为 Science 使用的 Anthropic 兼容本地端点；
-- 管理 Rust CSSwitch Gateway 生命周期；
-- 准备隔离登录状态并复用持久 Science data-dir；
-- 选择、启动、复用、打开和停止正确的 Science runtime；
-- 提供默认关闭的 Codex browser-only OAuth、动态模型目录与 Responses/SSE 转换；
-- 提供两个窄范围可选 bridge：准确公开 GitHub URL 与主面板本地 `.zip` / `.skill` 的外部 Skill 安装、整包确认卸载，以及显式授权的系统 SSH 配置复用。
+- 把当前 profile 转换为 Science 使用的 Anthropic-compatible loopback endpoint；
+- 管理 Rust Gateway 与隔离 Science 的生命周期、身份和失败补偿；
+- 准备隔离虚拟登录并复用持久 Science state；
+- 提供默认关闭的 Codex browser-only OAuth、动态模型目录与 Responses bridge；
+- 提供两个窄 bridge：外部 Skill 安装/卸载，以及用户 opt-in 的系统 SSH 配置复用。
 
-Science 仍拥有项目、组织、原生 Skills、runtime 资源、Agent 绑定与升级。CSSwitch 不模拟 Anthropic OAuth / catalog，也不扩展成 Skill Manager、Science 下载器或远程访问服务。外部 Skill bridge 失败不阻断一键启动；系统 SSH 默认关闭，但用户一旦启用，其 config / wrapper 安全校验就是 fail-closed 启动条件。
+Science 仍拥有 project/session/artifact、组织、原生 Skills/connectors/Plugin 上游面、environments/kernels、Reviewer/Specialist、remote compute、updater 与 UI 语义。CSSwitch 不模拟 Anthropic OAuth/catalog，不扩展成通用 Skill/MCP/Plugin 管理器、Science 下载器或远程访问服务。
 
-## 主数据流
+## 当前可达性
+
+源码存在不等于产品能力。`compiled`、`registered`、`product-reachable`、`test-only` 与 `legacy/orphan` 的唯一词表和判定边界见[Desktop 控制面](desktop-control-plane.md#可达层定义)；本总览不重复定义。精确 command 数量、orphan 清单与当前 findings 留在日期化 audit。
+
+## 主依赖方向
 
 ```text
-CSSwitch profile（API key 或 CSSwitch OAuth）
-  -> Rust CSSwitch Gateway (loopback)
-  -> 隔离登录状态
-  -> 持久 Science data-dir
-  -> 选择并启动 / 复用 Science executable
-  -> Science UI
+Desktop WebView
+  -> Tauri command / event
+     -> command-specific mutation boundary
+        -> Lifecycle serializer（runtime/profile/mode/doctor reconcile）
+        -> picker 前后 runtime-context recheck + Skill package transaction（本地 Skill 安装）
+        -> Config + AppState / package-private state
+        -> Rust Gateway
+           -> provider / Codex upstream
+        -> Science runtime
+           -> loopback Gateway
+           -> Science local control plane
+
+Science Agent
+  -> CSSwitch managed local stdio connector
+  -> Gateway Skill bridge worker
+  -> Science native attach/detach/readback
+
+Science remote compute
+  -> optional CSSwitch SSH stub/wrapper
+  -> user OpenSSH / network / server
 ```
-
-普通一键启动不经过外部 Skill store、inventory、catalog、reconcile 或 deploy。外部 Skill 的 Agent 控制面在 Science 健康后 best-effort 配置；系统 SSH wrapper 则在用户 opt-in 时于 Science 启动前完成安全校验。
-
-## 所有权与 source of truth
-
-| 数据 / 能力 | Source of truth | 所有者 |
-|---|---|---|
-| provider profiles 与 CSSwitch settings | `~/.csswitch/` 配置 | CSSwitch |
-| Gateway 生命周期与本地路由 | CSSwitch runtime state | CSSwitch |
-| Science executable 候选 | 通过 CSSwitch 固定路径、文件安全与 embedded metadata 本地校验的 `~/.claude-science/bin/claude-science`，或 `/Applications/Claude Science.app/.../claude-science` | 用户 / Science updater / installer |
-| updater runtime snapshot | `<CSSwitch data root>/runtime-snapshots/science/claude-science-<sha256>` | CSSwitch |
-| 持久 Science 状态 | `~/.csswitch/sandbox/home/.claude-science` | Science |
-| 版本 runtime 资源 | `<data-dir>/runtime/<version>/` | Science |
-| 组织与 Skills | `<data-dir>/orgs/<active-org>/...` | Science 组织 |
-| 外部 Skill bundle manifest / journal | `~/.csswitch/sandbox/skill-bundles/<org>/` | CSSwitch |
-| provider capability 元数据 | `catalog/capabilities.v1.json` | CSSwitch |
-| provider 启动合同 | `catalog/provider-contracts.v1.json` | CSSwitch |
-| Codex OAuth / thinking / generation records | CSSwitch data root 下的私有 `codex-*.v1.json` | CSSwitch Gateway |
-| v0.4.2 / v0.4.3 legacy Skill store / inventory | 原样保留但不参与当前 runtime | 非当前运行路径 |
-
-持久 data-dir 提供状态连续性，不固定 executable 版本。正常新启动优先把通过本地路径、文件安全与 embedded metadata 校验的 updater executable 固化为 CSSwitch 私有内容寻址 snapshot，再使用当前安装的 App；CSSwitch 隔离 data-dir 内的历史缓存只有在前两者不可用、版本可读且用户仅本次授权时才可使用。embedded metadata 不是官方来源的密码学认证。详见 [Science runtime 合同](science-runtime.md)。
 
 ## 组件边界
 
-### Desktop / Tauri backend
+### Desktop / Tauri
 
-管理配置、端口、Science runtime metadata、强身份边界、UI health 状态和可选 bridge 编排。关闭设置窗口只隐藏窗口；明确退出 CSSwitch 才按受管顺序停止 Science 与 Gateway。
+管理配置、端口、运行模式、AppState、runtime lifecycle、UI 状态和可选 bridge 编排。command/event/DTO、frontend caller 和 auto-boot 投影以[Desktop 控制面](desktop-control-plane.md)为准。
+
+### 状态与事务
+
+`AppState` 拥有进程内 Gateway child、Gateway/Science identity、boot refs、Science version observation cache 和 pending authority cleanup 的重试镜像；持久 cleanup manifest 才是跨重启权威。当前产品启动脚本退出后不在 `AppState.sandbox` 保存 Science daemon child，daemon ownership 依赖 runtime identity、managed receipt 与 live listener。`Config` 持久化 profile、端口、mode、binding 与 journal。`Lifecycle` 串行化 runtime/profile/mode 等复合变更和 doctor route reconcile，但生产的本地 Skill 安装不取得该锁，而是依靠文件 picker 前后两次 runtime-context 复核、Skill package commit 以及 Science attach/readback 的局部边界；安装/attach 完成后没有第三次 context 复核。authority snapshot、managed receipt、Skill/SSH/Codex 各有局部状态。锁序、启动/切换/恢复/停止和补偿见[运行时状态与事务](runtime-state-transactions.md)。
 
 ### Rust Gateway
 
-作为随 app 打包的 sidecar 处理推理协议与本地认证，包括 Codex OAuth、模型目录与 Responses/SSE 转换；也承载限界的外部 Skill host worker / MCP 子命令。运行时没有 Python proxy fallback。
+Gateway sidecar 处理 provider/Codex inference、模型目录、协议/SSE/tool 转换；同一 binary 还承载 scratch probe、Codex auth CLI、外部 Skill stdio MCP 和 Science control 子命令。当前生产运行没有 Python proxy fallback。详见[Gateway 与 provider 路由](gateway-provider-routing.md)。
 
 ### Science runtime
 
-新启动显式传入 data-dir、`--host 127.0.0.1`、独立 `--sandbox-port` 和 `--no-auto-update`。updater 来源实际执行 CSSwitch 私有、只读、内容寻址的 snapshot，避免 source 在运行中更新后破坏 stop/recovery 身份。CSSwitch 记录实际 binary path、来源、版本和含 SHA-256 的文件指纹；启动、复用、恢复与停止边界另结合监听 PID、canonical executable 和 data-dir CLI 结果做强身份判断。高频 UI `status` 只做 HTTP health，并返回内存中的 runtime metadata，不能凭它证明端口属于本沙箱。
+CSSwitch 在第三方模式使用隔离 HOME、持久 data-dir、受校验 executable 与 loopback ports，并以 `--no-auto-update` 启动。executable、data-dir、固定用户级状态、environment/kernel 与 live identity 是不同事实，详见[Science runtime](science-runtime.md)。
 
-### 外部 Skill bridge
+### Science 能力
 
-一个 bundled routing Skill 将安装 / 卸载请求送到合并 connector。GitHub 路线只接受准确的公开 URL，本地路线只接受用户在系统 picker 中选择的 `.zip` / `.skill`；共享 package core 负责结构识别、限额、路径安全、摘要与原子提交。单 Skill 使用原生绑定与回读，bundle 批量绑定直接成员并保留 `_shared` 等支持资源。bundle 从任意成员发起卸载时必须先返回完整受影响 Skill 清单和整包确认，确认后才批量解绑并整包隔离，不提供成员级物理删除。所有操作都只针对 active org 且不覆盖同名目录，CSSwitch ownership 由 marker、路径摘要和 bundle manifest 证明，不写 Science 数据库。详见[功能合同](../features/external-skill-bridge.md)。
+project/session/artifact、Skills、MCP/connectors、Plugins、environments、Reviewer/Specialist、SSH、updater 与 network preference 的 owner、模式与证据升级条件见[Claude Science 能力依赖](science-capability-dependencies.md)。用户可见支持视角见[产品 / Science 能力地图](../features/product-science-capability-map.md)。
 
-### 系统 SSH bridge
+## 所有权
 
-默认关闭。启用后先用只含绝对 `Include` 的隔离 config stub 满足 Science 的 Host 前置校验，再通过窄 wrapper 执行 `/usr/bin/ssh -F <real-home>/.ssh/config`。不复制 `.ssh` 或真实 config 内容、不启动服务、不开放监听；stub、真实 config 或 wrapper 校验失败会 fail closed。详见[系统 SSH 文档](../features/system-ssh.md)。
+| 数据 / 能力 | Source of truth | 所有者 |
+|---|---|---|
+| profile、provider contract、model preset、mode、端口 | CSSwitch config/catalog | CSSwitch |
+| Gateway child、route 与 private auth state | CSSwitch runtime/Gateway | CSSwitch |
+| Science executable/updater candidate | 用户安装或 Science updater 写入的固定路径 | 用户 / Science |
+| CSSwitch runtime snapshot/receipt/journal | CSSwitch private data root | CSSwitch |
+| 隔离 Science project/session/artifact/org state | 隔离 Science HOME/data-dir | Science |
+| Science environments/kernels/runtime resources | 隔离 Science HOME/data-dir | Science |
+| external Skill marker/bundle journal | CSSwitch marker/private bundle root | CSSwitch |
+| native Skill/binding/connector/Plugin 上游状态 | Science | Science |
+| SSH config/key/agent/known_hosts/network/server | 用户 / OpenSSH / 外部系统 | 用户 / 外部 |
 
-### Codex 实验能力
+## 网络与安全
 
-默认关闭。用户启用后，CSSwitch 使用自有 browser-only OAuth 和私有文件认证，不读取原生 `~/.codex`，也不使用 macOS Keychain。登录、刷新、模型目录、退出和推理共用同一 Codex 网络路由；最终公开 v0.7.0 DMG 的 live OAuth / 推理仍是独立未建立层。详见 [Codex 功能合同](../features/codex-science-bridge.md)。
-
-## 网络与安全边界
-
-- Gateway 与 Science UI 均绑定 loopback；产品没有 `0.0.0.0` 开关。
-- Science preview port 由 CSSwitch 显式分配并检查冲突、保留端口和溢出。
-- 原始 Science `serve` 输出可能含 data-dir 或一次性 URL，因此不直接进入 CSSwitch 日志。
-- 一次性 Science URL、nonce 与 CSRF 状态只在 backend 内存和限界控制流中使用，不序列化到普通 Tauri status。
+- Gateway 与 Science UI 只绑定 loopback；产品没有 `0.0.0.0` 开关。
+- Science UI port 与 sandbox port 分开校验，`8765` 是用户真实 Science 保留端口。
+- 一次性 Science URL、nonce、CSRF 和 path secret 不进入普通 status/log。
 - 第三方模式不读取或复制真实 Claude 登录数据。
-- 系统浏览器使用自身网络配置；CSSwitch 的 Codex route 只控制 sidecar / Gateway 的 HTTPS socket，不声称检测系统 TUN。
+- Gateway raw `CONNECT` 在 path-secret 认证前分派；listener 虽只在 loopback，任何本机进程仍可使用。它只按 Anthropic/Claude hostname denylist 拒绝目标；DNS resolver 本身没有 deadline，DNS 返回后的地址连接共享剩余 10 秒预算，建立后的双向转发没有 session deadline、idle timeout、byte cap 或并发连接/session-count 上限。这条通用 TCP transport 不证明 Remote MCP。
+- Science app proxy、sandbox network、package mirror、Codex route 与 provider egress 是不同网络面。
+- SSH opt-in 是行为授权；不复制 `.ssh`、不启动 `sshd`、不开放监听。
 
-## 失败边界
+## 高层失败边界
 
-provider 配置、Gateway、隔离登录准备、runtime preflight、端口所有权、Science launch 与 health / identity 可以令一键启动失败。
+可阻断一键开始：
 
-以下项目只能降级外部 Skill 可选功能，不能阻断或强制重启普通 Science：
+- profile/provider contract、Gateway spawn/health/catalog；
+- authority snapshot、runtime preflight、端口与 live identity；
+- Science launch/health/receipt；
+- active profile 或当前仍运行的 prior Gateway 使用 Codex 时所需的 Codex auth proof；
+- opt-in 后的 SSH config/stub/wrapper preflight。
 
-- legacy Skill store / inventory 内容；
-- 外部 `~/.claude/skills`；
-- Anthropic catalog 不可用；
-- route / MCP / Agent 控制面配置失败。
+只降级局部能力：
 
-系统 SSH 是不同边界：默认关闭时完全不参与启动；启用后 config / wrapper 缺失或不安全会令 Science 启动 fail closed。Science 已启动后的单次 SSH 连接失败不影响 provider Gateway。
+- 外部 Skill route/connector/Agent control 配置；
+- 单次 Skill/MCP/SSH domain operation；
+- 与当前 runtime 无关的单次 Codex auth/catalog/transport 操作。
 
-Codex 也是独立边界：认证、模型目录或上游 route 失败只阻止 Codex profile 的对应操作，不能读取原生 Codex 登录，也不能把错误扩散为其他 provider 的认证状态。
-
-App 缺失且没有合格的一次性 cache 授权属于 runtime preflight 结果，不应伪装成 provider 或 Skill 错误。较新 binary 已尝试打开持久 data-dir 后，也不能盲目用较旧 binary 回退。
+当前缺口、数量和 product-reachable 清单只在[日期化调研 audit](../audits/2026-07-30-v084-architecture-reconnaissance.md)固定；稳定架构正文不复制版本化 findings。

@@ -1,6 +1,10 @@
 # 当前已知问题与证据缺口
 
-最后整理：2026-07-28。已解决历史放入 CHANGELOG 或 dated evidence，不在这里重复。
+状态：待按 v0.8.4 逐项复核；未复核条目不能自动视为已解决或仍复现
+
+最后复核：2026-07-28。已解决历史放入 CHANGELOG 或 dated evidence，不在这里重复。
+
+失效条件：对应 change / bug record、发布基线或 artifact / installed/live 证据改变时，受影响条目立即失效并须按当前版本重审。
 
 ## v0.8.2 已发布后的边界
 
