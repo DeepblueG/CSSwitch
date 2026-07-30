@@ -183,9 +183,10 @@ Science 更新后只回答下面几个问题，不新增一套 gate 或执行流
 
 ## 8. 文档边界
 
-- 能力清单、ownership、托管决策、non-target、证据层与 `UNKNOWN`：
-  只在能力地图维护；
-- 本文只维护稳定依赖、归因和决策规则；
+- 完整能力清单、逐能力 ownership/托管/non-target 结论、当前证据层与
+  `UNKNOWN`：只在能力地图的单一决策表维护；
+- 本文只维护这些逐项结论的稳定解释规则：跨 owner 依赖、最小托管责任、窄桥接
+  与 non-target 类别边界、故障归因；不复制第二套逐能力状态表；
 - exact version/hash/package/route/一次观察：留在日期化 audit/evidence；
 - 不在这里新增 handoff、probe 执行、GATE-SOURCE、schema、lint 或 lifecycle
   合同；

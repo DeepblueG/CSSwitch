@@ -310,3 +310,14 @@ This later source repair invalidates every earlier source-gate, artifact,
 installed, local-mock, and live-provider result. A new clean commit and complete
 rerun are required before the installed restart defect can move beyond
 `source-fixed-product-pending`.
+
+## Successor contract
+
+This document intentionally preserves the chronology of the old full-tree
+authority snapshot candidates. At current source HEAD `37d5cfb6600a0022d5e1bbbe9a7e181a917b12dd`,
+the stable contract is the protected projection described in
+[Science runtime](../../architecture/science-runtime.md): ten protected entries
+are snapshotted, while five Science-owned opaque roots receive only top-level
+identity checks and are not recursively copied or restored. The historical
+sizes, entry counts and APFS clone design above are not the current runtime
+contract.
