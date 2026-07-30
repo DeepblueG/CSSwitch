@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="./LICENSE">MIT License</a> · <strong>CSSwitch v0.8.3</strong> · macOS Apple Silicon · Tauri 2
+  <a href="./LICENSE">MIT License</a> · <strong>CSSwitch v0.8.4</strong> · macOS Apple Silicon · Tauri 2
 </p>
 
 <p align="center">
@@ -20,7 +20,7 @@
 ---
 
 <p align="center">
-  <a href="https://github.com/SuperJJ007/CSSwitch/releases/download/v0.8.3/CSSwitch_0.8.3_aarch64.dmg">Download v0.8.3</a> ·
+  <a href="https://github.com/SuperJJ007/CSSwitch/releases/download/v0.8.4/CSSwitch_0.8.4_aarch64.dmg">Download v0.8.4</a> ·
   <a href="#install-and-start">Install and start</a> ·
   <a href="#providers-and-models">Providers and models</a> ·
   <a href="#skills-and-mcp">Skills and MCP</a> ·
@@ -31,12 +31,12 @@
 
 You need an Apple Silicon Mac, [Claude Science](https://claude.com/download), and either a third-party model API key or a Codex account.
 
-1. Download [`CSSwitch_0.8.3_aarch64.dmg`](https://github.com/SuperJJ007/CSSwitch/releases/download/v0.8.3/CSSwitch_0.8.3_aarch64.dmg) and drag CSSwitch into Applications.
+1. Download [`CSSwitch_0.8.4_aarch64.dmg`](https://github.com/SuperJJ007/CSSwitch/releases/download/v0.8.4/CSSwitch_0.8.4_aarch64.dmg) and drag CSSwitch into Applications. Optionally verify the public attachment SHA-256 against the [v0.8.4 release evidence](./docs/evidence/releases/v0.8.4.md).
 2. Create a profile and enter the API key, model names, and `base_url` when required.
 3. Choose **Set active**, then **Start**.
 4. Select the model from the model picker at the top of Science.
 
-> The current package is ad-hoc signed and not notarized. If macOS blocks the first launch, right-click CSSwitch in Finder and choose **Open**.
+> The current public package is ad-hoc signed and not Developer ID signed, notarized, or claimed Gatekeeper-accepted. If macOS blocks the first launch, right-click CSSwitch in Finder and choose **Open**.
 
 ## Providers and models
 
@@ -62,10 +62,11 @@ CSSwitch only manages content it imported. Name conflicts never overwrite existi
 
 ## Current boundaries
 
-- Public desktop builds currently target macOS Apple Silicon only.
+- The current macOS Apple Silicon release is **v0.8.4**; layered evidence is in the [v0.8.4 release evidence](./docs/evidence/releases/v0.8.4.md). Public desktop builds currently target macOS Apple Silicon only.
 - Third-party mode does not grant Anthropic account privileges; hosted MCP services, directory connectors, and some cloud features may be unavailable.
 - Codex remains an off-by-default experiment with one browser-authenticated account.
 - The Rust Gateway is bundled; no separate Python runtime is required.
+- Source/unit, final artifact, installed identity, signing, and live provider/account results are separate evidence layers. A download page or source-gate pass does not prove every real provider, SSH path, or Science domain capability.
 
 For upgrades, rollback, and detailed limitations, see the [project documentation](./docs/README.md). Please report issues through [GitHub Issues](https://github.com/SuperJJ007/CSSwitch/issues).
 

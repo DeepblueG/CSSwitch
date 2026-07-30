@@ -14,13 +14,13 @@ Codex configuration, user MCP entries, and unknown fields remain intact.
 ## 升级前 / Before upgrading
 
 1. 在 CSSwitch 中停止当前第三方链路，然后退出 CSSwitch。
-2. 备份整个 `~/.csswitch/`，包括配置、日志和 Skill Manager store/inventory。
+2. 备份整个 `~/.csswitch/`，包括配置、日志、外部 Skill bridge 相关目录，以及若存在的历史 Skill 数据。当前产品不启用 Skill Manager；旧版遗留目录若仍在，也一并备份。
 3. 不要删除 `~/.csswitch/sandbox/`。覆盖安装 app 不应删除该目录，但手工删除会影响隔离 Science 状态与历史数据。
 4. 确认下载文件名和目标版本是 `CSSwitch_0.8.4_aarch64.dmg` / `0.8.4`，并按
    [v0.8.4 release evidence](../evidence/releases/v0.8.4.md)核对 SHA-256。
 
 1. Stop the active third-party path in CSSwitch, then quit CSSwitch.
-2. Back up all of `~/.csswitch/`, including configuration, logs, and Skill Manager store/inventory.
+2. Back up all of `~/.csswitch/`, including configuration, logs, external Skill bridge data, and any historical Skill directories that still exist. The current product does not enable Skill Manager; back up legacy directories if present.
 3. Do not delete `~/.csswitch/sandbox/`. Replacing the app should not remove it, but manual deletion can remove isolated Science state and history.
 4. Confirm that the download and target version are
    `CSSwitch_0.8.4_aarch64.dmg` / `0.8.4`, then verify its SHA-256 against the
@@ -50,8 +50,8 @@ CSSwitch / Science 进程后，在这些版本间回滚不需要 schema 降级�
 回滚到 0.7.0 或更早版本前，应先在 0.8.4「高级设置」中使用“导出并降级到 v2”，
 或在所有进程退出后恢复兼容的版本备份。随后再用旧版 `.dmg` 覆盖
 `/Applications/CSSwitch.app`。不要同时运行两个版本，也不要把新 sidecar 单独复制
-进旧版 app。回滚不会删除 Science data-dir、已安装 Skill、bundle manifest、隔离
-回收内容或旧 Skill Manager 数据。
+进旧版 app。回滚不会删除 Science data-dir、已安装外部 Skill、bundle manifest、隔离
+回收内容，或磁盘上若仍存在的历史 Skill 相关目录。
 
 Versions 0.8.4 through 0.8.0 use schema v4, so rolling back among them after
 stopping every CSSwitch and Science process does not require a schema downgrade;
@@ -61,8 +61,8 @@ use “Export and downgrade to v2” under 0.8.4 Advanced Settings, or restore a
 compatible backup after every CSSwitch process has stopped. Then replace
 `/Applications/CSSwitch.app` with the older DMG. Do not run two versions at once
 or copy a newer sidecar into an older app. Rollback does not delete the Science
-data directory, installed Skills, bundle manifests, quarantined content, or
-legacy Skill Manager data.
+data directory, installed external Skills, bundle manifests, quarantined content,
+or any historical Skill-related directories that remain on disk.
 
 回滚只替换应用程序，不自动回退或删除 `~/.csswitch` 数据。若旧版无法读取升级后的配置，请退出旧版，把备份的 `config.json` 恢复到原位并保持文件权限为 `0600`。不要在 CSSwitch 或 Science 运行时修改配置文件。
 

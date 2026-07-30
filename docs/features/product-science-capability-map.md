@@ -55,14 +55,15 @@ ownership、典型 stage 链、托管/non-target、证据与 `UNKNOWN`；组合�
 
 | 层级 | 只能说明什么 |
 |---|---|
-| `OFFICIAL` | 官方公开 capability surface 或 ownership |
+| `OFFICIAL` | 官方公开 capability surface 或 ownership；本表的 `OFFICIAL` 行绑定 [2026-07-30 架构调研 §7](../audits/2026-07-30-v084-architecture-reconnaissance.md#7-官方资料与-0125-crosswalk) 的 URL/访问日 crosswalk，不是无限期官方合同 |
 | `SOURCE` | 当前 CSSwitch 源码中的实现边界 |
 | `TEST` | 对应 source contract 的测试结果 |
 | `PACKAGE-STATIC` | 指定 Science package 中存在的静态表面 |
 | `FIXTURE` | 隔离 mock/fake/fixture 中的行为；不得写成真实服务或 current live |
 | `ARTIFACT` / `INSTALLED-LIVE` | 仅在绑定 exact artifact/runtime 身份且已有相应证据时使用 |
 
-`OFFICIAL` 不证明指定账号、版本或第三方模式可用；`SOURCE/TEST` 不证明最终
+`OFFICIAL` 不证明指定账号、版本或第三方模式可用，也不能在官方文档改版后自动保持真
+实；需要更新 ownership 时先写日期化 audit，再改本表。`SOURCE/TEST` 不证明最终
 artifact；`PACKAGE-STATIC` 不证明实际调用；`FIXTURE` 不证明 live。
 
 ## 能力、所有权与托管决策表

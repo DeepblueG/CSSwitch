@@ -34,7 +34,7 @@
 ---
 
 <p align="center">
-  <a href="https://github.com/SuperJJ007/CSSwitch/releases/download/v0.8.3/CSSwitch_0.8.3_aarch64.dmg">下载 v0.8.3</a> ·
+  <a href="https://github.com/SuperJJ007/CSSwitch/releases/download/v0.8.4/CSSwitch_0.8.4_aarch64.dmg">下载 v0.8.4</a> ·
   <a href="#功能介绍">功能介绍</a> ·
   <a href="#安装与启动">安装与启动</a> ·
   <a href="#provider-与模型">Provider 与模型</a> ·
@@ -50,7 +50,7 @@
 | Provider 与模型 | 已支持 | 连接内置 Provider、中转站和自定义兼容端点，自由填写并严格映射 Science 使用的模型。 |
 | Codex | 实验功能 | 使用 CSSwitch 独立浏览器登录和账号动态模型目录；默认关闭，不读取或修改原生 `~/.codex` 登录。 |
 | Skill | 已支持 | 查看当前 Science 组织中的 Skill，从本地包导入，或让 Agent 从准确的公开 GitHub URL 安装。 |
-| MCP | 即将支持 | v0.8.3 尚未提供面向用户的通用 MCP 添加、配置和运行管理；后续版本会继续完善。 |
+| MCP | 即将支持 | v0.8.4 尚未提供面向用户的通用 MCP 添加、配置和运行管理；后续版本会继续完善。 |
 
 ## 社区
 
@@ -64,9 +64,9 @@
 
 ### 第一次安装
 
-1. 下载 [`CSSwitch_0.8.3_aarch64.dmg`](https://github.com/SuperJJ007/CSSwitch/releases/download/v0.8.3/CSSwitch_0.8.3_aarch64.dmg)，打开后将 CSSwitch 拖入「应用程序」。
+1. 下载 [`CSSwitch_0.8.4_aarch64.dmg`](https://github.com/SuperJJ007/CSSwitch/releases/download/v0.8.4/CSSwitch_0.8.4_aarch64.dmg)，打开后将 CSSwitch 拖入「应用程序」。可按 [v0.8.4 发布证据](./docs/evidence/releases/v0.8.4.md) 核对公开附件 SHA-256。
 2. 确认电脑上已经安装 [Claude Science](https://claude.com/download)，然后打开 CSSwitch。
-3. 首次打开如被 macOS 阻止，请在 Finder 中右键 CSSwitch，选择「打开」。
+3. 首次打开如被 macOS 阻止，请在 Finder 中右键 CSSwitch，选择「打开」。当前公开包为 ad-hoc 签名，不是 Developer ID / 公证 / Gatekeeper 结论。
 
 ### 连接第三方模型
 
@@ -118,7 +118,7 @@ CSSwitch 当前聚焦于安全地把外部 Skill 接入隔离 Science，而不�
 
 ## MCP
 
-通用 MCP 支持正在开发中。当前 v0.8.3 还不能让用户在 CSSwitch 中添加、编辑或管理自己的 MCP server，也不应把 Skill 安装所用的内部 connector 当成完整 MCP 功能。后续支持范围以对应版本的 README 和更新日志为准。
+通用 MCP 支持正在开发中。当前 v0.8.4 还不能让用户在 CSSwitch 中添加、编辑或管理自己的 MCP server，也不应把 Skill 安装所用的内部 connector 当成完整 MCP 功能。后续支持范围以对应版本的 README 和更新日志为准。
 
 ## 安全与隔离
 
@@ -129,10 +129,11 @@ CSSwitch 当前聚焦于安全地把外部 Skill 接入隔离 Science，而不�
 
 ## 当前边界
 
-- 公开桌面包目前只支持 macOS Apple Silicon。
+- 当前 macOS Apple Silicon 正式版本为 **v0.8.4**；分层发布证据见 [v0.8.4 发布证据](./docs/evidence/releases/v0.8.4.md)。公开桌面包目前只支持 macOS Apple Silicon。
 - 第三方模式不提供 Anthropic 账号权限，托管 MCP、目录连接器和部分云端能力可能不可用。
 - Codex 仍是默认关闭的实验能力，当前只支持单账号浏览器登录。
 - Rust Gateway 已随应用打包，不需要单独安装 Python runtime。
+- source/unit、最终附件、安装身份、签名与 live provider/账号是不同证据层；下载页或 source gate 通过不能外推为全部真实 provider、SSH 或 Science 领域能力已验证。
 
 升级、回滚和已知限制见[项目文档](./docs/README.md)。问题反馈请使用 [GitHub Issues](https://github.com/SuperJJ007/CSSwitch/issues)。
 
