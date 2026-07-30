@@ -1,13 +1,27 @@
 # 已验证状态快照
 
-状态：过期，禁止作为 v0.8.4 当前验证状态
+状态：当前；只汇总已绑定的 v0.8.4 分层事实
 
-最后复核：2026-07-23（Asia/Shanghai）
+最后复核：2026-07-30（Asia/Shanghai）
 
-失效条件：已满足。维护基线从 `v0.8.2` 前移后，本页原有 source、DMG、installed UI 与公开附件摘要只能代表 v0.8.2，不能继续充当“当前已验证状态”。
+失效条件：release source、最终 DMG、安装 app、公开附件或维护基线任一变化时，
+对应层立即失效；未受影响层仍按其 exact identity 判断。
 
-- v0.8.2 的逐层事实仍以 [v0.8.2 release evidence](../../docs/evidence/releases/v0.8.2.md) 为唯一正文。
-- v0.8.4 当前只建立了哪些 Git / release metadata / source facts、哪些 artifact / installed/live / signing / public 层仍未建立，见 [v0.8.4 真实主干基线](../../docs/audits/2026-07-29-v084-main-baseline.md)。
-- Acceptance 候选等日期化结果从[调查索引](../../docs/evidence/investigations/README.md)进入，不能与另一个版本或 artifact 合并成当前 PASS。
+| 层 | 当前可声明的 v0.8.4 事实 |
+|---|---|
+| Source / unit | exact release source 的 trusted `GATE-SOURCE` completion seal `PASS`；run `712d9f75cb2d98679dfd64aed5cb1fea` |
+| Final artifact | DMG SHA-256 `23471daf…f2b2`；Desktop `352763dc…dfb`；Gateway `4448c15e…57a` |
+| Installed | `/Applications/CSSwitch.app` 版本 0.8.4，安装 hash 与最终 artifact 记录一致；收尾时只检测到一个 CSSwitch app |
+| Signing | strict seal 校验通过；仅 ad-hoc，不是 Developer ID / notarization / Gatekeeper |
+| Public | peeled tag 与 release source 一致；公开重下载 hash、镜像校验与根目录白名单通过 |
+| Current remote refresh | 2026-07-30 tag/main/Release 元数据仍与上述公开 identity 一致 |
 
-恢复本页前必须绑定新的 exact source / artifact / environment 并重新整理；不得复制旧 pass 数量。
+以下仍不是当前 PASS：全部真实 provider/model、真实 SSH server、官方账号 entitlement、
+Science 全领域行为、Intel/Windows/WSL、Developer ID/notarization/Gatekeeper。
+`B-RUNTIME-01` 因缺少允许的 Science executable 保持
+`INCONCLUSIVE(reason=artifact-or-binary-identity)`；它与历史 release evidence
+属于不同 probe/环境，不能互相覆盖。
+
+完整证据与不能外推的边界见
+[v0.8.4 release evidence](../../docs/evidence/releases/v0.8.4.md)；日期化调查从
+[调查索引](../../docs/evidence/investigations/README.md)进入。

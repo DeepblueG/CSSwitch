@@ -1,41 +1,65 @@
 # 当前已知问题与证据缺口
 
-状态：待按 v0.8.4 逐项复核；未复核条目不能自动视为已解决或仍复现
+状态：当前；按 v0.8.4 release source 与 2026-07-30 文档治理基线整理
 
-最后复核：2026-07-28。已解决历史放入 CHANGELOG 或 dated evidence，不在这里重复。
+最后复核：2026-07-30（Asia/Shanghai）
 
-失效条件：对应 change / bug record、发布基线或 artifact / installed/live 证据改变时，受影响条目立即失效并须按当前版本重审。
+失效条件：对应 change/bug record、Science 版本、release source、artifact 或 installed/live 证据改变时，受影响条目立即失效并须按当前版本重审。
 
-## v0.8.2 已发布后的边界
+已解决历史放入 CHANGELOG 或 dated evidence，不在这里重复。
 
-- OpenCode Go、Grok 与 Gemini 的门禁覆盖文本、多轮、tools / `tool_choice`、模型发现或手填、标题和 classifier；图片、厂商专有 reasoning、原生流式与结构化输出仍为 limited，Gemini native API 不在本版范围。
-- 当前已建立 clean source、单测、隔离 mock / loopback、最终安装 UI 和公开附件回读。最终 artifact 没有执行 OpenCode Go、Grok、Gemini、Kimi、DeepSeek 或 Codex 的用户 key / OAuth live 推理，不能由本地门禁替代。
-- 多历史组织恢复已有精确 marker / choice / identity 测试，最终安装版没有构造真实多组织 Sign out 数据集；SSH 已覆盖 Science 隔离 HOME 的具体 Host 配置生成，但没有真实 SSH server 的远端连通证据。
+## 下一轮重构的 P0 前置
 
-## 分发
+- 当前 Rust → shell → Science 启动链会继承 parent process 的 ambient
+  environment。隔离 HOME/data-dir 因此还不等于环境变量隔离。
+- 在机械拆分 `sandbox_session` 或 Gateway `server.rs` 前，必须先建立两级
+  allowlist：Runtime 只收到运行必需变量，provider credential 只进入 Gateway，
+  Skill/SSH/Codex bridge 变量逐项 opt-in。
+- 验收至少包含未知 sentinel 不进入 child、provider secret 不进入 Science、
+  bridge-disabled 时变量缺席、必要 proxy/locale/runtime 变量仍可用。该缺口未闭合
+  前不得把“第三方沙箱隔离”表述为完整凭证边界。
 
-- v0.8.2 公开附件只有经过完整性验证的 ad-hoc seal，没有建立 Developer ID、notarization、stapled ticket 或 Gatekeeper acceptance 证据。首次打开可能需要用户右键选择“打开”。
+## 第三方模型与 Science 原生能力
 
-## Codex
+- CSSwitch 必须管理 Runtime 包络、Model Gateway、必要 network policy 和诊断恢复；
+  Project/session/artifact/permission/memory/kernel/Agent/Plugin 等语义仍由 Science
+  原生拥有。当前 ownership 与 stage 链见
+  [能力地图](../../docs/features/product-science-capability-map.md)。
+- 第三方模型支持不能由“文本聊天成功”代替。stream、tools/`tool_choice`、
+  reasoning、structured output、vision、stop/error semantics 需要按 provider 与
+  operation 分层验证；不支持时必须可定位降级，不能静默改写语义。
+- 最终 v0.8.4 artifact 没有建立所有真实 OpenCode Go、Grok、Gemini、Kimi、
+  DeepSeek、custom relay 或 Codex 账号/模型的 live PASS。
+- Web Search、hosted MCP/Connectors、Reviewer entitlement、官方 catalog/usage
+  依赖 Anthropic 账号与服务；第三方 Gateway 不模拟这些官方 entitlement。
+- 动态 model catalog 在一次修复线观测中仍约耗时 12.756 秒。90 秒级 snapshot
+  回归已修，但首次可用延迟仍是独立 UX 问题。
 
-- Codex 是默认关闭的实验能力。上游账号权限、动态模型目录和 Responses 协议可能变化；单账号、浏览器登录、macOS Apple Silicon 是当前边界。
-- 动态目录校验是一次最长 130,750 ms 的有界请求；极端上游持续无响应时 UI 会保持忙碌直到超时，不支持中途取消。
-- 不支持设备码、多账号、代理认证、PAC、自定义 CA、系统代理自动发现或 TUN 检测；Finder 启动的环境变量与终端可能不同，`direct` 也可能仍由系统 TUN 接管。
-- v0.7.0 曾观察到浏览器失败页在有效 callback 后只显示通用安全错误；v0.8.0 增加了结构化通知与浏览器 fallback，但最终公开 DMG 未重跑该真实账号失败路径，不能据此宣布上游或本地提交根因已被穷尽。
-- 历史 Acceptance 候选已有真实 CSSwitch OAuth、模型和 Science 最小文本成功证据，但最终公开 v0.8.0 DMG 没有重新执行真实 OAuth / 模型 / 推理；两者不能合并为同一层证据。
-- v4 配置回滚到 v0.7.0 或更早版本前，必须先在 v0.8.0 导出并降级到 v2，或停止全部 CSSwitch 进程后恢复兼容备份；删除 profile 本身不会降低 schema。
+## Runtime、网络与窄桥
 
-## Science / Skill / SSH
+- `HTTPS_PROXY` / `NO_PROXY` 与 Gateway raw `CONNECT` 属于 socket transport。
+  connector、文献、云和 updater 等能力即使借道 CONNECT，产品语义仍由
+  Science/账号/外部服务拥有；不能把连接成功写成能力 PASS。
+- 第三方 Science 使用 `--no-auto-update`。官方更新应先在官方 Science 路径完成，
+  CSSwitch 再停止并重新启动受管链，采用通过 fixed-path/identity 检查的候选。
+- 2026-07-30 的 `B-RUNTIME-01` 因没有取得允许的 Science 0.1.25 executable
+  identity 而保持 `INCONCLUSIVE`；start/open/reopen/status/stop/restart 均
+  `NOT-RUN`。这不是产品失败，也不能由历史 release evidence 替代。
+- 外部 Skill install/attach、Science load/trigger、领域执行和重启持久化是不同
+  结论。CSSwitch 只拥有窄安装/投影桥，不拥有 Skill runtime 或通用 MCP 管理面。
+- 系统 SSH 默认关闭；opt-in 后 CSSwitch 只负责 preflight/stub/sidecar 边界。
+  parser、OpenSSH invocation 与真实 server connectivity 必须分开；当前没有特定
+  真实 SSH server 的 current live PASS。
+- Codex 仍是默认关闭的实验窄桥。上游账号权限、动态目录与 Responses 协议会变；
+  不支持设备码、多账号、代理认证、PAC、自定义 CA、系统代理自动发现或 TUN 检测。
 
-- 安装、attach、load 与重启持久化不证明任一 Skill 的脚本、资产、网络、依赖或领域功能可用。
-- 仅给名称时的来源搜索由 provider / Agent 能力决定；私有仓库、更新 / 覆盖、永久删除、恢复 UI 和 bundle 成员级物理删除不受支持。
-- route attachment、nonce / CSRF control plane 与 `OPERON` Skill 绑定是观察到的 Science 合同；Science App 更新后必须重跑聚焦兼容性验证。
-- 第三方 Science 以 `--no-auto-update` 运行；其设置页更新不会应用。先在官方 Science 完成更新，再停止并启动 CSSwitch 管理链。
-- Agent 控制面配置是多个顺序请求，不是原子事务；失败只降级为 warning，已完成步骤不会自动回滚。
-- 系统 SSH 默认关闭；opt-in 后 config / wrapper 校验 fail closed，未对特定用户的真实 SSH server 做连通性验证。
-- `BUG-083-SSH-LATE` 已完成源码级修复：SSH 可预检项先于 OAuth，生命周期串行区会重检精确候选与既有受管 Gateway 上下文，真正晚失败会精确补偿 OAuth、active profile、Gateway、Science、managed stub、journal 与耐久清理状态。当前证据仅来自临时 HOME、假凭证、假 Science、本地 Gateway 和 loopback；production artifact/runtime、已安装 App、真实 provider、真实 SSH server、签名和公开发布仍未验证，产品 gate 保持 open。
-- fresh xhigh 复审接受一个与本 bug 分离的 P3 威胁模型边界：最终校验后，若同 UID 对 CSSwitch 私有根实施恶意 pathname 替换，当前实现并非全程 fd-relative。该边界沿用[既有 runtime / 安全记录](../../docs/evidence/investigations/2026-07-18-v070-ui-redesign-runtime-security-review.md)，在当前私有根威胁模型内不阻断 `BUG-083-SSH-LATE`，本窗口不另建 bug。
+## 分发与证据
 
-## 测试
-
-- 真机验收矩阵描述应执行的场景，不表示最终 v0.8.2 DMG 已逐项全部执行。每次验收必须绑定 exact artifact，并把通过、失败、环境阻塞与未执行分开记录。
+- v0.8.4 公开附件为经过完整性验证的 ad-hoc seal；没有 Developer ID、
+  notarization、stapled ticket 或 Gatekeeper acceptance。
+- trusted `GATE-SOURCE` PASS 只证明 exact source/unit；文档治理定向测试也不能
+  外推 artifact、installed/live、provider、signing 或 public release。
+- 真机矩阵只是应执行场景，不表示最终 DMG 已逐项全部执行。每次验收必须绑定
+  exact artifact/environment，并把 PASS、失败、阻断、未执行分开。
+- v0.8.4 已建立的 source、artifact、installed identity、signing 与 public 层见
+  [release evidence](../../docs/evidence/releases/v0.8.4.md)；未列层不得补写为 PASS。

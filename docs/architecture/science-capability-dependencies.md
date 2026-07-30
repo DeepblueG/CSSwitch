@@ -25,6 +25,32 @@
 托管运行包络”也不等于 CSSwitch 拥有其中的 project、artifact、permission、
 Skill、kernel 或 Reviewer 语义。
 
+### 1.1 语义所有权与兼容责任分开
+
+逐能力判断不能停在 owner。还要回答：第三方模式是否改变了该能力依赖的
+runtime、model protocol、路径、环境或网络。如果改变，CSSwitch 必须保证自己
+引入的兼容层，不能以“Science-owned”为由回避。
+
+- Science-owned 的 plan、delegation、Reviewer 或 Skill trigger 如果最终依赖
+  Anthropic-shaped model request，Science 继续拥有工作流语义，CSSwitch Gateway
+  负责 provider 所支持范围内的 stream、tools、`tool_choice`、reasoning、
+  structured output、vision、错误与停止语义；能力不足必须显式降级。
+- Science-owned 的 project、artifact、permission、memory 与 environment 不经过
+  CSSwitch 语义层；CSSwitch 的责任是隔离、持久化、启动、恢复和受保护投影不破坏
+  它们。
+- Science-owned 的 generic MCP、connector、文献、云与远端服务可以沿原生路径
+  工作；CSSwitch 只在隔离环境造成明确缺口时提供窄 bridge，不能顺势创建第二套
+  client、registry、credential store 或 entitlement。
+- 官方 Claude 账号能力不能由虚拟登录、raw `CONNECT` 或第三方模型响应替代。
+
+因此支持结论必须同时写明语义 owner、operation/stage 组合、CSSwitch 兼容责任、
+socket transport、外部 dependency 和证据层。ownership 决定谁定义正确行为，
+兼容责任决定 CSSwitch 拆分时不能丢掉什么。stage 类别不是 capability-level
+单选：Reviewer 可以先走 `SCIENCE-NATIVE`，再按 operation 分支到
+`MODEL-GATEWAY` 或 `OFFICIAL-ENTITLEMENT`；remote MCP 可以走
+`SCIENCE-NATIVE → SCIENCE-EXTERNAL`，同时让 HTTPS transport 经过 raw
+`CONNECT`。
+
 ## 2. 第三方模式必须托管的最小闭环
 
 CSSwitch 只需要对下面四类责任形成闭环。
@@ -61,6 +87,79 @@ raw TCP `CONNECT` 只证明 tunnel 可能建立，不证明 MCP client、OAuth�
 discovery 或 tool call；对某一 Anthropic host 的拒绝也不能推广为所有 custom
 connector 或所有 Science 网络都不可用。
 
+#### 沙箱 ingress / egress 合同
+
+这里的 sandbox 首先是身份与数据隔离，不自动等于断网、全流量代理或功能裁剪。
+如果未来增加更强的 egress policy，也必须按下面的流量面分别判定，不能因为
+socket 经过同一个进程就把所有 Science 出站统一归为 model Gateway 语义。
+
+允许并由 CSSwitch 管理的 ingress：
+
+1. 已验证来源、版本和文件身份的 Science executable；
+2. 隔离 HOME、持久 data-dir、动态受管端口与 managed receipt；
+3. 只在隔离 data-dir 内建立的本地虚拟登录；
+4. loopback Gateway endpoint、path secret、provider/profile/model launch plan；
+5. CSSwitch 明确改写的 protected projection；
+6. 用户显式启用、具有独立身份和生命周期的 Skill、SSH、Codex 或其他窄 bridge。
+
+禁止隐式 ingress：
+
+- 真实 Claude OAuth/token、真实账号数据库或整个真实 HOME；
+- 未经用户选择的 SSH、云、机构或第三方服务凭证；
+- 对 Science-owned opaque roots 的递归复制、恢复、清理或权限接管；
+- 没有 owner、清理规则和故障边界的环境变量、路径或进程投影。
+
+#### 当前 ambient environment 缺口
+
+上面的“禁止隐式 ingress”是目标合同，不是当前源码已经满足的事实。当前
+Tauri → launch script 的 process spawn 没有清空父环境，脚本最终又使用不带
+`-i` 的 `/usr/bin/env` 启动 Science；因此父进程导出的 API key、云/GitHub
+credential、`SSH_AUTH_SOCK` 或其他变量可能进入受管 Science，即使对应 bridge
+没有启用。
+
+该 `SOURCE-GAP` 是生产机械拆分的前置阻断项。进入 typed failure、
+`sandbox_session` 或 Gateway 模块移动前，必须先以独立行为修复闭合：
+
+1. Tauri → launch script 使用显式环境 allowlist，而不是继承 ambient environment；
+2. launch script → Science 再次从空环境建立 allowlist；
+3. 只重新加入隔离 HOME、Gateway/proxy、runtime identity、固定安全 PATH、必要
+   locale/temp，以及当前 opt-in bridge 明确授权的变量；
+4. provider credential 只进入对应 Gateway process，不进入 Science 或 bridge；
+5. SSH、Codex、Skill/MCP 等 bridge 变量仅在该 bridge 显式启用时注入，关闭后
+   restart 不得残留；
+6. 使用假 secret/sentinel 覆盖 cold start、stopped-to-started 和
+   CSSwitch restart/recovery 后的新 process，证明任意未列入 allowlist 的父环境
+   不可在 script 或 Science 中观察。
+
+修复前不得把“未显式投影真实凭证”写成 current source PASS，也不得在机械拆分中
+顺手改变环境继承后只靠既有测试推断行为等价。
+
+egress 先按语义责任分为四类：
+
+| 流量面 | 路径与 CSSwitch 责任 |
+|---|---|
+| model inference | 必须经过 loopback Gateway；协议保真、provider capability 和明确降级属于 CSSwitch |
+| narrow bridge | 只进入声明的 loopback/stdio/IPC endpoint；不得共享不相关凭证或扩大目标 |
+| Science-native external | connector、文献、云、generic remote MCP、remote compute 等上层语义由 Science/用户/外部服务拥有；CSSwitch 不代理其语义，但必须保留当前 transport policy 并单独诊断 |
+| official entitlement | 由 Claude 账号/组织服务决定；第三方模式不注入或伪造官方身份 |
+
+语义责任与 socket transport 是两个轴。当前启动脚本给整个 Science 进程设置
+`HTTPS_PROXY` / `https_proxy` 指向 Gateway，并让 loopback 进入 `NO_PROXY`。
+因此非 loopback HTTPS 即使属于 `SCIENCE-EXTERNAL`，当前也可能先以 raw
+`CONNECT` 穿过 Gateway：
+
+- Gateway 只拥有 CONNECT target parsing、Anthropic/Claude hostname denylist、
+  当前无独立 deadline 的 DNS resolution、解析返回后共享剩余十秒预算的 dial、
+  tunnel lifecycle 与 transport status；
+- path secret、provider model routing、HTTP MCP/OAuth/tool discovery/tool call
+  不属于这条 raw CONNECT 合同；
+- 非 HTTPS、显式 bypass 或不遵循进程 proxy environment 的 client 可能使用不同
+  transport，不能由 `HTTPS_PROXY` 推出全流量覆盖；
+- 把某项外部语义移出或移入 CONNECT 都是独立行为变化，不能夹在机械模块拆分中。
+
+diagnostics 可以报告 CSSwitch 自己观察到的 route、listener、bridge 和 transport
+阶段，但不得记录 secret，也不得把“TCP 可达”写成上层产品能力成功。
+
 ### 2.4 状态一致性与诊断
 
 CSSwitch 负责自己受管对象的状态、补偿和诊断：runtime、Gateway、route、
@@ -91,6 +190,20 @@ CSSwitch 可以隔离、启动、保全或展示这些状态，但不得新增�
 - Python/R kernel 可用不等于 GPU 模式可用。
 
 ## 4. 窄桥接
+
+只有同时满足以下条件，才应增加或保留 bridge：
+
+1. 隔离 HOME/data-dir 或第三方 model path 确实切断了原本可用的入口；
+2. CSSwitch 能把 bridge 限定为明确的输入、输出、身份与权限，不需要接管领域语义；
+3. 用户能显式启用/关闭；默认状态和凭证来源清楚；
+4. install/attach/start/restart/stop/detach/cleanup 的责任边界可分别验证；
+5. bridge 失败只降级对应能力，不破坏 runtime、Gateway 或普通 Agent；
+6. 证据只声明到 CSSwitch 所拥有的最后一跳，不从入口成功外推 load、tool call、
+   server connectivity、费用或 entitlement。
+
+如果只是为了让 Science 原生 client 在隔离环境中获得用户明确选择的 config、
+environment 或 network，优先做可审计的最小投影；不要新增通用管理 UI、registry
+或第二套 credential store。
 
 ### 4.1 外部 Skill
 
@@ -162,11 +275,46 @@ CSSwitch 不托管：
 | Skill 已 attach 但不 load/trigger | Science Agent/session、Skill runtime 和工具环境 | 安装成功本身 |
 | MCP 无法调用 | 先区分 Skill-internal stdio、generic stdio、custom remote、hosted | raw CONNECT 或“有 MCP”这个总标签 |
 | SSH 失败 | parser、OpenSSH invocation、用户配置、network/server/scheduler 逐层定位 | CSSwitch 单一 owner |
-| Web Search/hosted connector/Reviewer 不可用 | Anthropic service、账号/org entitlement、Science client 与 network | 第三方模型 Gateway |
+| Web Search/hosted connector/官方 Reviewer entitlement 不可用 | Anthropic service、账号/org entitlement、Science client 与 network | 第三方模型 Gateway |
+| Reviewer 第三方模型分支失败 | Science workflow → Gateway protocol/route → provider 按实际 operation 逐层定位 | 官方 entitlement 或 Science workflow 单一 owner |
 | Python/R/Conda/GPU 异常 | Science environment/kernel；GPU 另查主机与安全模式 | CSSwitch 将 opaque roots 当缓存管理 |
 | 更新后行为变化 | 先确定实际 runtime identity，再对照能力 owner 和依赖面 | seed App 版本或静态字符串单独定性 |
 
-## 7. Science 更新影响的最小判断
+## 7. 拆分前冻结与拆分后验证
+
+本边界是生产拆分的输入，不是拆分完成后的说明。进入 typed failure、runtime
+事务或 Gateway 模块拆分前，必须冻结：
+
+1. 每个状态和语义的唯一 owner；
+2. `CSSWITCH-RUNTIME`、`MODEL-GATEWAY`、`SCIENCE-NATIVE`、
+   `NARROW-BRIDGE`、`SCIENCE-EXTERNAL`、`OFFICIAL-ENTITLEMENT`
+   六类可组合 stage，以及语义 stage 与 socket transport 的分离；
+3. sandbox ingress/egress 与 protected/opaque 边界；
+4. bridge 准入、关闭、重启、补偿与局部降级规则；
+5. 现有 Tauri command/event/DTO、Gateway wire behavior、锁序、journal、
+   receipt 和 recovery 的行为特征测试；
+6. Desktop、transaction、Gateway/provider、runtime adapter、bridge、
+   Science-native 与 external service 的 typed failure domain；
+7. 上述 ambient environment `SOURCE-GAP` 已由两层 allowlist 与 sentinel-secret
+   regressions 闭合；未闭合时不得开始机械拆分。
+
+这一步不要求先证明每项 Science 能力 current live，也不要求解决所有
+`UNKNOWN`。拆分前需要的是 owner、路径和不变量无歧义；具体版本/provider 的
+兼容结果可以继续是 `UNKNOWN`。
+
+拆分按这些边界机械进行：先建立 typed failure projection，再拆 runtime
+transaction/recovery，随后拆 Gateway HTTP/inference/bridge，最后处理 frontend、
+config 与其他高 fan-in 模块。拆分期间不得顺手改变协议、权限、凭证来源、状态
+提交顺序或 feature ownership。
+
+拆分后再绑定 exact Science artifact、CSSwitch artifact、provider/model 和环境，
+验证 stream、tools、`tool_choice`、reasoning、structured output、vision、错误
+映射、停止/流终止语义、Science-native 状态保全、bridge restart 与独立外部
+流量；每项按 provider capability 记录支持或可定位降级。动态结果用于修复
+adapter、更新 `UNKNOWN` 和兼容声明；除非上游合同真实改变，不反向扩大
+CSSwitch ownership。
+
+## 8. Science 更新影响的最小判断
 
 Science 更新后只回答下面几个问题，不新增一套 gate 或执行流水线：
 
@@ -181,7 +329,7 @@ Science 更新后只回答下面几个问题，不新增一套 gate 或执行流
 能力地图和本文。这样可以快速判断影响，又不会把一次版本调查变成长生命周期
 基础设施。
 
-## 8. 文档边界
+## 9. 文档边界
 
 - 完整能力清单、逐能力 ownership/托管/non-target 结论、当前证据层与
   `UNKNOWN`：只在能力地图的单一决策表维护；

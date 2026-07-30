@@ -2,6 +2,55 @@
 
 本文描述跨版本的 executable 选择、HOME/data、身份和恢复合同。具体 Science 版本、hash、embedded identity、事故与 E2E 结果只进入[日期化调研](../audits/2026-07-30-v084-architecture-reconnaissance.md)或 evidence。
 
+## 设计定位与沙箱边界
+
+CSSwitch 是 Science 第三方模式的 **运行编排器和模型协议适配器**，不是 Science
+产品本体。目标是在不读取真实 Claude 账号状态、不重建 Science 领域系统的前提
+下，让第三方 provider 在自身能力范围内尽可能保留 Science 原生体验。
+
+CSSwitch 长期拥有的稳定合同只有：
+
+1. executable 选择、来源和 runtime identity；
+2. 隔离 HOME、持久 data-dir、端口与禁止真实数据目录的布局；
+3. 隔离 data-dir 内的本地虚拟登录投影；
+4. loopback Gateway、path secret、provider launch plan 与 model protocol 兼容；
+5. launch receipt、listener、data-dir 和进程身份对齐；
+6. protected projection、pending cleanup 和精确补偿；
+7. 显式、可关闭、局部失败的 Skill/SSH/Codex 等窄 bridge。
+
+Science 继续拥有 UI、project/session、permission、artifact、memory、
+environment/kernel、Agent、Skill 执行、generic MCP/Plugin 和官方服务客户端。
+这并不免除 CSSwitch 的兼容责任：如果 Science 原生工作流依赖模型请求，
+Gateway 必须在 provider 声明的能力内保留 stream、tools、`tool_choice`、
+reasoning、structured output、vision、错误与停止语义，或给出明确、可定位的
+降级。
+
+这里的 sandbox 是身份与数据隔离，不是“全部断网”，也不能因为多种流量经过同一
+Gateway 进程就把它们都解释成 model routing：
+
+- model inference 必须进入 CSSwitch Gateway；
+- 显式 bridge 只走自己的 loopback/stdio/IPC 合同；
+- connector、文献、云、generic remote MCP 与 remote compute 等 Science 原生
+  外部语义由 Science、用户和外部服务管理；当前非 loopback HTTPS 仍可能因进程级
+  `HTTPS_PROXY` 以 raw `CONNECT` 穿过 Gateway，CSSwitch 只拥有 tunnel target
+  policy、deadline 和 transport diagnostics，不拥有 MCP/connector/云等上层语义；
+- 非 HTTPS、显式 proxy bypass 或不读取 proxy environment 的 client 不能由上述
+  合同推出；CSSwitch 不注入其凭证、不冒充 entitlement，也不能无说明地改变现有
+  transport；
+- 真实 Claude OAuth/token、真实账号数据库、整个真实 HOME 和未经用户选择的外部
+  凭证不得投影进第三方沙箱。
+
+该凭证边界当前存在明确 `SOURCE-GAP`：Tauri 启动脚本和脚本启动 Science 的两层
+process environment 尚未清空 ambient variables。两层环境 allowlist、provider
+secret 只进入 Gateway、opt-in bridge 变量隔离和 sentinel-secret regressions
+必须在生产机械拆分前先闭合；闭合前不得把本节写成 current source PASS。完整前置
+条件见下方能力依赖正文。
+
+完整 ownership、运行路径、bridge 准入和拆分前冻结项见
+[Claude Science 能力依赖](science-capability-dependencies.md)；逐能力当前决策只在
+[产品与 Claude Science 能力地图](../features/product-science-capability-map.md)
+维护。
+
 ## 分离六个事实
 
 1. **executable**：实际执行的 `claude-science` 文件；
