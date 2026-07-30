@@ -1,8 +1,16 @@
 # Codex → Claude Science 实验桥接合同
 
-状态：**v0.7.0 已发布，Codex 仍是默认关闭的实验能力。** browser-only 登录、OAuth 后自动 profile、动态 GPT-5.6 目录兼容、双 App 数据根隔离与无签名前置的私有文件认证已进入发布源码。2026-07-17 的 no-signing Acceptance 候选完成了浏览器 OAuth、动态模型目录、Science 选择 `Codex / GPT-5.6-Sol` 和文本推理验收；最终公开 DMG 已建立 source、hash、打包与分发证据，但没有从该 DMG 安装后重跑 live OAuth / 推理。详见 [v0.7.0 发布证据](../evidence/releases/v0.7.0.md)与[Acceptance 候选证据](../evidence/investigations/2026-07-17-codex-browser-only-acceptance.md)。
+状态：**当前 v0.8.4 Feature Contract；Codex 仍是默认关闭的实验能力。**
+browser-only 登录、OAuth 后自动 profile、动态模型目录兼容、双 App 数据根隔离与
+无签名前置的私有文件认证已进入发布源码。2026-07-17 的 no-signing Acceptance
+候选曾完成浏览器 OAuth、动态目录、Science 模型选择和文本推理；当前 v0.8.4
+公开 DMG 已有分层发布证据，但没有从该 DMG 安装后重跑真实 Codex OAuth / 推理。
+当前发布边界见 [v0.8.4 发布证据](../evidence/releases/v0.8.4.md)，历史 live 候选见
+[Acceptance evidence](../evidence/investigations/2026-07-17-codex-browser-only-acceptance.md)。
 
-本文冻结 CSSwitch 将用户自己的 Codex 登录接入隔离 Claude Science 的 v1 实施边界。它是非官方、实验性且默认关闭的本地能力，不代表 OpenAI 或 Anthropic 的官方集成。
+本文维护 CSSwitch 将用户自己的 Codex 登录接入隔离 Claude Science 的 v1 稳定
+边界。它是非官方、实验性且默认关闭的本地能力，不代表 OpenAI 或 Anthropic 的
+官方集成。
 
 ## 目标与非目标
 
@@ -29,7 +37,11 @@ v1 明确不做：
 
 ## 当前源码使用路径
 
-此能力自 `v0.7.0` 起作为默认关闭的实验功能提供。旧 UI 的入口收在「高级设置」：启用 Codex 实验能力 → 使用 CSSwitch 独立浏览器登录 → 登录成功后 Codex 配置自动出现 → 用户手动设为当前 → 一键开始 → 在 Science 的 “More models” 中选择 `Codex / …` 动态模型。Codex 配置不填写 API Key、`base_url` 或固定模型，也不会在登录后自动替换当前 provider。
+此能力自 `v0.7.0` 起作为默认关闭的实验功能提供。当前入口位于设置中的 Codex
+实验区域：启用 → 使用 CSSwitch 独立浏览器登录 → 登录成功后 Codex 配置自动出现
+→ 用户手动设为当前 → 一键开始 → 在 Science 的 “More models” 中选择
+`Codex / …` 动态模型。Codex 配置不填写 API Key、`base_url` 或固定模型，也不会
+在登录后自动替换当前 provider。
 
 登录由 CSSwitch 自己的 OAuth 私有文件完成，不读取、复用或修改原生 Codex 登录或 macOS Keychain。关闭实验开关只停止受管 Codex 链路并隐藏新建/启动入口，不删除 CSSwitch 凭据；退出登录必须由用户单独确认。Doctor 不执行实时认证检查，只显示实验开关、Codex profile 数，以及内存中最近一次用户主动检查留下的 `last_known_*`、allowlist reason/cause 与 age；没有记录时显示 `auth=not_checked`。它不显示账号指纹、邮箱、token、auth epoch / generation 或认证文件内容。
 
@@ -54,7 +66,7 @@ v1 明确不做：
 | auth epoch / generation | `~/.csswitch/codex-auth-state.v1.json`，不含账号或凭据 | CSSwitch Gateway |
 | thinking HMAC key | `~/.csswitch/codex-thinking.v1.json`，目录 `0700`、文件 `0600` | CSSwitch Gateway |
 | 登录、状态、退出和刷新 | `csswitch-gateway codex-auth ...` | CSSwitch Gateway |
-| provider profile 和功能开关 | CSSwitch config v3 | CSSwitch Desktop backend |
+| provider profile 和功能开关 | CSSwitch config v4 | CSSwitch Desktop backend |
 | 模型目录缓存 | CSSwitch-owned、无凭据缓存 | CSSwitch Gateway |
 | 原生 Codex 登录 | `~/.codex` 及原生 Codex Keychain 项 | 原生 Codex，CSSwitch 不接触 |
 | Science 对话与项目 | 隔离 Science data-dir | Science |
@@ -75,7 +87,13 @@ csswitch-gateway codex-auth status
 csswitch-gateway codex-auth logout
 ```
 
-`status` 与 `logout` 的 stdout 必须且只能是一行 UTF-8 JSON；Sidecar 的 `status/logout/login/progress/cancel/terminal` 整条协议统一使用 bounded NDJSON schema v3，每行最多 8 KiB、总计最多 64 KiB，只在阶段变化、取消确认和终态时输出。Desktop 与 Gateway 必须同时为 v3，任何 v2/v3 错配都 fail closed。Tauri `OperationSnapshot.schema_version` 是独立协议，继续固定为 2。基础状态 schema 为：
+`status` 与 `logout` 的 stdout 必须且只能是一行 UTF-8 JSON；Sidecar 的
+`status/logout/login/progress/cancel/terminal` 整条协议统一使用 bounded NDJSON
+schema v3，每行最多 8 KiB、总计最多 64 KiB，只在阶段变化、取消确认和终态时
+输出。Desktop 与 Gateway 必须同时为该协议 v3，任何 v2/v3 错配都 fail closed；
+它与当前配置 schema v4 是两个独立版本域。Tauri
+`OperationSnapshot.schema_version` 也是独立协议，继续固定为 2。基础状态
+schema 为：
 
 ```json
 {
@@ -128,7 +146,9 @@ Gateway 只在需要时刷新。serve 只在 refresh 临界区持有上述 mutat
 
 ## provider 与配置合同
 
-配置升级为 v3。profile 不再隐含“必须 API key、必须固定模型”，而是只持久化用户选择与受 catalog 约束的 credential / model policy：
+当前配置为 v4。profile 自 v3 起不再隐含“必须 API key、必须固定模型”，而是只
+持久化用户选择与受 catalog 约束的 credential / model policy；v4 在此基础上承载
+当前多模型目录、route 与 role binding：
 
 ```json
 {
@@ -138,15 +158,45 @@ Gateway 只在需要时刷新。serve 只在 refresh 临界区持有上述 mutat
 }
 ```
 
-Config v3 另含带 `serde(default)` 的 `codex_network={mode:"auto|custom",proxy_url:""}`；旧 v3 文件与 v2→v3 都默认 `auto`，不升级到 v4。正式构建编译期固定 `$HOME/.csswitch`，Acceptance 构建固定 `$HOME/.csswitch-acceptance`；Gateway 的 OAuth state、模型缓存、Desktop runtime/logs 与 Science sandbox 必须从同一个变体根派生，不能靠用户从终端改 HOME 才隔离。auto 只按 `HTTPS_PROXY`、`https_proxy`、`ALL_PROXY`、`all_proxy` 顺序选择，并应用 `NO_PROXY/no_proxy`；`HTTP_PROXY` 不用于 Codex HTTPS。custom 忽略 NO_PROXY。HTTP、HTTPS、SOCKS5、SOCKS5h URL 必须含 host 与显式端口，只允许根路径，拒绝 userinfo、代理认证、query、fragment、控制字符和超长值；不支持 PAC、自定义 CA、系统代理发现或 TUN 检测。
+`codex_network={mode:"auto|custom",proxy_url:""}` 自 v3 起带
+`serde(default)`；旧 v3 和 v2→v3 都先得到 `auto`，随后统一迁移到 v4，而不是停在
+v3。正式构建编译期固定 `$HOME/.csswitch`，Acceptance 构建固定
+`$HOME/.csswitch-acceptance`；Gateway 的 OAuth state、模型缓存、Desktop
+runtime/logs 与 Science sandbox 必须从同一个变体根派生，不能靠用户从终端改 HOME
+才隔离。auto 只按 `HTTPS_PROXY`、`https_proxy`、`ALL_PROXY`、`all_proxy` 顺序
+选择，并应用 `NO_PROXY/no_proxy`；`HTTP_PROXY` 不用于 Codex HTTPS。custom 忽略
+NO_PROXY。HTTP、HTTPS、SOCKS5、SOCKS5h URL 必须含 host 与显式端口，只允许根
+路径，拒绝 userinfo、代理认证、query、fragment、控制字符和超长值；不支持 PAC、
+自定义 CA、系统代理发现或 TUN 检测。
 
 Desktop 与 Gateway 共用同一 Rust resolver，得到 `ResolvedCodexNetworkRoute{source,proxy_scheme,proxy_url,no_proxy,fingerprint}`。所有 Codex reqwest builder 先 `.no_proxy()`，再应用该规范化 route；OAuth、刷新、revoke、模型目录、推理、formal 与 scratch 不得隐式读取环境。route fingerprint 进入 formal Gateway 复用身份，变化后旧 Gateway 不能复用。UI 与 doctor 只显示 `direct|env_https|env_all|custom` 和 scheme；direct 的准确文案是“直接 socket，可能由系统 TUN 接管”，不得声称检测了 TUN，也不得显示完整代理 URL。
 
 当前 typed `catalog/provider-contracts.v1.json` 是 `auth_mode`、`model_discovery`、`transport` 等 provider 启动 capability 的唯一 source of truth；现有 `catalog/capabilities.v1.json` 继续只保存兼容性 evidence rules，schema 和 loader 不变。profile 不复制 capabilities。backend 将 provider contracts 与 profile 合并、校验后生成私有 `ResolvedLaunchPlan`，至少包含 adapter、endpoint、opaque credential handle、model policy、transport、超时和缓存策略，再投影成 `FormalGatewayPlan`、`ScratchPlan` 和 `PublicPlanView`。Gateway 同样直接编译并校验这份 catalog；Codex 的 model GET 与 inference transport 从中取得 connect、request、read-idle、cache TTL 和显式维护的上游 client compatibility version，桌面进程还会向受管 sidecar 注入 contract id 与完整 catalog SHA-256，Gateway 启动和 Tauri health 两侧均需匹配。只有 formal gateway 内部能把固定 `CodexDefault` handle 解析为 CSSwitch 私有 OAuth；scratch 只得到 `provider=codex`、临时 loopback endpoint / path secret，UI 只得到脱敏 public view。三条路径共用 resolver，但权限投影不同。
 
-迁移在内存中按 v1 → canonical v2 → v3 执行，最后只原子提交一次 v3。v1 输入先保存原始 `config.json.v1.bak`，再把 canonical v2 保存为 `config.json.v2.bak`；v2 输入只需后者。目标 backup 已存在且字节相同时复用；内容不同时以 `config.json.vN.bak.<full-sha256>` 使用 `O_EXCL` 另存，绝不覆盖。备份发布使用同目录、由输入内容哈希确定的 hidden pending；publish 和首次目录 `fsync` 后必须删除 pending 并再次 `fsync`。若在该窗口崩溃，下一次相同迁移会先清理模块自有 pending hard link，再校验单链接不变量并继续。任一校验、backup、`fsync` 或 rename 失败都不改变当前 config。迁移的读取、版本备份与最终提交锚定同一个已打开目录句柄，不因目录路径替换漂移。迁移不改变现有 API-key profile、active profile、端口或设置，并为 Codex network 采用 auto 默认值。
+迁移在内存中按 v1 → canonical v2 → v3 → v4 执行，最后只原子提交一次 v4。
+v1 输入先保存原始 `config.json.v1.bak`，再把 canonical v2 保存为
+`config.json.v2.bak`；v2 输入保存 v2 backup；v3 输入保存原始
+`config.json.v3.bak`。目标 backup 已存在且字节相同时复用；内容不同时以
+`config.json.vN.bak.<full-sha256>` 使用 `O_EXCL` 另存，绝不覆盖。备份发布使用
+同目录、由输入内容哈希确定的 hidden pending；publish 和首次目录 `fsync` 后必须
+删除 pending 并再次 `fsync`。若在该窗口崩溃，下一次相同迁移会先清理模块自有
+pending hard link，再校验单链接不变量并继续。任一校验、backup、`fsync` 或
+rename 失败都不改变当前 config。迁移的读取、版本备份与最终提交锚定同一个已打开
+目录句柄，不因目录路径替换漂移。迁移不改变现有 API-key profile、active profile、
+端口或可表达设置，并为 Codex network 采用 auto 默认值。
 
-`downgrade_to_v2` 对每个 Codex profile 都要求显式 `export_then_remove` 或 `remove`，不能只处理 active profile。export 只含 profile 元数据和模型选择，不含 token、账号 id、credential payload 或缓存；若移除的是 active Codex profile，必须把旧 v2 schema 的 `active_id` 写成 `""`，不能写 JSON null；非 Codex active 保持。`export_then_remove` 必须由调用方给出 CSSwitch 配置目录之外的目标：先原子落盘并完成目录 `fsync`，再使用 rolling backup、同目录 temp、`fsync`、rename 提交 v2。export 失败时 config 字节不变；export 已成功而后续 config 提交失败时，安全可重入结果是“原 v3 config + 已完成 export”，绝不能是“profile 已删除但 export 未完成”。用户 export 父目录权限不得被 CSSwitch 修改，失败回滚保留原目标文件的字节和 mode。降级保留所有 v2 可表达的 API-key profile、设置与端口，永远不读取、删除或修改 OAuth 文件；v2 无法表达 Codex network，因此降级会丢弃该字段并保持其余设置不变。
+`downgrade_to_v2` 对每个 Codex profile 都要求显式 `export_then_remove` 或
+`remove`，不能只处理 active profile。export 只含 profile 元数据和模型选择，不含
+token、账号 id、credential payload 或缓存；若移除的是 active Codex profile，必须
+把旧 v2 schema 的 `active_id` 写成 `""`，不能写 JSON null；非 Codex active
+保持。`export_then_remove` 必须由调用方给出 CSSwitch 配置目录之外的目标：先原子
+落盘并完成目录 `fsync`，再使用 rolling backup、同目录 temp、`fsync`、rename
+提交 v2。export 失败时 config 字节不变；export 已成功而后续 config 提交失败时，
+安全可重入结果是“原 v4 config + 已完成 export”，绝不能是“profile 已删除但
+export 未完成”。用户 export 父目录权限不得被 CSSwitch 修改，失败回滚保留原目标
+文件的字节和 mode。降级保留所有 v2 可表达的 API-key profile、设置与端口，永远
+不读取、删除或修改 OAuth 文件；v2 无法表达 Codex network、额外模型、route 和
+role bindings，因此只能通过显式预览/确认降级这些字段。
 
 ## 请求与对话状态
 

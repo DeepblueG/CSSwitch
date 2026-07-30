@@ -15,13 +15,17 @@ gate、判定和证据输出，不记录运行结果。能力含义与 owner 见
 证据词表见[2026-07-30 架构调研](../audits/2026-07-30-v084-architecture-reconnaissance.md)。
 本文不复制能力或证据正文。
 
-## 1. 冻结状态
+## 1. 规格与结果分界
 
-- 本规格写入时没有运行 Science、账号、provider、SSH、网络或动态探针。
-- 所有 B/C 探针的结果均为 `NOT-RUN`；目标层写在各 probe card 中。
-- A 类也未在本阶段执行；静态阅读或规格存在都不是 probe PASS。
-- 后续 evidence 只能记录实际执行过的 probe ID 和 sub-gate；不能把相邻 probe、
-  mock、旧版本、official surface 或 package string 的结果外推过来。
+- probe card 中的目标层、PASS/FAIL/INCONCLUSIVE 判据和前置条件是执行合同，不是
+  当前运行状态。
+- actual status 只从[日期化调查索引](../evidence/investigations/README.md)及其
+  evidence 进入；未建立 evidence 时只能说“没有取得结果”，不能由本规格补写
+  `NOT-RUN` 或 PASS。
+- 每次新运行只记录实际执行过的 probe ID 和 sub-gate；不能把相邻 probe、mock、
+  旧版本、official surface 或 package string 的结果外推过来。
+- 进入下一 gate 前必须实时读取依赖 probe 的 exact evidence；不能用本规格初次
+  编写时的队列状态替代。
 
 ## 2. Gate 顺序
 
@@ -440,9 +444,9 @@ egress。
 
 ## 6. C｜另行明确授权
 
-所有 C probe 当前结果为 `NOT-RUN`。每个 case 必须有独立授权记录，至少写明 probe
-ID/subcase、账号/组织/destination、允许的数据、凭证注入方式、请求/费用上限、
-取消方式、时间窗和证据脱敏规则。一个 C 授权不得复用于其他 subcase。
+每个 C case 必须有独立授权记录，至少写明 probe ID/subcase、账号/组织/
+destination、允许的数据、凭证注入方式、请求/费用上限、取消方式、时间窗和证据
+脱敏规则。一个 C 授权不得复用于其他 subcase；是否已经执行只查日期化 evidence。
 
 ### C-PUBLIC-01｜开放文献或公开 Featured connector
 
@@ -572,10 +576,11 @@ ID/subcase、账号/组织/destination、允许的数据、凭证注入方式、
 
 ## 7. 执行批次与关闭条件
 
-后续执行任务必须按以下批次换窗，不能在规格窗口继续：
+新执行任务按未闭合项及其依赖选择下列批次，不能因为较早批次已有部分 evidence
+就整批重跑，也不能跳过未满足前置：
 
-1. A 静态批次：四项逐项运行和审查；
-2. B 基础批次：`B-RUNTIME-01`；
+1. A 静态批次：只运行缺失、失效或因目标版本变化需要重验的项目；
+2. B 基础批次：`B-RUNTIME-01` 未取得有效 PASS 时按其 evidence 限制处理；
 3. B 能力批次：按已满足依赖选择独立 probe，一次只共享一个受管 runtime；
 4. C 账号/组织批次：每个 capability/control 单独授权；
 5. C 外部批次：每个 destination/service/server/provider 单独授权。

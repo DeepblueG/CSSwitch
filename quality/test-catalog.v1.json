@@ -558,7 +558,7 @@
       "id": "SUITE-PY-OFFLINE",
       "name": "legacy offline Python layer",
       "kind": "python",
-      "entrypoint": "python3 -m unittest test.test_capability test.test_capability_catalog test.test_document_governance test.test_process_ownership_policy test.test_codex_browser_auth_contract test.test_build_sidecar_identity -v",
+      "entrypoint": "python3 -m unittest test.test_capability test.test_capability_catalog test.test_document_governance test.test_process_ownership_policy test.test_codex_browser_auth_contract test.test_profile_pin_contract test.test_build_sidecar_identity -v",
       "entrypoint_id": "ENTRY-SOURCE-PY-OFFLINE",
       "command_argv": [
         "{PYTHON}",

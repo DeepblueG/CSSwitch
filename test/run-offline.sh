@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# S0 离线纯单元层：无 loopback / 无网络 / 无上游。
+# 聚焦离线诊断：无 loopback / 无网络 / 无上游。
+# 完整 SUITE-PY-OFFLINE 由 source gate 的固定 command_argv 执行；本 wrapper
+# 故意不运行需要受控 Rust toolchain PATH 的 test_build_sidecar_identity。
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
 if ! command -v python3 >/dev/null 2>&1; then
