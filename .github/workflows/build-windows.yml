@@ -1,92 +1,37 @@
 name: Build CSSwitch Windows
 
-"on":
-workflow_dispatch:
-push:
-branches:
-- main
-
-permissions:
-contents: read
+on:
+  workflow_dispatch:
 
 jobs:
-build:
-runs-on: windows-latest
+  build-windows:
+    runs-on: windows-latest
 
-```
-steps:
-  - name: Checkout
-    uses: actions/checkout@v4
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-  - name: Setup Node
-    uses: actions/setup-node@v4
-    with:
-      node-version: "20"
-      cache: npm
-      cache-dependency-path: desktop/package-lock.json
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
 
-  - name: Setup Rust
-    uses: dtolnay/rust-toolchain@stable
-    with:
-      targets: x86_64-pc-windows-msvc
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
 
-  - name: Rust cache
-    uses: Swatinem/rust-cache@v2
-    with:
-      workspaces: desktop/src-tauri -> desktop/src-tauri/target
+      - name: Install dependencies
+        working-directory: desktop
+        run: npm ci
 
-  - name: Install dependencies
-    working-directory: desktop
-    run: npm ci
+      - name: Build CSSwitch
+        working-directory: desktop
+        run: npx tauri build
 
-  - name: Show versions
-    working-directory: desktop
-    shell: pwsh
-    run: |
-      node --version
-      npm --version
-      rustc --version
-      cargo --version
-      npx tauri --version
-
-  - name: Clean resources
-    working-directory: desktop
-    shell: bash
-    run: ../scripts/clean-bundle-resources.sh
-
-  - name: Build Windows
-    working-directory: desktop
-    run: npx tauri build --target x86_64-pc-windows-msvc
-
-  - name: List bundles
-    if: always()
-    shell: pwsh
-    run: |
-      $dir = "desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle"
-
-      if (Test-Path $dir) {
-        Get-ChildItem -Path $dir -Recurse -File |
-          Select-Object FullName, Length
-      } else {
-        Write-Host "Bundle directory not found."
-      }
-
-  - name: Upload installers
-    if: success()
-    uses: actions/upload-artifact@v4
-    with:
-      name: CSSwitch-Windows-x64
-      path: |
-        desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/**/*.exe
-        desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/**/*.msi
-      if-no-files-found: error
-      retention-days: 30
-
-  - name: Upload debug files
-    if: failure()
-    uses: actions/upload-artifact@v4
-    with:
-      name: CSSwitch-Windows-debug
-      path: desktop/src-tauri/target/**
-      if-no-files-found: ignore
-      retention-days: 7
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: CSSwitch-Windows
+          path: desktop/src-tauri/target/release/bundle/
+          if-no-files-found: error
