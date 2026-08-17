@@ -242,4 +242,3 @@ jobs:
             release-assets/*.exe
             release-assets/*.msi
             release-assets/SHA256SUMS.txt
-```
