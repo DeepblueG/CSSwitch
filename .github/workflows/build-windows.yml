@@ -1,0 +1,246 @@
+```yaml
+name: Build CSSwitch Windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: "Create GitHub Release"
+        required: false
+        default: false
+        type: boolean
+
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  APP_DIR: desktop
+  NODE_VERSION: "20"
+  RUST_TOOLCHAIN: stable
+
+jobs:
+  build-windows:
+    name: Build Windows x64
+    runs-on: windows-latest
+
+    steps:
+      # ------------------------------------------------------------
+      # 1. Checkout
+      # ------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ------------------------------------------------------------
+      # 2. Node.js
+      # ------------------------------------------------------------
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      # ------------------------------------------------------------
+      # 3. Rust
+      # ------------------------------------------------------------
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: x86_64-pc-windows-msvc
+
+      # ------------------------------------------------------------
+      # 4. Rust cache
+      # ------------------------------------------------------------
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            desktop/src-tauri -> target
+
+      # ------------------------------------------------------------
+      # 5. Install frontend dependencies
+      # ------------------------------------------------------------
+      - name: Install npm dependencies
+        working-directory: ${{ env.APP_DIR }}
+        run: npm ci
+
+      # ------------------------------------------------------------
+      # 6. Check toolchain
+      # ------------------------------------------------------------
+      - name: Show build environment
+        shell: pwsh
+        run: |
+          Write-Host "=== Node ==="
+          node --version
+          npm --version
+
+          Write-Host "=== Rust ==="
+          rustc --version
+          cargo --version
+
+          Write-Host "=== Tauri CLI ==="
+          cd desktop
+          npx tauri --version
+
+      # ------------------------------------------------------------
+      # 7. Build Tauri Windows application
+      # ------------------------------------------------------------
+      - name: Build Tauri application
+        working-directory: ${{ env.APP_DIR }}
+        run: npm run tauri -- build --target x86_64-pc-windows-msvc
+
+      # ------------------------------------------------------------
+      # 8. List generated files
+      # ------------------------------------------------------------
+      - name: Inspect build output
+        if: always()
+        shell: pwsh
+        run: |
+          Write-Host "=== Release directory ==="
+
+          $releaseDir = "desktop/src-tauri/target/x86_64-pc-windows-msvc/release"
+
+          if (Test-Path $releaseDir) {
+              Get-ChildItem -Path $releaseDir -Recurse |
+                Select-Object FullName, Length
+          }
+
+          Write-Host "=== Bundle directory ==="
+
+          $bundleDir = "$releaseDir/bundle"
+
+          if (Test-Path $bundleDir) {
+              Get-ChildItem -Path $bundleDir -Recurse |
+                Select-Object FullName, Length
+          }
+
+      # ------------------------------------------------------------
+      # 9. Generate SHA256
+      # ------------------------------------------------------------
+      - name: Generate SHA256 checksums
+        if: success()
+        shell: pwsh
+        run: |
+          $bundleDir = "desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle"
+
+          if (-not (Test-Path $bundleDir)) {
+              Write-Error "Bundle directory not found."
+              exit 1
+          }
+
+          $files = Get-ChildItem `
+            -Path $bundleDir `
+            -Recurse `
+            -File `
+            | Where-Object {
+                $_.Extension -in ".exe", ".msi"
+              }
+
+          if ($files.Count -eq 0) {
+              Write-Error "No .exe or .msi files found."
+              exit 1
+          }
+
+          $output = @()
+
+          foreach ($file in $files) {
+              $hash = (Get-FileHash `
+                -Algorithm SHA256 `
+                -Path $file.FullName).Hash.ToLower()
+
+              $relative = $file.FullName.Replace(
+                (Resolve-Path $bundleDir).Path + "\",
+                ""
+              )
+
+              $output += "$hash  $relative"
+          }
+
+          $output | Out-File `
+            -FilePath "$bundleDir/SHA256SUMS.txt" `
+            -Encoding utf8
+
+          Get-Content "$bundleDir/SHA256SUMS.txt"
+
+      # ------------------------------------------------------------
+      # 10. Upload Actions artifact
+      # ------------------------------------------------------------
+      - name: Upload Windows installers
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: CSSwitch-Windows-x64
+          path: |
+            desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/**/*.exe
+            desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/**/*.msi
+            desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      # ------------------------------------------------------------
+      # 11. Upload complete bundle for debugging
+      # ------------------------------------------------------------
+      - name: Upload complete bundle
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: CSSwitch-Windows-build-debug
+          path: |
+            desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/**
+            desktop/src-tauri/target/x86_64-pc-windows-msvc/release/*.exe
+          if-no-files-found: ignore
+          retention-days: 7
+
+      # ------------------------------------------------------------
+      # 12. Prepare Release assets
+      # ------------------------------------------------------------
+      - name: Prepare release assets
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.create_release == true
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release-assets | Out-Null
+
+          $bundleDir = "desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle"
+
+          Get-ChildItem `
+            -Path $bundleDir `
+            -Recurse `
+            -File `
+            | Where-Object {
+                $_.Extension -in ".exe", ".msi"
+              } `
+            | Copy-Item -Destination release-assets
+
+          Copy-Item `
+            "$bundleDir/SHA256SUMS.txt" `
+            "release-assets/SHA256SUMS.txt"
+
+          Write-Host "Release assets:"
+          Get-ChildItem release-assets
+
+      # ------------------------------------------------------------
+      # 13. Create GitHub Release
+      # ------------------------------------------------------------
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.create_release == true
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('windows-build-{0}', github.run_number) }}
+          name: CSSwitch ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('Windows Build #{0}', github.run_number) }}
+          draft: false
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+          generate_release_notes: true
+          files: |
+            release-assets/*.exe
+            release-assets/*.msi
+            release-assets/SHA256SUMS.txt
+```
