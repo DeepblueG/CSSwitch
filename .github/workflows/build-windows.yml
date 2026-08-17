@@ -35,6 +35,12 @@ jobs:
           cargo --version
           npx tauri --version
 
+      - name: Check Windows target
+        working-directory: desktop
+        shell: pwsh
+        run: |
+          cargo check --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
+    
       - name: Build CSSwitch
         working-directory: desktop
         run: npx tauri build
